@@ -159,13 +159,33 @@ backup API rather than `cp` — a `cp` of a database in WAL mode that is being
 written to copies a torn file. So the run is a one-shot container built on a
 digest-pinned Alpine image that does have `sqlite3`, with the live volume
 mounted read-only at `/data` and the NFS volume at `/backups`. It backs up,
-runs `PRAGMA integrity_check` on what it wrote, copies `/data/attachments` if
-that directory exists, and prunes copies older than fourteen days. Anything
-that goes wrong exits non-zero, and the unit fails.
+turns the copy back to rollback journalling so it is one self-contained file,
+runs `PRAGMA integrity_check` on it, copies `/data/attachments` if that
+directory exists, and prunes copies older than fourteen days. Anything that
+goes wrong exits non-zero, and the unit fails.
 
-The attachment copy is additive: nothing is deleted from `/backups/attachments`
-when it disappears from the live tree, because a database copy from ten days
-ago still points at attachments deleted since.
+Reading a WAL database from a read-only mount is the fiddly part, and it is
+worth knowing which case you are in before believing a failure:
+
+- **`-wal` and `-shm` both on the volume** — the server is running, or was
+  killed. SQLite builds the wal-index in heap memory from the `-shm` and reads
+  through the WAL. This is the normal nightly case, and it works.
+- **Neither on the volume** — the database was closed cleanly, which is exactly
+  what `systemctl stop saneha.service` leaves behind. The header still says WAL,
+  so an ordinary open tries to create the `-wal` and fails with `unable to open
+  database file`. The script opens `file:/data/saneha.db?immutable=1` in this
+  case instead, and throws the copy away if a `-wal` appeared while it worked —
+  `immutable=1` against a database that does have a WAL reads the file and
+  ignores the WAL, so it would come back silently stale.
+- **One of the two, not both** — nothing read-only can do anything with that.
+  It fails, correctly. Starting `saneha.service` resolves the WAL and the next
+  run succeeds.
+
+The attachment copy is additive, and exempt from the fourteen-day retention:
+nothing is deleted from `/backups/attachments` when it disappears from the live
+tree, because a database copy from ten days ago still points at attachments
+deleted since. The restore below does not put attachments back either — copy
+them by hand if you need them.
 
 On satyanas the copies live in their own dataset, `pool/container-volumes/saneha`,
 exported over NFS to `192.168.16.169` only, `maproot=root` — the same shape as
@@ -203,6 +223,11 @@ ssh core@192.168.16.169 'systemctl status saneha-backup.service --no-pager'
 ssh core@192.168.16.169 'sudo journalctl -u saneha-backup.service -n 20 --no-pager'
 ```
 
+Worth doing weekly: nothing on quadhost forwards a failure anywhere, so a unit
+that has been failing since Tuesday looks exactly like one that has not run yet
+until someone looks. Making the failure arrive on its own is
+[issue #23](https://github.com/surdy/saneha/issues/23).
+
 A good run says `wrote /backups/saneha-<date>.db, <n> bytes, integrity_check ok`
 and then lists what is on satyanas. A bad one leaves the unit failed, so it also
 shows up in `systemctl --failed` — which is the point of the checks in the
@@ -234,7 +259,19 @@ sudo podman run --rm --network none --user 0:0 --entrypoint /bin/sh \
 # 2. Stop the server. It must not be holding the file you are replacing.
 sudo systemctl stop saneha.service
 
-# 3. Put the chosen copy back. The -wal and -shm belong to the database being
+# 3. Keep what is there now. Restoring the wrong date is a normal mistake, and
+#    without this the live database is gone before you notice you made it.
+sudo podman run --rm --network none --user 0:0 --entrypoint /bin/sh \
+  -v systemd-saneha-backups:/backups \
+  -v systemd-saneha-data:/data \
+  "$IMG" -c '
+    set -eux
+    keep=/backups/saneha-pre-restore-$(date -u +%FT%H%M)
+    cp /data/saneha.db "$keep.db"
+    [ -e /data/saneha.db-wal ] && cp /data/saneha.db-wal "$keep.db-wal" || true
+    ls -la /backups'
+
+# 4. Put the chosen copy back. The -wal and -shm belong to the database being
 #    replaced; left behind, SQLite would replay them over the copy.
 sudo podman run --rm --network none --user 0:0 --entrypoint /bin/sh \
   -v systemd-saneha-backups:/backups \
@@ -245,18 +282,19 @@ sudo podman run --rm --network none --user 0:0 --entrypoint /bin/sh \
     rm -f /data/saneha.db-wal /data/saneha.db-shm
     chown 10001:10001 /data/saneha.db'
 
-# 4. Start it and look.
+# 5. Start it and look.
 sudo systemctl start saneha.service
 curl https://saneha.clusterfault.com/channels
 ```
 
-Files written on the volume from inside a container come out labelled
-`container_file_t`, so nothing needs `restorecon` afterwards.
+The `saneha-pre-restore-*` copies are named differently from the nightly ones on
+purpose: the prune only matches `saneha-YYYY-MM-DD.db`, so nothing ages them out
+from under you. Delete them by hand once the restore has proved itself.
 
-One thing that will bite: the copies are in WAL mode, like the database they
-came from, and SQLite cannot open a WAL database on a read-only mount, because
-it wants to create the `-shm` file. Inspect a copy on a writable mount — drop
-the `:ro` — or it fails with `attempt to write a readonly database`.
+Files written on the volume from inside a container come out labelled
+`container_file_t`, so nothing needs `restorecon` afterwards. The copy is in
+rollback mode, so it is one file and reads fine anywhere, including from a `:ro`
+mount; the server puts it back into WAL when it opens it.
 
 ### The drill
 
@@ -314,10 +352,11 @@ inherits it.
 - **`podman pull` denied on quadhost** — the GHCR package went private. See
   step 1.
 - **`saneha-backup.service` failed** — read
-  `journalctl -u saneha-backup.service`. `unable to open database file` with the
-  server down means an unclean stop left a `-wal` behind that nothing can
-  replay from a read-only mount; starting `saneha.service` recovers it and the
-  next run succeeds. A mount error instead means satyanas or the export is
+  `journalctl -u saneha-backup.service`. `unable to open database file` means
+  the volume has one of `-wal`/`-shm` but not both, which nothing read-only can
+  read through; starting `saneha.service` resolves the WAL and the next run
+  succeeds. (A cleanly stopped server, which leaves neither file, is handled —
+  see the WAL cases above.) A mount error instead means satyanas or the export is
   unreachable — check the share is still there with
   `ssh admin@satyanas 'midclt call sharing.nfs.query'`, and that it still lists
   `192.168.16.169` as a permitted host.

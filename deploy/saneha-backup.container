@@ -56,7 +56,10 @@ DropCapability=all
 # cp -a of the attachment tree sets owner 10001 on the copies, and root without
 # CAP_CHOWN cannot chown even a file it owns.
 AddCapability=chown
-LogDriver=journald
+# passthrough, not journald: this is a oneshot whose stdout systemd is already
+# capturing, and journald here would write every line of the script's output to
+# the journal a second time.
+LogDriver=passthrough
 
 [Service]
 Type=oneshot
