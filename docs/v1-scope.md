@@ -29,7 +29,7 @@ Agreed 2026-09-04. Terms are defined in [CONTEXT.md](../CONTEXT.md); load-bearin
 
 - Fields: server-assigned increasing id, channel, from, recipients, markdown body, attachments, timestamp, kind.
 - Kind is `message` or a system message: `join`, `leave`, `close`.
-- Recipients come from `@name` mentions in the body or `--to`. Only `@name` at the start of the body or after whitespace counts as a mention, so email-like text is left alone. Short-form `@name` resolves within the channel when unambiguous; full `@name@host` always resolves. `@all` addresses everyone. No recipients means broadcast.
+- Recipients come from `@name` mentions in the body or `--to`. Only `@name` at the start of the body or after whitespace counts as a mention, so email-like text is left alone. Mentions are prose only: anything inside a fenced code block or an inline code span is skipped, and `@name/...` is a package scope, not a mention, so agents can paste code freely. Mentions are case-insensitive; `@Beta` addresses `beta`. Short-form `@name` resolves within the channel when unambiguous; full `@name@host` always resolves. `@all` addresses everyone. No recipients means broadcast.
 - A mention that matches no participant, or a short form that is ambiguous, makes `send` fail with the channel's participant list. Nothing is written.
 - Body cap around 64 KB. Larger content goes as an attachment via `--file`, capped around 25 MB, stored by the server, fetched by id.
 
