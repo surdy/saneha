@@ -3,7 +3,7 @@
 saneha runs on quadhost as a Podman Quadlet, fronted by Caddy at
 `saneha.clusterfault.com`. Everything the deploy needs lives in this repo: the
 [Containerfile](../Containerfile), the workflow that publishes the image, and
-the unit in [`deploy/`](../deploy).
+the units in [`deploy/`](../deploy).
 
 | | |
 |---|---|
@@ -14,6 +14,8 @@ the unit in [`deploy/`](../deploy).
 | Port | container `7343`, published on `127.0.0.1:7343` |
 | Database | `/data/saneha.db` on the `systemd-saneha-data` volume |
 | Name | `saneha.clusterfault.com`, LAN `192.168.16.169`, tailnet `100.81.17.63` |
+| Backup | `saneha-backup.timer` nightly at 03:30 UTC, to satyanas |
+| Copies | `satyanas:/mnt/pool/container-volumes/saneha/backups`, 14 days |
 
 There is no authentication (ADR-0003), so the server is published on loopback
 only and Caddy is the one thing that reaches it. The name must never resolve to
@@ -128,17 +130,167 @@ saneha list
 
 ## Durability
 
-Read this before assuming a transcript is safe.
-
 `/data/saneha.db` sits on the `systemd-saneha-data` local volume, which is on
 `/dev/sda4` — quadhost's single root disk. It is deliberately not on NFS from
 satyanas, the way every other stateful service on the host is, because SQLite's
-locking is not safe over NFS. **Nothing compensates for that yet: there is no
-backup.** v1 has no retention or expiry either, so this file is the only copy of
-every transcript, and a disk failure or an FCOS rebuild loses all of it.
+locking is not safe over NFS. v1 has no retention or expiry either, so the live
+file is the only *live* copy of every transcript.
 
-A nightly `sqlite3 .backup` to satyanas, and the restore step to go with it, is
-[issue #14](https://github.com/surdy/saneha/issues/14).
+What compensates is the nightly backup below: `saneha-backup.timer` fires at
+03:30 UTC, takes a `sqlite3 .backup` of the running database, verifies it, and
+leaves it on satyanas, where fourteen dated copies are kept. So a disk failure
+or an FCOS rebuild costs at most a day. Two things it is not: it is not
+continuous — anything written since the last run is gone — and both copies are
+in the same house.
+
+## Backup and restore
+
+| | |
+|---|---|
+| Timer | `/etc/systemd/system/saneha-backup.timer`, `03:30` UTC + up to 10m |
+| Unit | `/etc/containers/systemd/saneha/saneha-backup.container` |
+| Script | `/etc/containers/systemd/saneha/saneha-backup.sh` |
+| Volume unit | `/etc/containers/systemd/saneha/saneha-backups.volume` |
+| Copies | `satyanas:/mnt/pool/container-volumes/saneha/backups/saneha-YYYY-MM-DD.db` |
+| Retention | 14 days, pruned by the same run that writes |
+
+quadhost has no `sqlite3`, and the copy must be taken with SQLite's online
+backup API rather than `cp` — a `cp` of a database in WAL mode that is being
+written to copies a torn file. So the run is a one-shot container built on a
+digest-pinned Alpine image that does have `sqlite3`, with the live volume
+mounted read-only at `/data` and the NFS volume at `/backups`. It backs up,
+runs `PRAGMA integrity_check` on what it wrote, copies `/data/attachments` if
+that directory exists, and prunes copies older than fourteen days. Anything
+that goes wrong exits non-zero, and the unit fails.
+
+The attachment copy is additive: nothing is deleted from `/backups/attachments`
+when it disappears from the live tree, because a database copy from ten days
+ago still points at attachments deleted since.
+
+On satyanas the copies live in their own dataset, `pool/container-volumes/saneha`,
+exported over NFS to `192.168.16.169` only, `maproot=root` — the same shape as
+every other container volume there.
+
+### Install it
+
+Once. The units are in [`deploy/`](../deploy) like the server's.
+
+```sh
+scp deploy/saneha-backup.container deploy/saneha-backups.volume \
+    deploy/saneha-backup.sh deploy/saneha-backup.timer core@192.168.16.169:/tmp/
+ssh core@192.168.16.169 '
+  sudo install -m 0644 -o root -g root \
+    /tmp/saneha-backup.container /tmp/saneha-backups.volume \
+    /etc/containers/systemd/saneha/ &&
+  sudo install -m 0755 -o root -g root /tmp/saneha-backup.sh \
+    /etc/containers/systemd/saneha/ &&
+  sudo install -m 0644 -o root -g root /tmp/saneha-backup.timer \
+    /etc/systemd/system/ &&
+  sudo systemctl daemon-reload &&
+  sudo systemctl enable --now saneha-backup.timer'
+```
+
+The timer is a plain systemd unit and goes under `/etc/systemd/system`, not
+under `/etc/containers/systemd`: Quadlet generates no timers. It fires
+`saneha-backup.service`, which Quadlet does generate, from the `.container`
+file.
+
+### Check the last run
+
+```sh
+ssh core@192.168.16.169 'systemctl list-timers saneha-backup.timer --no-pager'
+ssh core@192.168.16.169 'systemctl status saneha-backup.service --no-pager'
+ssh core@192.168.16.169 'sudo journalctl -u saneha-backup.service -n 20 --no-pager'
+```
+
+A good run says `wrote /backups/saneha-<date>.db, <n> bytes, integrity_check ok`
+and then lists what is on satyanas. A bad one leaves the unit failed, so it also
+shows up in `systemctl --failed` — which is the point of the checks in the
+script. Or ask satyanas directly:
+
+```sh
+ssh admin@satyanas 'ls -la /mnt/pool/container-volumes/saneha/backups/'
+```
+
+To run one now, out of band: `sudo systemctl start saneha-backup.service`.
+
+### Restore
+
+This puts a copy back over the live database. It stops the server; run it
+knowing that.
+
+The copies are on an NFS volume that is only mounted while a container using it
+runs, so there is no stable host path to `cp` from — the copy back happens
+inside a throwaway container that mounts both volumes.
+
+```sh
+ssh core@192.168.16.169
+IMG=$(grep ^Image= /etc/containers/systemd/saneha/saneha-backup.container | cut -d= -f2-)
+
+# 1. What is there.
+sudo podman run --rm --network none --user 0:0 --entrypoint /bin/sh \
+  -v systemd-saneha-backups:/backups "$IMG" -c 'ls -la /backups'
+
+# 2. Stop the server. It must not be holding the file you are replacing.
+sudo systemctl stop saneha.service
+
+# 3. Put the chosen copy back. The -wal and -shm belong to the database being
+#    replaced; left behind, SQLite would replay them over the copy.
+sudo podman run --rm --network none --user 0:0 --entrypoint /bin/sh \
+  -v systemd-saneha-backups:/backups \
+  -v systemd-saneha-data:/data \
+  "$IMG" -c '
+    set -eux
+    cp /backups/saneha-YYYY-MM-DD.db /data/saneha.db
+    rm -f /data/saneha.db-wal /data/saneha.db-shm
+    chown 10001:10001 /data/saneha.db'
+
+# 4. Start it and look.
+sudo systemctl start saneha.service
+curl https://saneha.clusterfault.com/channels
+```
+
+Files written on the volume from inside a container come out labelled
+`container_file_t`, so nothing needs `restorecon` afterwards.
+
+One thing that will bite: the copies are in WAL mode, like the database they
+came from, and SQLite cannot open a WAL database on a read-only mount, because
+it wants to create the `-shm` file. Inspect a copy on a writable mount — drop
+the `:ro` — or it fails with `attempt to write a readonly database`.
+
+### The drill
+
+Run this instead when you want to know the backups are restorable without
+touching the live one. It is the same procedure against a scratch volume, and
+it ends by letting the real server image open what it restored.
+
+```sh
+IMG=docker.io/keinos/sqlite3@sha256:a5610a155a8c9007f2050120406a0abcffab246570d6ac1ffe370f5f23e14dc1
+sudo podman volume create saneha-restore-drill
+
+# The live volume's directory is already owned by 10001; a fresh one is not.
+sudo podman run --rm --network none --user 0:0 --entrypoint /bin/sh \
+  -v systemd-saneha-backups:/backups -v saneha-restore-drill:/data "$IMG" -c '
+    set -eux
+    chown 10001:10001 /data
+    cp /backups/saneha-YYYY-MM-DD.db /data/saneha.db
+    rm -f /data/saneha.db-wal /data/saneha.db-shm
+    chown 10001:10001 /data/saneha.db'
+
+sudo podman run --rm --network none --user 10001:10001 --entrypoint /bin/sh \
+  -v saneha-restore-drill:/data "$IMG" -c '
+    sqlite3 /data/saneha.db "PRAGMA integrity_check;"
+    sqlite3 -header -column /data/saneha.db "select id, name, purpose, state from channels;"'
+
+# The real server, on the restored copy, with no network and no published port.
+sudo podman run -d --rm --name saneha-restore-drill --network none \
+  --user 10001:10001 -v saneha-restore-drill:/data \
+  ghcr.io/surdy/saneha:sha-9ede845 serve
+sudo podman exec saneha-restore-drill curl -s http://127.0.0.1:7343/channels
+
+sudo podman stop -t 5 saneha-restore-drill
+sudo podman volume rm saneha-restore-drill
+```
 
 ## Installing the binary on a laptop
 
@@ -161,6 +313,14 @@ inherits it.
   step 2; do not add records by hand in UniFi or Cloudflare.
 - **`podman pull` denied on quadhost** — the GHCR package went private. See
   step 1.
+- **`saneha-backup.service` failed** — read
+  `journalctl -u saneha-backup.service`. `unable to open database file` with the
+  server down means an unclean stop left a `-wal` behind that nothing can
+  replay from a read-only mount; starting `saneha.service` recovers it and the
+  next run succeeds. A mount error instead means satyanas or the export is
+  unreachable — check the share is still there with
+  `ssh admin@satyanas 'midclt call sharing.nfs.query'`, and that it still lists
+  `192.168.16.169` as a permitted host.
 - **Certificate errors** — Caddy needs `CLOUDFLARE_API_TOKEN`, which lives in
   its own environment file on quadhost. The label in the unit references it as
   `{$$CLOUDFLARE_API_TOKEN}`; the double `$` is intentional, because Podman

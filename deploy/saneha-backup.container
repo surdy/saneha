@@ -1,0 +1,66 @@
+# The nightly backup — Podman Quadlet unit (system-scoped), one shot.
+#
+# Install at: /etc/containers/systemd/saneha/saneha-backup.container
+# alongside:  /etc/containers/systemd/saneha/saneha-backups.volume
+#             /etc/containers/systemd/saneha/saneha-backup.sh
+# and:        /etc/systemd/system/saneha-backup.timer
+#
+# Quadlet has no timer of its own: it generates saneha-backup.service from this
+# file, and the plain systemd timer next to it is what fires it. Nothing else
+# starts it — there is no [Install] section here on purpose.
+#
+# See docs/deploy.md, "Backup and restore".
+
+[Unit]
+Description=Nightly saneha database backup to satyanas
+Wants=network-online.target
+After=network-online.target
+# Ordering only, never Requires: this unit must not be able to start or stop the
+# server it copies from.
+After=saneha.service
+
+[Container]
+# quadhost has no sqlite3 of its own, and the copy has to be taken with SQLite's
+# backup API rather than cp, so it is taken from inside a container that does.
+# Alpine plus sqlite3 3.53, ~13 MB, pinned by digest: this runs unattended every
+# night against the one file that must not be lost, so nothing about it moves
+# under us. Bump the digest deliberately, the way saneha.container's tag is
+# bumped.
+Image=docker.io/keinos/sqlite3@sha256:a5610a155a8c9007f2050120406a0abcffab246570d6ac1ffe370f5f23e14dc1
+ContainerName=saneha-backup
+
+# The live database, read-only: this unit reads it and never writes it. No `z`,
+# unlike saneha.container's mount — the volume already carries the shared
+# container_file_t label, and relabelling the live volume from here is the one
+# way this unit could damage what it is protecting.
+Volume=saneha-data.volume:/data:ro
+Volume=saneha-backups.volume:/backups:rw
+# The script is `deploy/saneha-backup.sh` in the repo, installed next to this
+# unit. `z` labels that one file container_file_t; without it the container,
+# which runs as container_t, cannot read a file labelled etc_t, and quadhost is
+# Enforcing.
+Volume=/etc/containers/systemd/saneha/saneha-backup.sh:/usr/local/bin/saneha-backup:ro,z
+
+Exec=/usr/local/bin/saneha-backup
+
+# root inside the container, so the copies land as root over NFS, which is what
+# maproot=root on the satyanas export maps to. /data being read-only is what
+# keeps that from mattering.
+User=0:0
+# It talks to nothing. The NFS mount is the host's, made by the volume unit.
+Network=none
+ReadOnly=true
+Tmpfs=/tmp:rw,noexec,nosuid,size=32m
+NoNewPrivileges=true
+DropCapability=all
+# cp -a of the attachment tree sets owner 10001 on the copies, and root without
+# CAP_CHOWN cannot chown even a file it owns.
+AddCapability=chown
+LogDriver=journald
+
+[Service]
+Type=oneshot
+# Ten minutes is far more than a copy of this database needs; if it is still
+# going, satyanas is not answering and the run should fail rather than hang
+# until the next one.
+TimeoutStartSec=600
