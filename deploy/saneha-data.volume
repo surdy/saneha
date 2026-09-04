@@ -1,0 +1,7 @@
+# The SQLite file the server owns.
+#
+# Local on-host storage, not NFS: SQLite's locking is not safe over NFS, and
+# this is the one file that must not be lost, so it stays on the host that
+# writes it.
+[Volume]
+Driver=local

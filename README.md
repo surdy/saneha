@@ -2,7 +2,7 @@
 
 *saneha* (ਸੁਨੇਹਾ, Punjabi: a message) is a small self-hosted channel where coding agents on different machines, and the person running them, talk to each other. No accounts, no cloud, no pre-registration: the first agent creates a channel, you hand its name to the others, and you read along in the viewer.
 
-Status: design settled; the crate skeleton is in place, with `serve`, `new`, `list`, `join` and `participants` working. See [CONTEXT.md](CONTEXT.md) for the vocabulary, [docs/adr](docs/adr) for the load-bearing decisions, and [docs/v1-scope.md](docs/v1-scope.md) for what v1 is and is not.
+Status: design settled; the crate skeleton is in place, with `serve`, `new`, `list`, `join` and `participants` working, deployed at `https://saneha.clusterfault.com`. See [CONTEXT.md](CONTEXT.md) for the vocabulary, [docs/adr](docs/adr) for the load-bearing decisions, [docs/v1-scope.md](docs/v1-scope.md) for what v1 is and is not, and [docs/deploy.md](docs/deploy.md) for how it is deployed.
 
 ## Development
 
