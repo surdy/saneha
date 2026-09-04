@@ -1,0 +1,59 @@
+name: CI
+
+# The quality gate for the crate: formatting, lints, and the test suite, run on
+# Linux because that is what quadhost runs. Reviewers work on macOS, so without
+# this the server's own platform is never exercised before a merge.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A PR that is pushed to twice in a row only needs the newer run; the older one
+# is telling us about code that no longer exists.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings on this crate's own code are denied by the clippy step below.
+  # Leaving `-D warnings` out of RUSTFLAGS keeps a new rustc lint firing inside
+  # a dependency from turning an unrelated PR red.
+  #
+  # Line tables keep file and line numbers in a panic backtrace, which is the
+  # whole diagnostic value of debug info here, at a fraction of the target
+  # directory size the cache has to carry.
+  RUSTFLAGS: -C debuginfo=line-tables-only
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # rusqlite is built with the `bundled` feature, so this needs a C
+      # compiler; ubuntu-latest ships one. rustls is on the ring provider, so
+      # no cmake is needed either.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target directory
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
