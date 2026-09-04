@@ -1,12 +1,21 @@
 //! Mentions: the `@name` in a message body that names a recipient.
 //!
-//! A mention counts only at the start of a body or after whitespace, so
-//! `mail me at a@b.com` addresses nobody and `@bob` addresses bob. The token
-//! after the `@` is a name in the alphabet an identity uses — lowercase
-//! letters, digits and hyphens — so it ends at the first character a name
-//! cannot hold, and a trailing `.`, `,` or `:` is punctuation rather than part
-//! of the name. `@name@host` names an identity outright; `@all` names everyone
-//! in the channel.
+//! A mention counts only in prose, and only at the start of a line or after
+//! whitespace, so `mail me at a@b.com` addresses nobody and `@bob` addresses
+//! bob. The token after the `@` is a name in the alphabet an identity uses,
+//! letters, digits and hyphens, so it ends at the first character a name
+//! cannot hold and a trailing `.`, `,` or `:` is punctuation rather than part
+//! of the name. It is folded to lowercase, because an identity is lowercase
+//! and a person typing `@Beta` in the viewer means beta. `@name@host` names an
+//! identity outright; `@all` names everyone in the channel.
+//!
+//! Code is not prose. A message between coding agents carries code, and
+//! `@dataclass` in a Python block or `npm i @types/node` in a shell one must
+//! not fail the send. So a fenced block is skipped from its opening fence to
+//! its matching closing one, an inline code span is skipped whole, and an
+//! `@name` followed immediately by `/` is a package scope rather than a
+//! mention. An unterminated fence makes the rest of the body code, which is
+//! the reading that refuses least.
 //!
 //! Resolution is separate from parsing: parsing says what was written, and
 //! resolution says who that is in one channel. A mention that names nobody, or
@@ -62,15 +71,126 @@ pub enum Unresolved {
 }
 
 /// Every mention in a body, in the order they were written, each one once.
+/// Only the prose is looked at: fenced blocks and inline code spans are what
+/// they say they are and address nobody.
 pub fn mentions(body: &str) -> Vec<Mention> {
     let mut found: Vec<Mention> = Vec::new();
-    // A mention starts the body or follows whitespace; nothing else counts,
-    // which is what leaves an email address alone.
-    let mut after_space = true;
+    let mut fence: Option<Fence> = None;
+
+    for line in body.lines() {
+        match &fence {
+            // Inside a fenced block, the only thing being looked for is the
+            // fence that ends it.
+            Some(open) => {
+                if closes(line, open) {
+                    fence = None;
+                }
+            }
+            None => match opens(line) {
+                Some(open) => fence = Some(open),
+                None => {
+                    for (prose, at_boundary) in prose_runs(line) {
+                        scan(prose, at_boundary, &mut found);
+                    }
+                }
+            },
+        }
+    }
+    found
+}
+
+/// An open code fence: the character it is made of and how long it is, both of
+/// which the fence that closes it has to match.
+struct Fence {
+    marker: char,
+    length: usize,
+}
+
+/// The fence a line opens, if it opens one. The info string after it, as in
+/// ```` ```python ````, is part of the fence line rather than of the block.
+fn opens(line: &str) -> Option<Fence> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let length = trimmed.chars().take_while(|c| *c == marker).count();
+    if length < 3 {
+        return None;
+    }
+    Some(Fence { marker, length })
+}
+
+/// Whether a line closes the fence that is open: the same character, at least
+/// as long, and nothing else on the line.
+fn closes(line: &str, open: &Fence) -> bool {
+    let trimmed = line.trim();
+    let length = trimmed.chars().take_while(|c| *c == open.marker).count();
+    length >= open.length && trimmed.chars().count() == length
+}
+
+/// The runs of prose in one line: what is left once the inline code spans are
+/// taken out, each with whether it begins somewhere a mention may begin. Only
+/// the start of the line is such a place: a run that begins where a code span
+/// ended begins against a backtick, which is not whitespace.
+fn prose_runs(line: &str) -> Vec<(&str, bool)> {
+    let mut runs: Vec<(&str, bool)> = Vec::new();
+    let bytes = line.as_bytes();
+    let mut start = 0;
+    let mut at_boundary = true;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] != b'`' {
+            index += 1;
+            continue;
+        }
+        let ticks = backticks_at(bytes, index);
+        match closing_run(bytes, index + ticks, ticks) {
+            Some(close) => {
+                runs.push((&line[start..index], at_boundary));
+                index = close + ticks;
+                start = index;
+                at_boundary = false;
+            }
+            // Backticks with no partner are text, so the line reads on.
+            None => index += ticks,
+        }
+    }
+    runs.push((&line[start..], at_boundary));
+    runs
+}
+
+/// How many backticks start at `from`.
+fn backticks_at(bytes: &[u8], from: usize) -> usize {
+    bytes[from..].iter().take_while(|b| **b == b'`').count()
+}
+
+/// Where the run of exactly `ticks` backticks that closes a code span starts,
+/// if the line holds one. A longer run does not close it and is stepped over
+/// whole, the way markdown reads ``` `` ` `` ```.
+fn closing_run(bytes: &[u8], from: usize, ticks: usize) -> Option<usize> {
+    let mut index = from;
+    while index < bytes.len() {
+        if bytes[index] != b'`' {
+            index += 1;
+            continue;
+        }
+        let length = backticks_at(bytes, index);
+        if length == ticks {
+            return Some(index);
+        }
+        index += length;
+    }
+    None
+}
+
+/// Every mention in one run of prose, told whether the run begins somewhere a
+/// mention may begin. A mention starts a line or follows whitespace; nothing
+/// else counts, which is what leaves an email address alone.
+fn scan(prose: &str, at_boundary: bool, found: &mut Vec<Mention>) {
+    let mut after_space = at_boundary;
     let mut cursor = 0;
 
-    while cursor < body.len() {
-        let rest = &body[cursor..];
+    while cursor < prose.len() {
+        let rest = &prose[cursor..];
         let c = rest
             .chars()
             .next()
@@ -88,7 +208,6 @@ pub fn mentions(body: &str) -> Vec<Mention> {
         after_space = c.is_whitespace();
         cursor += c.len_utf8();
     }
-    found
 }
 
 /// A `--to` value, which is a mention written without having to say `@`:
@@ -171,29 +290,35 @@ fn at(rest: &str) -> Option<(Mention, usize)> {
     let after = rest.strip_prefix('@')?;
     let name = name_prefix(after)?;
     let mut used = '@'.len_utf8() + name.len();
+    let name = name.to_ascii_lowercase();
 
-    if let Some(after_name) = rest[used..].strip_prefix('@') {
-        if let Some(host) = name_prefix(after_name) {
+    let mention = match rest[used..]
+        .strip_prefix('@')
+        .and_then(|after_name| name_prefix(after_name))
+    {
+        Some(host) => {
             used += '@'.len_utf8() + host.len();
-            return Some((
-                Mention::Full {
-                    name: name.to_string(),
-                    host: host.to_string(),
-                },
-                used,
-            ));
+            Mention::Full {
+                name,
+                host: host.to_ascii_lowercase(),
+            }
         }
+        None if name == EVERYONE => Mention::Everyone,
+        None => Mention::Short(name),
+    };
+
+    // `@types/node` is a package, not a person. A name that runs straight into
+    // a path separator was never addressing anybody.
+    if rest[used..].starts_with('/') {
+        return None;
     }
-    if name == EVERYONE {
-        return Some((Mention::Everyone, used));
-    }
-    Some((Mention::Short(name.to_string()), used))
+    Some((mention, used))
 }
 
-/// The name at the front of `value`: the run of characters a name may hold,
-/// with a trailing hyphen dropped because a name does not end in one. `None`
-/// when there is no name there at all, which is what makes `@` on its own,
-/// `@ Bob` and `@-bob` text rather than mentions.
+/// The name at the front of `value`, as it was written: the run of characters
+/// a name may hold, with a trailing hyphen dropped because a name does not end
+/// in one. `None` when there is no name there at all, which is what makes `@`
+/// on its own, `@ bob` and `@-bob` text rather than mentions.
 fn name_prefix(value: &str) -> Option<&str> {
     let end = value
         .find(|c: char| !is_name_char(c))
@@ -205,10 +330,12 @@ fn name_prefix(value: &str) -> Option<&str> {
     Some(name)
 }
 
-/// The alphabet an identity is written in. Anything else ends the token, which
-/// is what leaves the full stop at the end of a sentence out of the name.
+/// The alphabet a mention is written in. An identity holds only the lowercase
+/// half of it, so a name is folded before it is resolved; what is not in it at
+/// all ends the token, which is what leaves the full stop at the end of a
+/// sentence out of the name.
 fn is_name_char(c: char) -> bool {
-    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+    c.is_ascii_alphanumeric() || c == '-'
 }
 
 #[cfg(test)]
@@ -269,7 +396,62 @@ mod tests {
         assert_eq!(mentions("@bob@quadhost."), vec![full("bob", "quadhost")]);
         // A host that is not there leaves a short form and some text.
         assert_eq!(mentions("@bob@ hi"), vec![short("bob")]);
-        assert_eq!(mentions("@bob@Quadhost"), vec![short("bob")]);
+        assert_eq!(mentions("@bob@-nowhere"), vec![short("bob")]);
+    }
+
+    #[test]
+    fn a_mention_is_folded_to_the_case_an_identity_is_written_in() {
+        // A person typing in the viewer capitalises a name; an identity never
+        // is, so the mention is folded rather than left to address nobody.
+        assert_eq!(mentions("@Beta please look"), vec![short("beta")]);
+        assert_eq!(mentions("@BETA"), vec![short("beta")]);
+        assert_eq!(mentions("@Bob@QuadHost"), vec![full("bob", "quadhost")]);
+        assert_eq!(mentions("@All"), vec![Mention::Everyone]);
+        assert_eq!(given("Beta"), Some(short("beta")));
+    }
+
+    #[test]
+    fn code_is_not_prose() {
+        // A fenced block, whichever fence it is made of.
+        let fenced = "look at this\n\
+                      ```python\n\
+                      @dataclass\n\
+                      class Thing: ...\n\
+                      ```\n\
+                      @bob what do you think";
+        assert_eq!(mentions(fenced), vec![short("bob")]);
+
+        let tilde = "~~~\n@dataclass\n~~~\nplain @bob";
+        assert_eq!(mentions(tilde), vec![short("bob")]);
+
+        // A longer fence is closed only by one at least as long, and the info
+        // string is part of the fence line.
+        let nested = "````md\n```\n@dataclass\n```\n````\n@bob";
+        assert_eq!(mentions(nested), vec![short("bob")]);
+
+        // An inline code span, and prose either side of one.
+        assert_eq!(mentions("run `npm i @types/node` first"), vec![]);
+        assert_eq!(
+            mentions("`@dataclass` is what @bob meant"),
+            vec![short("bob")]
+        );
+        assert_eq!(mentions("``@a `@b` @c`` @bob"), vec![short("bob")]);
+        // Backticks with no partner are text, so the line still reads.
+        assert_eq!(mentions("` @bob"), vec![short("bob")]);
+        // A run that begins where a code span ended begins against a backtick,
+        // which is not whitespace.
+        assert_eq!(mentions("`code`@bob"), vec![]);
+
+        // A package scope is not a person, fenced or not.
+        assert_eq!(mentions("npm i @types/node"), vec![]);
+        assert_eq!(mentions("@bob/thing"), vec![]);
+        assert_eq!(mentions("@bob@quadhost/thing"), vec![]);
+    }
+
+    #[test]
+    fn a_fence_that_is_never_closed_makes_the_rest_of_the_body_code() {
+        let unterminated = "here is the file\n```\n@dataclass\n@bob\nstill code";
+        assert_eq!(mentions(unterminated), vec![]);
     }
 
     #[test]
@@ -282,7 +464,7 @@ mod tests {
 
     #[test]
     fn nothing_that_is_not_a_name_is_a_mention() {
-        for body in ["@", "@ bob", "@-bob", "@Bob", "@ਸੁਨੇਹਾ", "email@", "@@bob"] {
+        for body in ["@", "@ bob", "@-bob", "@_bob", "@ਸੁਨੇਹਾ", "email@", "@@bob"] {
             assert_eq!(mentions(body), vec![], "{body:?}");
         }
     }
@@ -312,7 +494,15 @@ mod tests {
         assert_eq!(given("@bob@quadhost"), Some(full("bob", "quadhost")));
         assert_eq!(given("all"), Some(Mention::Everyone));
         // Anything that is not a whole name names nobody.
-        for value in ["", "@", "bob!", "Bob", "bob@", "bob@quadhost!", "bob bob"] {
+        for value in [
+            "",
+            "@",
+            "bob!",
+            "bob@",
+            "bob@quadhost!",
+            "bob bob",
+            "types/node",
+        ] {
             assert_eq!(given(value), None, "{value:?}");
         }
     }

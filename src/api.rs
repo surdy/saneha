@@ -1,4 +1,6 @@
-//! The wire shapes shared by the server and the subcommands that talk to it.
+//! The wire shapes shared by the server and the subcommands that talk to it,
+//! along with the limits both sides hold to and the two sentences both sides
+//! have to be able to say.
 
 use serde::{Deserialize, Serialize};
 
@@ -250,6 +252,28 @@ pub const DEFAULT_MESSAGE_LIMIT: usize = 500;
 /// The most one fetch will return, however large a limit is asked for. A
 /// caller with a longer backlog than this asks again from the last id it got.
 pub const MAX_MESSAGE_LIMIT: usize = 1000;
+
+/// The longest a message body may be, in bytes. Anything longer is an
+/// attachment rather than a message (v1 scope). Both sides hold callers to it:
+/// the subcommand so nothing large is sent at all, and the server because it
+/// is the one that must be right.
+pub const MAX_BODY: usize = 64 * 1024;
+
+/// Why a body was refused, in the one wording both sides use.
+pub fn body_too_large(size: usize) -> String {
+    format!(
+        "a message body is at most {MAX_BODY} bytes and this one is {size}; \
+         send the long part as an attachment instead"
+    )
+}
+
+/// The one sentence every verb uses when the caller is acting as somebody who
+/// has not joined the channel: the server when it refuses a send, the
+/// subcommand when it looks at the participants and does not find itself. It
+/// lives here so both sides say it the same way.
+pub fn not_a_participant(channel: &str, identity: &str) -> String {
+    format!("{identity} has not joined {channel:?}; join it first: saneha join {channel}")
+}
 
 /// The body of `POST /channels/{name}/participants/{identity}/cursor`.
 /// Advancing is its own request because reading is the only thing that moves a

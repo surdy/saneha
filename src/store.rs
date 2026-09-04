@@ -12,7 +12,8 @@ use std::sync::Mutex;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::api::{
-    Channel, ChannelState, JoinRequest, Joined, Message, Participant, MAX_MESSAGE_LIMIT,
+    Channel, ChannelState, JoinRequest, Joined, Message, MessageKind, Participant, MAX_BODY,
+    MAX_MESSAGE_LIMIT,
 };
 use crate::mention::{self, Candidate, Unresolved};
 use crate::slug;
@@ -68,10 +69,6 @@ pub const MAX_PURPOSE: usize = 256;
 /// The longest a working directory, harness session id, process start time or
 /// Madari pane id the server will record.
 pub const MAX_RECORDED: usize = 1024;
-
-/// The longest a message body may be, in bytes. Anything longer is an
-/// attachment rather than a message (v1 scope).
-pub const MAX_BODY: usize = 64 * 1024;
 
 /// How much of a rejected value is echoed back in the error.
 const MAX_ECHO: usize = 80;
@@ -232,17 +229,13 @@ pub enum StoreError {
     /// The caller is acting as somebody who is not in the channel. Every verb
     /// that acts as a participant says this in the same words, so an agent
     /// reading it always sees the same next step.
-    #[error("{identity} has not joined {channel:?}; join {channel} first: saneha join {channel}")]
+    #[error("{}", crate::api::not_a_participant(channel, identity))]
     NotAParticipant { channel: String, identity: String },
 
     #[error("a message needs a body")]
     EmptyBody,
 
-    #[error(
-        "a message body is at most {max} bytes and this one is {size}; \
-         send the long part as an attachment instead",
-        max = MAX_BODY
-    )]
+    #[error("{}", crate::api::body_too_large(*size))]
     BodyTooLarge { size: usize },
 
     #[error("nobody in {channel:?} is called {written}; its participants are: {participants}")]
@@ -606,13 +599,15 @@ impl Store {
             .map_err(|unresolved| unresolved_recipient(channel, unresolved, &roster))?;
 
         let message_id = next_message_id(&tx, channel_id)?;
-        tx.execute(
+        let created_at: String = tx.query_row(
             &format!(
                 "INSERT INTO messages
                      (channel_id, id, kind, from_participant, about_participant, body, created_at)
-                 VALUES (?1, ?2, 'message', ?3, NULL, ?4, {NOW})"
+                 VALUES (?1, ?2, 'message', ?3, NULL, ?4, {NOW})
+                 RETURNING created_at"
             ),
             rusqlite::params![channel_id, message_id, from_id, body],
+            |row| row.get(0),
         )?;
         for recipient in &recipients {
             tx.execute(
@@ -621,12 +616,24 @@ impl Store {
                 rusqlite::params![channel_id, message_id, recipient],
             )?;
         }
-
-        let written = read_messages(&tx, channel, channel_id, message_id - 1, 1)?
-            .pop()
-            .ok_or_else(|| StoreError::NoSuchChannel(channel.to_string()))?;
         tx.commit()?;
-        Ok(written)
+
+        // Everything the message is made of was in hand before it was written,
+        // so it is described from that rather than read back.
+        Ok(Message {
+            id: message_id,
+            channel: channel.to_string(),
+            kind: MessageKind::Message,
+            from: Some(from.to_string()),
+            about: None,
+            recipients: recipients
+                .iter()
+                .filter_map(|id| roster.iter().find(|candidate| candidate.id == *id))
+                .map(|candidate| candidate.identity.clone())
+                .collect(),
+            body: body.to_string(),
+            created_at,
+        })
     }
 
     /// The transcript of a channel after `after`, oldest first, at most
@@ -739,16 +746,6 @@ fn unresolved_recipient(channel: &str, unresolved: Unresolved, roster: &[Candida
             written,
             candidates: candidates.join(", "),
         },
-    }
-}
-
-/// The one sentence every verb uses when the caller is acting as somebody who
-/// has not joined the channel. The client says it too, so the wording does not
-/// depend on which side noticed.
-pub fn not_a_participant(channel: &str, identity: &str) -> StoreError {
-    StoreError::NotAParticipant {
-        channel: channel.to_string(),
-        identity: identity.to_string(),
     }
 }
 

@@ -141,7 +141,7 @@ pub struct SendArgs {
 
     /// Address the message to a participant, as a name, a full name@host, or
     /// all. Repeatable, and on top of whatever the body mentions
-    #[arg(long = "to", value_name = "IDENTITY")]
+    #[arg(long = "to", value_name = "NAME")]
     pub to: Vec<String>,
 
     /// The name half of this identity, as `saneha join` works it out
@@ -471,18 +471,29 @@ fn send(args: SendArgs) -> Result<()> {
 
 /// The body as it was given: the words joined with single spaces, or standard
 /// input when the body is a single `-`.
+///
+/// The cap is checked here as well as by the server. A body larger than a
+/// message can hold is not worth a round trip, and one large enough for the
+/// server to refuse before it has read the JSON would come back in the
+/// framework's words rather than in saneha's.
 fn message_body(words: &[String]) -> Result<String> {
     use std::io::Read;
 
-    if words.len() == 1 && words[0] == BODY_FROM_STDIN {
+    let body = if words.len() == 1 && words[0] == BODY_FROM_STDIN {
         let mut body = String::new();
         std::io::stdin()
             .read_to_string(&mut body)
             .context("could not read the message body from standard input")?;
         // A heredoc ends in a newline that is not part of what was written.
-        return Ok(body.trim_end().to_string());
+        body.trim_end().to_string()
+    } else {
+        words.join(" ")
+    };
+
+    if body.len() > crate::api::MAX_BODY {
+        return Err(anyhow!(crate::api::body_too_large(body.len())));
     }
-    Ok(words.join(" "))
+    Ok(body)
 }
 
 /// Reads a channel. By default that is the unread messages, and reading them
@@ -491,6 +502,13 @@ fn message_body(words: &[String]) -> Result<String> {
 ///
 /// The fetch and the advance are two requests on purpose: `wait` will reuse
 /// the fetch, and waiting never moves a cursor.
+///
+/// The order is fetch, print, then advance, and the cursor lands on the last
+/// message that actually reached the reader. `saneha read brisk-otter | head`
+/// closes the pipe part-way through, and a cursor moved before that would
+/// leave everything after the first message neither seen nor unread.
+/// Advancing last means the worst a crash, or a reader walking away, can cost
+/// is reading something twice.
 fn read(args: ReadArgs) -> Result<()> {
     let remote = Remote::from_env()?;
     let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
@@ -502,7 +520,7 @@ fn read(args: ReadArgs) -> Result<()> {
     let me = participants
         .iter()
         .find(|participant| participant.identity == identity)
-        .ok_or_else(|| store::not_a_participant(&args.channel, &identity))?;
+        .ok_or_else(|| anyhow!(crate::api::not_a_participant(&args.channel, &identity)))?;
 
     let (after, advance) = match (args.all, args.since) {
         (true, _) => (0, false),
@@ -511,18 +529,25 @@ fn read(args: ReadArgs) -> Result<()> {
     };
 
     let messages = remote.messages_after(&args.channel, after)?;
+    let delivered = if args.json {
+        // An array is all or nothing: half of one is not JSON.
+        let printed = deliver(&format!("{}\n", serde_json::to_string_pretty(&messages)?))?;
+        match printed {
+            Printed::Delivered => messages.last().map(|last| last.id),
+            Printed::ReaderGone => None,
+        }
+    } else {
+        // Nothing unread prints nothing at all, so a skill can run this on a
+        // loop and say something only when there is something to say.
+        transcript(&messages, &participants, deliver)?
+    };
+
     if advance {
-        if let Some(last) = messages.last() {
-            remote.set_read_cursor(&args.channel, &identity, last.id)?;
+        if let Some(last) = delivered {
+            remote.set_read_cursor(&args.channel, &identity, last)?;
         }
     }
-
-    if args.json {
-        return say(&serde_json::to_string_pretty(&messages)?);
-    }
-    // Nothing unread prints nothing at all, so a skill can run this on a loop
-    // and say something only when there is something to say.
-    write_out(&transcript(&messages, &participants))
+    Ok(())
 }
 
 /// An argument or environment variable that is there and says something.
@@ -533,19 +558,37 @@ fn trimmed(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Whether what was printed reached the reader.
+///
+/// It is not the same question as whether the command failed. A closed pipe is
+/// a success for `saneha list | head`, and it must not be one for `saneha read
+/// | head`: nothing that was not delivered may be marked as read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Printed {
+    Delivered,
+    /// The reader walked away part-way through, or before this started.
+    ReaderGone,
+}
+
 /// Everything printed goes through here. A closed pipe (`saneha list | head`)
 /// is the reader walking away, not a failure: Rust does not restore the
 /// default SIGPIPE, so writing to one is an error the process must swallow
 /// rather than a signal that ends it.
 fn write_out(text: &str) -> Result<()> {
+    deliver(text).map(|_| ())
+}
+
+/// The same write, with the answer to whether it arrived. Only `read` needs
+/// that answer, and it needs it before it can say anything has been read.
+fn deliver(text: &str) -> Result<Printed> {
     use std::io::Write;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let written = write!(out, "{text}").and_then(|()| out.flush());
     match written {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Ok(()) => Ok(Printed::Delivered),
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(Printed::ReaderGone),
         Err(err) => Err(anyhow::Error::new(err).context("could not write to standard output")),
     }
 }
@@ -656,42 +699,65 @@ const INDENT: &str = "    ";
 ///
 /// Recipients are shown by name alone when only one participant in the channel
 /// answers to that name, which is the same rule a mention is resolved by, so
-/// what is printed is what can be typed back.
-fn transcript(messages: &[Message], participants: &[Participant]) -> String {
-    let mut out = String::new();
+/// what is printed is what can be typed back. A broadcast is `everyone`, which
+/// nothing can be confused with: `→ all` would read as the `@all` mention,
+/// which is a list of names and not the same message at all.
+/// It prints one message at a time, through `print`, and answers with the id
+/// of the last message that reached the reader, or `None` if none did.
+///
+/// One write per message rather than one for the whole lot, so that when a
+/// reader walks away part-way through, what it did take can be marked as read
+/// and what it did not is still waiting. Nothing that was not delivered is
+/// ever counted, which is what makes `saneha read brisk-otter | head` safe.
+fn transcript(
+    messages: &[Message],
+    participants: &[Participant],
+    mut print: impl FnMut(&str) -> Result<Printed>,
+) -> Result<Option<i64>> {
+    let mut delivered = None;
     for (index, message) in messages.iter().enumerate() {
-        if index > 0 {
-            out.push('\n');
+        // Every message but the first has a blank line before it, and it
+        // belongs to the message it precedes: a message that never arrives
+        // must not leave a stray line behind either.
+        let separator = if index > 0 { "\n" } else { "" };
+        let block = format!("{separator}{}", entry(message, participants));
+        if print(&block)? == Printed::ReaderGone {
+            break;
         }
-        if message.kind.is_system() {
-            out.push_str(&format!(
-                "#{}  {}  ·  {}\n",
-                message.id, message.created_at, message.body
-            ));
-            continue;
-        }
+        delivered = Some(message.id);
+    }
+    Ok(delivered)
+}
 
-        let from = message.from.as_deref().unwrap_or("system");
-        let to = if message.recipients.is_empty() {
-            "all".to_string()
+/// One message: its header line, and its body set in under it.
+fn entry(message: &Message, participants: &[Participant]) -> String {
+    if message.kind.is_system() {
+        return format!(
+            "#{}  {}  ·  {}\n",
+            message.id, message.created_at, message.body
+        );
+    }
+
+    let from = message.from.as_deref().unwrap_or("system");
+    let to = if message.recipients.is_empty() {
+        "everyone".to_string()
+    } else {
+        message
+            .recipients
+            .iter()
+            .map(|identity| short_name(identity, participants))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = format!(
+        "#{}  {}  {}  → {}\n",
+        message.id, message.created_at, from, to
+    );
+    for line in message.body.lines() {
+        if line.is_empty() {
+            out.push('\n');
         } else {
-            message
-                .recipients
-                .iter()
-                .map(|identity| short_name(identity, participants))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        out.push_str(&format!(
-            "#{}  {}  {}  → {}\n",
-            message.id, message.created_at, from, to
-        ));
-        for line in message.body.lines() {
-            if line.is_empty() {
-                out.push('\n');
-            } else {
-                out.push_str(&format!("{INDENT}{line}\n"));
-            }
+            out.push_str(&format!("{INDENT}{line}\n"));
         }
     }
     out
@@ -882,31 +948,53 @@ mod tests {
         }
     }
 
+    /// The three messages a rendering test needs: a system one, one addressed
+    /// to somebody with a body that breaks across lines, and a broadcast.
+    fn conversation() -> Vec<Message> {
+        vec![
+            message(1, None, &[], "alice@macbookpro joined"),
+            message(
+                2,
+                Some("alice@macbookpro"),
+                &["bob@quadhost"],
+                "first\n\nthird",
+            ),
+            message(3, Some("bob@quadhost"), &[], "and back"),
+        ]
+    }
+
+    fn roster() -> Vec<Participant> {
+        vec![
+            participant("alice@macbookpro", None, None),
+            participant("bob@quadhost", None, None),
+        ]
+    }
+
     #[test]
     fn nothing_unread_prints_nothing_at_all() {
-        assert_eq!(transcript(&[], &[]), "");
+        let mut printed = String::new();
+        let delivered = transcript(&[], &[], |block| {
+            printed.push_str(block);
+            Ok(Printed::Delivered)
+        })
+        .expect("print");
+
+        assert_eq!(printed, "");
+        // Nothing arrived because there was nothing to send, so there is
+        // nothing to mark as read either.
+        assert_eq!(delivered, None);
     }
 
     #[test]
     fn a_transcript_sets_each_body_under_its_own_header() {
-        let roster = [
-            participant("alice@macbookpro", None, None),
-            participant("bob@quadhost", None, None),
-        ];
-        let printed = transcript(
-            &[
-                message(1, None, &[], "alice@macbookpro joined"),
-                message(
-                    2,
-                    Some("alice@macbookpro"),
-                    &["bob@quadhost"],
-                    "first\n\nthird",
-                ),
-                message(3, Some("bob@quadhost"), &[], "and back"),
-            ],
-            &roster,
-        );
+        let mut printed = String::new();
+        let delivered = transcript(&conversation(), &roster(), |block| {
+            printed.push_str(block);
+            Ok(Printed::Delivered)
+        })
+        .expect("print");
 
+        assert_eq!(delivered, Some(3));
         assert_eq!(
             printed,
             "#1  2026-09-04T09:00:00Z  ·  alice@macbookpro joined\n\
@@ -916,9 +1004,44 @@ mod tests {
              \n\
              \x20   third\n\
              \n\
-             #3  2026-09-04T09:00:00Z  bob@quadhost  → all\n\
+             #3  2026-09-04T09:00:00Z  bob@quadhost  → everyone\n\
              \x20   and back\n"
         );
+    }
+
+    #[test]
+    fn a_reader_that_walks_away_leaves_the_rest_unread() {
+        // The reader takes the first message and goes, the way `head` does.
+        let mut printed = String::new();
+        let mut taken = 0;
+        let delivered = transcript(&conversation(), &roster(), |block| {
+            taken += 1;
+            if taken > 1 {
+                return Ok(Printed::ReaderGone);
+            }
+            printed.push_str(block);
+            Ok(Printed::Delivered)
+        })
+        .expect("print");
+
+        // Only what arrived counts as read; the rest is still waiting.
+        assert_eq!(delivered, Some(1));
+        assert_eq!(
+            printed,
+            "#1  2026-09-04T09:00:00Z  ·  alice@macbookpro joined\n"
+        );
+
+        // A reader that was never there marks nothing at all.
+        let delivered =
+            transcript(&conversation(), &roster(), |_| Ok(Printed::ReaderGone)).expect("print");
+        assert_eq!(delivered, None);
+
+        // A write that failed for a real reason is a failure, not an empty
+        // read: nothing is marked and the command says so.
+        let broken = transcript(&conversation(), &roster(), |_| {
+            Err(anyhow!("the disk is full"))
+        });
+        assert!(broken.is_err());
     }
 
     #[test]

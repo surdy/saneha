@@ -233,10 +233,10 @@ fn a_body_over_the_cap_is_refused() {
     channel(&remote, "brisk-otter");
     let alice = join(&remote, "brisk-otter", "alice");
 
-    let just_fits = "a".repeat(saneha::store::MAX_BODY);
+    let just_fits = "a".repeat(saneha::api::MAX_BODY);
     send(&remote, "brisk-otter", &alice, &just_fits);
 
-    let too_long = "a".repeat(saneha::store::MAX_BODY + 1);
+    let too_long = "a".repeat(saneha::api::MAX_BODY + 1);
     let err = send_to(&remote, "brisk-otter", &alice, &too_long, &[]).expect_err("too long");
     let message = format!("{err:#}");
     assert!(message.contains("65536 bytes"), "{message}");
@@ -292,7 +292,10 @@ fn only_a_participant_can_send() {
     let err = send_to(&remote, "brisk-otter", "ghost@nowhere", "hello", &[])
         .expect_err("a stranger cannot send");
     let message = format!("{err:#}");
-    assert!(message.contains("join brisk-otter first"), "{message}");
+    assert!(
+        message.contains("join it first: saneha join brisk-otter"),
+        "{message}"
+    );
     assert_eq!(message.lines().count(), 1, "{message}");
 }
 
@@ -530,7 +533,7 @@ fn the_binary_sends_and_reads() {
         "saneha read",
         &server.run(&["read", "brisk-otter", "--as", "bob"]),
     );
-    assert!(read.contains("→ all"), "{read}");
+    assert!(read.contains("→ everyone"), "{read}");
 
     let json = stdout_of(
         "saneha read --json",
@@ -608,6 +611,165 @@ fn a_body_can_come_from_standard_input() {
 }
 
 #[test]
+fn a_read_that_never_reached_the_reader_marks_nothing_as_read() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+    let bob = join(&remote, "brisk-otter", "bob");
+
+    // More than a pipe buffer holds, so the write is still going when the
+    // reader goes away and cannot have finished before it did.
+    let line = "s".repeat(400);
+    for index in 0..300 {
+        send(&remote, "brisk-otter", &alice, &format!("{index} {line}"));
+    }
+
+    let mut child = server
+        .command(&["read", "brisk-otter", "--as", "bob"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run the saneha binary");
+    // Close the read end straight away, the way `saneha read ch | head -1`
+    // does once head has what it wanted.
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("wait");
+    assert!(
+        output.status.success(),
+        "a reader walking away is not a failure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Nothing arrived, so nothing was read: the messages are still waiting.
+    assert_eq!(read_cursor(&remote, "brisk-otter", &bob), 0);
+    let read = stdout_of(
+        "saneha read",
+        &server.run(&["read", "brisk-otter", "--as", "bob"]),
+    );
+    assert!(read.contains("0 "), "the first message is missing");
+    assert!(read.contains("299 "), "the last message is missing");
+    assert_eq!(read_cursor(&remote, "brisk-otter", &bob), 302);
+}
+
+#[test]
+fn code_in_a_body_addresses_nobody() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+    let bob = join(&remote, "brisk-otter", "bob");
+
+    // The kind of message one coding agent sends another: a fenced block whose
+    // code is full of at-signs, and a shell line with a package scope in it.
+    let body = "@bob here is the change\n\
+                ```python\n\
+                @dataclass\n\
+                class Thing: ...\n\
+                ```\n\
+                then run `npm i @types/node`";
+    let message = send(&remote, "brisk-otter", &alice, body);
+    assert_eq!(message.recipients, vec![bob.clone()]);
+
+    // And with nobody named outside the code, it is a broadcast rather than a
+    // refusal.
+    let only_code = "```\n@dataclass\n```";
+    let message = send(&remote, "brisk-otter", &alice, only_code);
+    assert!(message.recipients.is_empty(), "{:?}", message.recipients);
+
+    // A name written the way a person types it still finds them.
+    let message = send(&remote, "brisk-otter", &alice, "@Bob please look");
+    assert_eq!(message.recipients, vec![bob]);
+}
+
+#[test]
+fn a_body_too_large_to_send_is_refused_before_it_is_sent() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    join(&remote, "brisk-otter", "alice");
+
+    // Pointed at nothing: if the subcommand asked the server, this would fail
+    // with "cannot reach" instead.
+    let mut command = server.command(&["send", "brisk-otter", "-", "--as", "alice"]);
+    command.env("SANEHA_URL", "http://127.0.0.1:1");
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run the saneha binary");
+    child
+        .stdin
+        .as_mut()
+        .expect("standard input")
+        .write_all("a".repeat(saneha::api::MAX_BODY + 1).as_bytes())
+        .expect("write the body");
+    drop(child.stdin.take());
+    let output = child.wait_with_output().expect("wait");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("65536 bytes"), "{stderr}");
+    assert!(stderr.contains("attachment"), "{stderr}");
+    assert_eq!(
+        remote.messages("brisk-otter", 0, 10).expect("read").len(),
+        1
+    );
+}
+
+#[test]
+fn a_request_the_server_cannot_read_is_refused_in_sanehas_own_words() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+
+    // A query that is not a message id.
+    let (status, body) = server.raw("GET", "/channels/brisk-otter/messages?after=abc", b"");
+    assert_eq!(status, 400);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("the saneha error shape");
+    let said = error["error"].as_str().expect("an error sentence");
+    assert!(
+        said.starts_with("saneha could not read that request"),
+        "{said}"
+    );
+    assert_eq!(said.lines().count(), 1, "{said}");
+
+    // A body this server will not read at all, which is what stands between a
+    // huge paste and the message cap.
+    let huge = format!(
+        "{{\"from\":\"{alice}\",\"body\":\"{}\"}}",
+        "a".repeat(saneha::api::MAX_BODY * 10)
+    );
+    let (status, body) = server.raw("POST", "/channels/brisk-otter/messages", huge.as_bytes());
+    assert_eq!(status, 413);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("the saneha error shape");
+    let said = error["error"].as_str().expect("an error sentence");
+    assert!(said.contains("65536 bytes"), "{said}");
+    assert!(said.contains("attachment"), "{said}");
+
+    // A body that is not JSON at all, on a route that takes JSON.
+    let (status, body) = server.raw("POST", "/channels", b"not json");
+    assert_eq!(status, 400);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("the saneha error shape");
+    assert!(
+        error["error"]
+            .as_str()
+            .expect("an error sentence")
+            .starts_with("saneha could not read that request"),
+        "{error}"
+    );
+
+    // Nothing was written on the way to any of that.
+    assert_eq!(
+        remote.messages("brisk-otter", 0, 10).expect("read").len(),
+        1
+    );
+}
+
+#[test]
 fn reading_a_channel_this_identity_has_not_joined_says_to_join_it() {
     let server = TestServer::start();
     let remote = server.remote();
@@ -618,7 +780,10 @@ fn reading_a_channel_this_identity_has_not_joined_says_to_join_it() {
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
-    assert!(stderr.contains("join brisk-otter first"), "{stderr}");
+    assert!(
+        stderr.contains("join it first: saneha join brisk-otter"),
+        "{stderr}"
+    );
 
     // And a channel that is not there is not reported as one this identity
     // merely has not joined.

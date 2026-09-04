@@ -75,6 +75,54 @@ impl TestServer {
         rusqlite::Connection::open(self.database_path()).expect("open the database directly")
     }
 
+    /// One raw HTTP/1.1 request, for the shapes no subcommand can make: a
+    /// query the server cannot parse, a body larger than it will read. Answers
+    /// with the status and the response body.
+    ///
+    /// The writing happens on its own thread because that is the whole point
+    /// of the oversize case: the server answers and closes the connection
+    /// without reading the rest, and a single-threaded caller would be stuck
+    /// writing into it.
+    pub fn raw(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let address = self.url.trim_start_matches("http://").to_string();
+        let mut stream = TcpStream::connect(&address).expect("connect to the test server");
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\n\
+             Host: {address}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            body.len()
+        );
+        let payload = [head.as_bytes(), body].concat();
+        let mut writer = stream.try_clone().expect("clone the socket");
+        let writing = thread::spawn(move || {
+            let _ = writer.write_all(&payload);
+            let _ = writer.flush();
+        });
+
+        let mut answer = Vec::new();
+        // A reset while the request is still being written is one of the
+        // answers this asks about, so what arrived is what is read.
+        let _ = stream.read_to_end(&mut answer);
+        let _ = writing.join();
+
+        let answer = String::from_utf8_lossy(&answer).into_owned();
+        let status = answer
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no status line in {answer:?}"));
+        let body = answer
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_string())
+            .unwrap_or_default();
+        (status, body)
+    }
+
     /// The `saneha` binary, pointed at this server, with any harness
     /// environment this test process happens to be running under removed.
     pub fn command(&self, args: &[&str]) -> Command {
