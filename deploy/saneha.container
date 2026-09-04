@@ -29,10 +29,6 @@ NoNewPrivileges=true
 DropCapability=all
 PidsLimit=128
 LogDriver=journald
-# The server stops on SIGINT alone, and it is PID 1 here, where an unhandled
-# SIGTERM is ignored: with SIGTERM every stop stalled ten seconds and ended in
-# SIGKILL. Drop this line once the server handles SIGTERM too (issue #15).
-StopSignal=SIGINT
 
 HealthCmd=/usr/bin/curl --fail --silent --show-error http://127.0.0.1:7343/health
 HealthInterval=30s

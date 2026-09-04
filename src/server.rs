@@ -74,8 +74,51 @@ pub async fn run(listener: TcpListener, store: Arc<Store>) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Waits for the first signal that means stop, and says which one it was.
+///
+/// SIGTERM is what systemd, Podman and every other supervisor send first, and
+/// the server is PID 1 in the container, where a SIGTERM nothing has handled is
+/// ignored outright: without this the stop stalls and ends in SIGKILL.
+#[cfg(unix)]
+async fn shutdown_signal() {
+    let signal = tokio::select! {
+        _ = tokio::signal::ctrl_c() => "SIGINT",
+        signal = terminate() => signal,
+    };
+    say(&format!("saneha is stopping on {signal}"));
+}
+
+/// Waits for SIGTERM. There is nothing to do here about a handler that will not
+/// install, and SIGINT still stops the server, so this waits forever rather
+/// than take the shutdown for itself.
+#[cfg(unix)]
+async fn terminate() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    match signal(SignalKind::terminate()) {
+        Ok(mut terminate) => {
+            terminate.recv().await;
+            "SIGTERM"
+        }
+        Err(_) => std::future::pending().await,
+    }
+}
+
+#[cfg(not(unix))]
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+    say("saneha is stopping on an interrupt");
+}
+
+/// One line on standard output, alongside the lines `saneha serve` prints when
+/// it starts. Standard output that has gone away is not worth failing a
+/// shutdown over.
+fn say(line: &str) {
+    use std::io::Write;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let _ = writeln!(out, "{line}").and_then(|()| out.flush());
 }
 
 async fn root() -> &'static str {
