@@ -4,21 +4,29 @@
 //! `SANEHA_URL`, makes one request, and turns anything that goes wrong into a
 //! single line a person can act on.
 
+use std::io::{Read, Write};
+use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use ureq::http::Response;
-use ureq::{Agent, Body};
+use ureq::{Agent, Body, SendBody};
 
 use crate::api::{
-    ApiError, Channel, ChannelList, CursorUpdate, JoinRequest, Joined, Message, MessageList,
-    NewMessage, Participant, ParticipantList, DEFAULT_MESSAGE_LIMIT,
+    attachment_filename, attachment_is_empty, attachment_too_large, ApiError, Attachment, Channel,
+    ChannelList, CursorUpdate, JoinRequest, Joined, Message, MessageList, NewMessage, Participant,
+    ParticipantList, DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT,
 };
 
 /// The environment variable that points every subcommand at the server.
 pub const URL_ENV: &str = "SANEHA_URL";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What an attachment gets instead. Thirty seconds is plenty for a message and
+/// nothing at all for 25 MiB over a home connection.
+const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 const MAX_ERROR_BODY: usize = 200;
 
 /// What a join came back with: the identity granted, or the server saying the
@@ -221,6 +229,75 @@ impl Remote {
         read_json(response, "participant")
     }
 
+    /// Uploads one file to a channel, and answers with the attachment the
+    /// server minted. Nothing carries it until a send names its id; an upload
+    /// whose send never comes is swept up by the server within the hour.
+    ///
+    /// The file is streamed rather than read into memory, and its size is
+    /// checked here first: 25 MiB is not worth sending to be refused, and the
+    /// cap is the same number on both sides.
+    pub fn upload_attachment(&self, channel: &str, file: &Path) -> Result<Attachment> {
+        let shown = file.display();
+        let size = std::fs::metadata(file)
+            .with_context(|| format!("could not read {shown}"))?
+            .len();
+        let filename = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(attachment_filename)
+            .ok_or_else(|| anyhow!("{shown} has no filename saneha can attach it under"))?;
+        if size == 0 {
+            return Err(anyhow!(attachment_is_empty(&filename)));
+        }
+        if size > MAX_ATTACHMENT {
+            return Err(anyhow!("{shown}: {}", attachment_too_large(size)));
+        }
+
+        let mut reading =
+            std::fs::File::open(file).with_context(|| format!("could not open {shown}"))?;
+        let response = self.check(
+            self.agent
+                .post(self.url(&format!("/channels/{channel}/attachments")))
+                .config()
+                .timeout_global(Some(ATTACHMENT_TIMEOUT))
+                .build()
+                .header(FILENAME_HEADER, &filename)
+                .header("content-type", content_type_of(&filename))
+                // The size is known, so the request is length-delimited and
+                // the server can refuse an oversize one before reading it.
+                .header("content-length", size.to_string())
+                .send(SendBody::from_reader(&mut reading))
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "attachment")
+    }
+
+    /// Fetches one attachment by id. What comes back is the name it was stored
+    /// under and the bytes still to be read, so the caller can decide where
+    /// they go before any of them arrive.
+    pub fn fetch_attachment(&self, channel: &str, id: &str) -> Result<Fetched> {
+        let response = self.check(
+            self.agent
+                .get(self.url(&format!("/channels/{channel}/attachments/{id}")))
+                .config()
+                .timeout_global(Some(ATTACHMENT_TIMEOUT))
+                .build()
+                .call()
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+
+        // The server sanitises what it stores, and this sanitises what it
+        // writes: a name that arrived over the network becomes a path here.
+        let filename = filename_from(response.headers())
+            .and_then(|name| attachment_filename(&name))
+            .unwrap_or_else(|| id.to_string());
+        let body = response.into_body();
+        Ok(Fetched {
+            filename,
+            reader: Box::new(body.into_with_config().limit(MAX_ATTACHMENT).reader()),
+        })
+    }
+
     fn check(&self, response: Response<Body>) -> Result<Response<Body>> {
         if response.status().is_success() {
             return Ok(response);
@@ -242,6 +319,67 @@ impl Remote {
                 describe(other)
             ),
         }
+    }
+}
+
+/// An attachment coming down the wire: the name it was stored under, and the
+/// bytes still to be read.
+pub struct Fetched {
+    /// The stored filename, made safe to use as a path on this machine.
+    pub filename: String,
+    reader: Box<dyn Read>,
+}
+
+impl Fetched {
+    /// Reads the attachment into `out`, and answers with how many bytes went.
+    pub fn write_to(mut self, out: &mut impl Write) -> Result<u64> {
+        let copied = std::io::copy(&mut self.reader, out)
+            .context("the attachment stopped part-way through")?;
+        out.flush().context("could not write the attachment")?;
+        Ok(copied)
+    }
+}
+
+/// The filename out of a `Content-Disposition`, before it is made safe.
+fn filename_from(headers: &ureq::http::HeaderMap) -> Option<String> {
+    let disposition = headers
+        .get("content-disposition")?
+        .to_str()
+        .ok()?
+        .to_string();
+    let (_, rest) = disposition.split_once("filename=")?;
+    let rest = rest.trim();
+    let name = match rest.strip_prefix('"') {
+        Some(quoted) => quoted.split('"').next().unwrap_or_default(),
+        None => rest.split(';').next().unwrap_or_default().trim(),
+    };
+    Some(name.to_string())
+}
+
+/// What a file is, as far as its name says. A short table rather than a
+/// dependency: everything not in it is bytes, which is what an attachment is
+/// to saneha anyway.
+fn content_type_of(filename: &str) -> &'static str {
+    let extension = filename
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "md" | "markdown" => "text/markdown",
+        "txt" | "log" | "diff" | "patch" | "rs" | "toml" | "yaml" | "yml" | "sql" => "text/plain",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "tar" => "application/x-tar",
+        _ => DEFAULT_CONTENT_TYPE,
     }
 }
 

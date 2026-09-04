@@ -45,6 +45,8 @@ pub enum Command {
     Send(SendArgs),
     /// Read the messages of a channel that this participant has not read
     Read(ReadArgs),
+    /// Download an attachment by id
+    Fetch(FetchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -144,6 +146,12 @@ pub struct SendArgs {
     #[arg(long = "to", value_name = "NAME")]
     pub to: Vec<String>,
 
+    /// Attach a file to the message, at most 25 MiB of it. Repeatable. The
+    /// files are uploaded first and the message carries their ids, which
+    /// `saneha fetch` downloads them by
+    #[arg(long = "file", value_name = "PATH")]
+    pub file: Vec<PathBuf>,
+
     /// The name half of this identity, as `saneha join` works it out
     #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
     pub as_name: Option<String>,
@@ -184,6 +192,26 @@ pub struct ReadArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct FetchArgs {
+    /// The channel the attachment was sent to
+    #[arg(value_name = "CHANNEL")]
+    pub channel: String,
+
+    /// The attachment id, as `saneha read` shows it
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// Where to write it [default: the name it was attached under, in the
+    /// working directory]
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+
+    /// Overwrite the file if it is already there
+    #[arg(long)]
+    pub force: bool,
+}
+
 /// Parses the command line and runs it.
 pub fn run() -> Result<()> {
     execute(Cli::parse())
@@ -199,6 +227,7 @@ pub fn execute(cli: Cli) -> Result<()> {
         Command::Participants(args) => participants(args),
         Command::Send(args) => send(args),
         Command::Read(args) => read(args),
+        Command::Fetch(args) => fetch(args),
     }
 }
 
@@ -447,10 +476,21 @@ const BODY_FROM_STDIN: &str = "-";
 /// Writes one message. Who it is addressed to is the server's to work out: it
 /// holds the participants, and it refuses the whole send if a mention names
 /// nobody, so nothing here has to guess.
+///
+/// `--file` is uploaded first, in the order it was given, and the message
+/// carries the ids that came back. Upload before send, because a message
+/// naming an attachment that does not exist yet would be a message the server
+/// has to refuse; the other way round, a send that fails leaves files nothing
+/// carries, and the server sweeps those up within the hour.
 fn send(args: SendArgs) -> Result<()> {
     let remote = Remote::from_env()?;
     let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
     let body = message_body(&args.body)?;
+
+    let mut attachments = Vec::with_capacity(args.file.len());
+    for file in &args.file {
+        attachments.push(remote.upload_attachment(&args.channel, file)?.id);
+    }
 
     let message = remote.send_message(
         &args.channel,
@@ -458,6 +498,7 @@ fn send(args: SendArgs) -> Result<()> {
             from: caller.identity(),
             body,
             to: args.to,
+            attachments,
         },
     )?;
 
@@ -548,6 +589,43 @@ fn read(args: ReadArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Downloads one attachment by id.
+///
+/// It goes to `--out`, or to the name it was attached under, in the working
+/// directory. An existing file is never written over unless `--force` says so:
+/// a handoff document fetched twice must not quietly replace the copy that was
+/// already worked on.
+fn fetch(args: FetchArgs) -> Result<()> {
+    let remote = Remote::from_env()?;
+    let fetched = remote.fetch_attachment(&args.channel, &args.id)?;
+
+    let destination = match args.out {
+        Some(out) => out,
+        None => PathBuf::from(&fetched.filename),
+    };
+    let shown = destination.display().to_string();
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        // `create_new` is the whole of the refusal: asking whether the file is
+        // there and then writing it would be two answers with a gap between
+        // them.
+        .create_new(!args.force)
+        .open(&destination)
+        .map_err(|err| match err.kind() {
+            std::io::ErrorKind::AlreadyExists => anyhow!(
+                "{shown} is already there; write it somewhere else with --out, \
+                 or replace it with --force"
+            ),
+            _ => anyhow::Error::new(err).context(format!("could not write {shown}")),
+        })?;
+
+    let size = fetched.write_to(&mut file)?;
+    say(&format!("{shown}  {}", human_size(size)))
 }
 
 /// An argument or environment variable that is there and says something.
@@ -760,7 +838,34 @@ fn entry(message: &Message, participants: &[Participant]) -> String {
             out.push_str(&format!("{INDENT}{line}\n"));
         }
     }
+    // What the message carries, under what it says, with the id first because
+    // the id is what `saneha fetch` is given.
+    for attachment in &message.attachments {
+        out.push_str(&format!(
+            "{INDENT}{ATTACHMENT_MARK} {}  {}  {}\n",
+            attachment.id,
+            attachment.filename,
+            human_size(attachment.size)
+        ));
+    }
     out
+}
+
+/// What marks an attachment line, so a reader can tell one from a line of the
+/// body without reading it.
+const ATTACHMENT_MARK: &str = "⎘";
+
+/// A size as a person reads it. The exact number is in `--json`; this is for
+/// deciding whether to fetch the thing.
+fn human_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    match bytes {
+        bytes if bytes >= MIB => format!("{:.1} MiB", bytes as f64 / MIB as f64),
+        bytes if bytes >= KIB => format!("{:.1} KiB", bytes as f64 / KIB as f64),
+        1 => "1 byte".to_string(),
+        bytes => format!("{bytes} bytes"),
+    }
 }
 
 /// An identity as short as it can be said without becoming ambiguous: the name
@@ -944,6 +1049,18 @@ mod tests {
             about: None,
             recipients: recipients.iter().map(|to| (*to).to_string()).collect(),
             body: body.to_string(),
+            attachments: Vec::new(),
+            created_at: "2026-09-04T09:00:00Z".to_string(),
+        }
+    }
+
+    /// One attachment, as a message carries it.
+    fn attachment(id: &str, filename: &str, size: u64) -> crate::api::Attachment {
+        crate::api::Attachment {
+            id: id.to_string(),
+            filename: filename.to_string(),
+            size,
+            content_type: "text/markdown".to_string(),
             created_at: "2026-09-04T09:00:00Z".to_string(),
         }
     }
@@ -1007,6 +1124,33 @@ mod tests {
              #3  2026-09-04T09:00:00Z  bob@quadhost  → everyone\n\
              \x20   and back\n"
         );
+    }
+
+    #[test]
+    fn what_a_message_carries_is_listed_under_it() {
+        let mut carrying = message(2, Some("alice@macbookpro"), &[], "the handoff");
+        carrying.attachments = vec![
+            attachment("0123456789abcdef0123456789abcdef", "handoff.md", 2048),
+            attachment("fedcba9876543210fedcba9876543210", "notes.txt", 1),
+        ];
+
+        let printed = entry(&carrying, &roster());
+        assert_eq!(
+            printed,
+            "#2  2026-09-04T09:00:00Z  alice@macbookpro  → everyone\n\
+             \x20   the handoff\n\
+             \x20   ⎘ 0123456789abcdef0123456789abcdef  handoff.md  2.0 KiB\n\
+             \x20   ⎘ fedcba9876543210fedcba9876543210  notes.txt  1 byte\n"
+        );
+    }
+
+    #[test]
+    fn a_size_is_written_for_someone_deciding_whether_to_fetch_it() {
+        assert_eq!(human_size(0), "0 bytes");
+        assert_eq!(human_size(1), "1 byte");
+        assert_eq!(human_size(512), "512 bytes");
+        assert_eq!(human_size(1024), "1.0 KiB");
+        assert_eq!(human_size(25 * 1024 * 1024), "25.0 MiB");
     }
 
     #[test]

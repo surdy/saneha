@@ -6,22 +6,25 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use http_body_util::BodyExt;
 use tokio::net::TcpListener;
 
 use crate::api::{
-    ApiError, Channel, ChannelList, CursorUpdate, JoinRequest, Joined, Message, MessageList,
-    MessageQuery, NewChannel, NewMessage, Participant, ParticipantList, DEFAULT_MESSAGE_LIMIT,
-    MAX_BODY,
+    ApiError, Attachment, Channel, ChannelList, CursorUpdate, JoinRequest, Joined, Message,
+    MessageList, MessageQuery, NewChannel, NewMessage, Participant, ParticipantList,
+    DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT, MAX_BODY,
 };
-use crate::store::{Store, StoreError};
+use crate::store::{PendingAttachment, Store, StoreError, UNBOUND_ATTACHMENT_TTL};
 
 /// Where `saneha serve` listens unless told otherwise.
 pub const DEFAULT_BIND: &str = "127.0.0.1:7343";
@@ -86,6 +89,19 @@ pub fn router(store: Arc<Store>) -> Router {
             "/channels/{channel}/messages",
             post(send_message).get(list_messages),
         )
+        // An upload is the one request whose body is meant to be large, and it
+        // is counted as it is written rather than held in memory, so the limit
+        // every other route wants is turned off here and [`MAX_ATTACHMENT`] is
+        // enforced by the handler. A route layer is applied inside the
+        // router's own, so this is the limit that stands for this route.
+        .route(
+            "/channels/{channel}/attachments",
+            post(upload_attachment).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/channels/{channel}/attachments/{id}",
+            get(download_attachment),
+        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
         .with_state(store)
 }
@@ -137,10 +153,45 @@ where
 
 /// Serves until the listener fails or the process is asked to stop.
 pub async fn run(listener: TcpListener, store: Arc<Store>) -> anyhow::Result<()> {
-    axum::serve(listener, router(store))
+    // Once at the start, because an upload interrupted by the stop that led to
+    // this start left a file nothing will ever bind, and then on the hour.
+    sweep(&store);
+    let sweeper = tokio::spawn(sweep_hourly(Arc::clone(&store)));
+
+    let served = axum::serve(listener, router(store))
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+    sweeper.abort();
+    served?;
     Ok(())
+}
+
+/// How often the unbound attachments are swept up.
+const SWEEP_EVERY: Duration = Duration::from_secs(UNBOUND_ATTACHMENT_TTL as u64);
+
+/// The sweep, for as long as the server is serving.
+async fn sweep_hourly(store: Arc<Store>) {
+    let mut every = tokio::time::interval(SWEEP_EVERY);
+    // The first tick is immediate, and the start has just swept.
+    every.tick().await;
+    loop {
+        every.tick().await;
+        sweep(&store);
+    }
+}
+
+/// Removes the attachments nobody bound to a message and that are old enough
+/// that nobody is going to. A sweep that fails is worth saying out loud and
+/// nothing more: the next one is an hour away, and a server that stopped
+/// serving over a file it could not delete would be worse than the file.
+fn sweep(store: &Store) {
+    match store.sweep_unbound_attachments(UNBOUND_ATTACHMENT_TTL) {
+        Ok(0) => {}
+        Ok(swept) => say(&format!(
+            "removed {swept} attachment(s) no message ever carried"
+        )),
+        Err(err) => say(&format!("could not sweep unbound attachments: {err}")),
+    }
 }
 
 /// Waits for the first signal that means stop, and says which one it was.
@@ -271,9 +322,186 @@ async fn send_message(
     Path(channel): Path<String>,
     ApiJson(body): ApiJson<NewMessage>,
 ) -> Result<(StatusCode, Json<Message>), Failure> {
-    let message = store.send(&channel, &body.from, &body.body, &body.to)?;
+    let message = store.send(
+        &channel,
+        &body.from,
+        &body.body,
+        &body.to,
+        &body.attachments,
+    )?;
     Ok((StatusCode::CREATED, Json(message)))
 }
+
+/// One file, uploaded before the message that will carry it.
+///
+/// The body is the file itself: nothing wraps it, so nothing has to be parsed
+/// back out of it, and it is written to its place as it arrives rather than
+/// held in memory. The name it had travels in `X-Saneha-Filename`, because a
+/// name is not part of a file's bytes.
+///
+/// What comes back is an attachment nothing carries yet. The send that names
+/// its id is what binds it; until then it is a file the sweep will remove.
+async fn upload_attachment(
+    State(store): State<Arc<Store>>,
+    Path(channel): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<(StatusCode, Json<Attachment>), Failure> {
+    let filename = filename_of(&headers)?;
+    let content_type = content_type_of(&headers);
+
+    // A caller that says up front how much it is about to send is told before
+    // it sends any of it.
+    if let Some(size) = declared_length(&headers) {
+        if size > MAX_ATTACHMENT {
+            return Err(StoreError::AttachmentTooLarge { size }.into());
+        }
+    }
+
+    let pending = store.new_attachment(&channel)?;
+    let size = match write_body(&pending, body).await {
+        Ok(size) => size,
+        Err(failure) => {
+            // Nothing was recorded, so what is on disk is a file nothing can
+            // name. It goes now rather than waiting for the sweep.
+            let _ = tokio::fs::remove_file(&pending.path).await;
+            return Err(failure);
+        }
+    };
+    if size == 0 {
+        let _ = tokio::fs::remove_file(&pending.path).await;
+        return Err(StoreError::EmptyAttachment { filename }.into());
+    }
+
+    match store.record_attachment(&pending, &filename, size, &content_type) {
+        Ok(attachment) => Ok((StatusCode::CREATED, Json(attachment))),
+        Err(err) => {
+            // The bytes landed and the row did not, so there is a file no id
+            // will ever name and no sweep will ever find. It goes now.
+            let _ = tokio::fs::remove_file(&pending.path).await;
+            Err(err.into())
+        }
+    }
+}
+
+/// Writes the request body to the file the attachment was given, counting as
+/// it goes, and stopping the moment there is more of it than an attachment may
+/// be. Answers with how many bytes landed.
+async fn write_body(pending: &PendingAttachment, body: Body) -> Result<u64, Failure> {
+    use tokio::io::AsyncWriteExt;
+
+    let file = |doing: &'static str| {
+        let path = pending.path.clone();
+        move |source| {
+            Failure::from(StoreError::AttachmentFile {
+                doing,
+                path: path.clone(),
+                source,
+            })
+        }
+    };
+
+    let mut out = tokio::fs::File::create(&pending.path)
+        .await
+        .map_err(file("create"))?;
+    let mut written: u64 = 0;
+    let mut body = body;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|err| {
+            Failure::unreadable(
+                StatusCode::BAD_REQUEST,
+                format!("the upload stopped part-way through ({err})"),
+            )
+        })?;
+        let Ok(chunk) = frame.into_data() else {
+            // Trailers carry nothing this reads.
+            continue;
+        };
+        written += chunk.len() as u64;
+        if written > MAX_ATTACHMENT {
+            return Err(StoreError::AttachmentTooLarge { size: written }.into());
+        }
+        out.write_all(&chunk).await.map_err(file("write"))?;
+    }
+    // The bytes are the whole of the attachment, so they are on the disk
+    // before anything says the upload succeeded.
+    out.flush().await.map_err(file("write"))?;
+    out.sync_all().await.map_err(file("write"))?;
+    Ok(written)
+}
+
+/// One attachment, as the file it was uploaded as.
+async fn download_attachment(
+    State(store): State<Arc<Store>>,
+    Path((channel, id)): Path<(String, String)>,
+) -> Result<Response, Failure> {
+    let (attachment, path) = store.attachment(&channel, &id)?;
+    // An attachment is capped at 25 MiB, so it is read whole rather than
+    // streamed: a body that streams would need a body type nothing else here
+    // has any use for.
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|source| StoreError::AttachmentFile {
+            doing: "read",
+            path,
+            source,
+        })?;
+
+    // The filename was made safe on the way in, so it holds no quote to end
+    // this value early.
+    let disposition = format!("attachment; filename=\"{}\"", attachment.filename);
+    Ok((
+        [
+            (header::CONTENT_TYPE, attachment.content_type),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// The name an upload gave its file, made safe to store and to write out
+/// again.
+fn filename_of(headers: &HeaderMap) -> Result<String, Failure> {
+    let given = headers
+        .get(FILENAME_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    crate::api::attachment_filename(given).ok_or_else(|| {
+        StoreError::InvalidFilename {
+            value: given.to_string(),
+        }
+        .into()
+    })
+}
+
+/// What the upload says the file is, or [`DEFAULT_CONTENT_TYPE`] when it says
+/// nothing, or says it in something that is not a header value.
+fn content_type_of(headers: &HeaderMap) -> String {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_CONTENT_TYPE
+                && value.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+        })
+        .unwrap_or(DEFAULT_CONTENT_TYPE)
+        .to_string()
+}
+
+/// How much a caller says it is about to send, when it says.
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// The longest content type the server will record. A media type is short;
+/// anything longer is not one.
+const MAX_CONTENT_TYPE: usize = 128;
 
 /// A page of a transcript. This moves nothing, so a caller that wants its read
 /// cursor advanced asks for that separately.
@@ -355,18 +583,25 @@ impl From<StoreError> for Failure {
             | StoreError::EmptyBody
             | StoreError::BodyTooLarge { .. }
             | StoreError::NoSuchRecipient { .. }
+            | StoreError::EmptyAttachment { .. }
+            | StoreError::InvalidFilename { .. }
             | StoreError::AmbiguousRecipient { .. } => StatusCode::BAD_REQUEST,
             StoreError::NoSuchChannel(_)
             | StoreError::NoSuchParticipant { .. }
+            | StoreError::NoSuchAttachment { .. }
             | StoreError::NotAParticipant { .. } => StatusCode::NOT_FOUND,
             StoreError::ChannelExists(_)
             | StoreError::ChannelClosed { .. }
             | StoreError::ParticipantChanged { .. }
+            | StoreError::AttachmentBound { .. }
             | StoreError::SuffixExhausted { .. } => StatusCode::CONFLICT,
+            StoreError::AttachmentTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             StoreError::MintExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
             StoreError::NewerSchema { .. }
             | StoreError::UnknownChannelState(_)
             | StoreError::UnknownMessageKind(_)
+            | StoreError::NoAttachmentStore
+            | StoreError::AttachmentFile { .. }
             | StoreError::Sqlite(_)
             | StoreError::Open { .. }
             | StoreError::Directory { .. } => StatusCode::INTERNAL_SERVER_ERROR,

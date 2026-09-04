@@ -67,6 +67,7 @@ fn send_to(
             from: from.to_string(),
             body: body.to_string(),
             to: to.iter().map(|value| (*value).to_string()).collect(),
+            attachments: Vec::new(),
         },
     )
 }

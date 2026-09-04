@@ -13,6 +13,7 @@ the unit in [`deploy/`](../deploy).
 | Volume unit | `/etc/containers/systemd/saneha/saneha-data.volume` |
 | Port | container `7343`, published on `127.0.0.1:7343` |
 | Database | `/data/saneha.db` on the `systemd-saneha-data` volume |
+| Attachments | `/data/attachments/<channel id>/<attachment id>`, on the same volume |
 | Name | `saneha.clusterfault.com`, LAN `192.168.16.169`, tailnet `100.81.17.63` |
 
 There is no authentication (ADR-0003), so the server is published on loopback
@@ -141,6 +142,12 @@ satyanas, the way every other stateful service on the host is, because SQLite's
 locking is not safe over NFS. **Nothing compensates for that yet: there is no
 backup.** v1 has no retention or expiry either, so this file is the only copy of
 every transcript, and a disk failure or an FCOS rebuild loses all of it.
+
+Attachments are on the same volume and in the same gap. Their bytes live in
+`/data/attachments/<channel id>/<attachment id>`, beside the database rather
+than inside it, so a copy of `saneha.db` alone is not a copy of the channel: a
+backup has to take that directory too, and a restore has to put both back
+together or the transcript will name files that are not there.
 
 A nightly `sqlite3 .backup` to satyanas, and the restore step to go with it, is
 [issue #14](https://github.com/surdy/saneha/issues/14).
