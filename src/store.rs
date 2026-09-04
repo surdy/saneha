@@ -5,12 +5,16 @@
 //! versioned migration list below, run at every start, so an older file is
 //! brought forward without any separate step.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::api::{Channel, ChannelState, JoinRequest, Joined, Participant};
+use crate::api::{
+    Channel, ChannelState, JoinRequest, Joined, Message, Participant, MAX_MESSAGE_LIMIT,
+};
+use crate::mention::{self, Candidate, Unresolved};
 use crate::slug;
 
 /// A kind of name, and how it is described when one is refused. Channel names,
@@ -64,6 +68,10 @@ pub const MAX_PURPOSE: usize = 256;
 /// The longest a working directory, harness session id, process start time or
 /// Madari pane id the server will record.
 pub const MAX_RECORDED: usize = 1024;
+
+/// The longest a message body may be, in bytes. Anything longer is an
+/// attachment rather than a message (v1 scope).
+pub const MAX_BODY: usize = 64 * 1024;
 
 /// How much of a rejected value is echoed back in the error.
 const MAX_ECHO: usize = 80;
@@ -207,14 +215,52 @@ pub enum StoreError {
     #[error("there is no channel named {0:?}; create it with: saneha new {0}")]
     NoSuchChannel(String),
 
-    #[error("the channel {0:?} is closed, so nobody can join it")]
-    ChannelClosed(String),
+    /// One condition, two refusals: a closed channel takes no joins and no
+    /// messages, and each verb says which it is being refused.
+    #[error("the channel {channel:?} is closed, so {refusal}")]
+    ChannelClosed {
+        channel: String,
+        refusal: &'static str,
+    },
 
     #[error("{what} must be one line of at most {max} characters (got {value:?})", max = MAX_RECORDED)]
     InvalidRecorded { what: &'static str, value: String },
 
     #[error("nobody named {identity:?} has joined the channel {channel:?}")]
     NoSuchParticipant { channel: String, identity: String },
+
+    /// The caller is acting as somebody who is not in the channel. Every verb
+    /// that acts as a participant says this in the same words, so an agent
+    /// reading it always sees the same next step.
+    #[error("{identity} has not joined {channel:?}; join {channel} first: saneha join {channel}")]
+    NotAParticipant { channel: String, identity: String },
+
+    #[error("a message needs a body")]
+    EmptyBody,
+
+    #[error(
+        "a message body is at most {max} bytes and this one is {size}; \
+         send the long part as an attachment instead",
+        max = MAX_BODY
+    )]
+    BodyTooLarge { size: usize },
+
+    #[error("nobody in {channel:?} is called {written}; its participants are: {participants}")]
+    NoSuchRecipient {
+        channel: String,
+        written: String,
+        participants: String,
+    },
+
+    #[error("{written} is ambiguous in {channel:?}: {candidates}; name the one you mean in full")]
+    AmbiguousRecipient {
+        channel: String,
+        written: String,
+        candidates: String,
+    },
+
+    #[error("the database holds a message kind this build does not understand: {0:?}")]
+    UnknownMessageKind(String),
 
     #[error(
         "{identity:?} changed hands in {channel:?} while this join was being made; \
@@ -424,7 +470,7 @@ impl Store {
 
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let channel_id = open_channel_id(&tx, channel)?;
+        let channel_id = open_channel_id(&tx, channel, "nobody can join it")?;
 
         let (participant_id, name, resumed, suffixed) = if request.same_host_session_live {
             let (id, name) = insert_suffixed(&tx, channel_id, channel, request)?;
@@ -512,6 +558,302 @@ impl Store {
             )
             .optional()?)
     }
+
+    /// Writes one message from a participant, with everyone it is addressed
+    /// to, in one transaction.
+    ///
+    /// Recipients are the mentions in the body and whatever `to` adds, both
+    /// resolved against the channel's own participants: a short form when
+    /// exactly one participant answers to it, a full `name@host` always,
+    /// `@all` for everyone including the away ones. A mention that resolves to
+    /// nobody, or to more than one, fails the whole send rather than quietly
+    /// addressing fewer participants than it looks like it does; because it
+    /// all happens in one transaction, nothing is written when it does.
+    ///
+    /// The id comes from the channel's own allocator, so a transcript reads 1,
+    /// 2, 3 whatever else the server is doing at the time.
+    pub fn send(
+        &self,
+        channel: &str,
+        from: &str,
+        body: &str,
+        to: &[String],
+    ) -> Result<Message, StoreError> {
+        validate_body(body)?;
+
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let channel_id = open_channel_id(&tx, channel, "nothing more can be sent to it")?;
+        let from_id =
+            participant_id(&tx, channel_id, from)?.ok_or_else(|| StoreError::NotAParticipant {
+                channel: channel.to_string(),
+                identity: from.to_string(),
+            })?;
+
+        let roster = roster(&tx, channel_id)?;
+        let mut wanted = mention::mentions(body);
+        for given in to {
+            let mention = mention::given(given).ok_or_else(|| StoreError::NoSuchRecipient {
+                channel: channel.to_string(),
+                written: format!("{given:?}"),
+                participants: identities(&roster),
+            })?;
+            if !wanted.contains(&mention) {
+                wanted.push(mention);
+            }
+        }
+        let recipients = mention::resolve(&wanted, &roster)
+            .map_err(|unresolved| unresolved_recipient(channel, unresolved, &roster))?;
+
+        let message_id = next_message_id(&tx, channel_id)?;
+        tx.execute(
+            &format!(
+                "INSERT INTO messages
+                     (channel_id, id, kind, from_participant, about_participant, body, created_at)
+                 VALUES (?1, ?2, 'message', ?3, NULL, ?4, {NOW})"
+            ),
+            rusqlite::params![channel_id, message_id, from_id, body],
+        )?;
+        for recipient in &recipients {
+            tx.execute(
+                "INSERT INTO recipients (channel_id, message_id, participant_id)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![channel_id, message_id, recipient],
+            )?;
+        }
+
+        let written = read_messages(&tx, channel, channel_id, message_id - 1, 1)?
+            .pop()
+            .ok_or_else(|| StoreError::NoSuchChannel(channel.to_string()))?;
+        tx.commit()?;
+        Ok(written)
+    }
+
+    /// The transcript of a channel after `after`, oldest first, at most
+    /// `limit` of them and never more than [`MAX_MESSAGE_LIMIT`]. System
+    /// messages are in it: a join is part of the conversation.
+    ///
+    /// Reading here moves nothing. A read cursor is advanced by its own
+    /// request, so `wait` and a history read use this and leave no trace
+    /// (ADR-0004).
+    pub fn messages(
+        &self,
+        channel: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<Message>, StoreError> {
+        let conn = self.conn();
+        let channel_id = channel_id(&conn, channel)?;
+        read_messages(
+            &conn,
+            channel,
+            channel_id,
+            after,
+            limit.min(MAX_MESSAGE_LIMIT),
+        )
+    }
+
+    /// Moves a participant's read cursor to `read_cursor` and returns the
+    /// participant as it now stands.
+    ///
+    /// A cursor never moves backwards: a value below the one recorded leaves
+    /// it where it is, so two readers of one identity cannot make each other
+    /// re-read, and a value past the end of the transcript is held at the last
+    /// message rather than skipping whatever arrives next. A closed channel
+    /// still takes this: a channel that accepts no more messages can still be
+    /// read to the end.
+    pub fn set_read_cursor(
+        &self,
+        channel: &str,
+        identity: &str,
+        read_cursor: i64,
+    ) -> Result<Participant, StoreError> {
+        let conn = self.conn();
+        let channel_id = channel_id(&conn, channel)?;
+        let changed = conn.execute(
+            "UPDATE participants
+                SET read_cursor = MAX(
+                        read_cursor,
+                        MIN(?3, (SELECT last_message_id FROM channels WHERE id = ?1))
+                    )
+              WHERE channel_id = ?1 AND identity = ?2",
+            rusqlite::params![channel_id, identity, read_cursor],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotAParticipant {
+                channel: channel.to_string(),
+                identity: identity.to_string(),
+            });
+        }
+        Ok(conn.query_row(
+            &format!(
+                "SELECT {PARTICIPANT_COLUMNS} FROM participants
+                 WHERE channel_id = ?1 AND identity = ?2"
+            ),
+            rusqlite::params![channel_id, identity],
+            read_participant_row,
+        )?)
+    }
+}
+
+/// Everyone in a channel, as recipient resolution sees them: away participants
+/// included, because a message to one accumulates as unread until it comes
+/// back.
+fn roster(conn: &Connection, channel_id: i64) -> Result<Vec<Candidate>, StoreError> {
+    let mut statement = conn
+        .prepare("SELECT id, identity, name FROM participants WHERE channel_id = ?1 ORDER BY id")?;
+    let rows = statement.query_map([channel_id], |row| {
+        Ok(Candidate {
+            id: row.get(0)?,
+            identity: row.get(1)?,
+            name: row.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The channel's participants as an error lists them.
+fn identities(roster: &[Candidate]) -> String {
+    roster
+        .iter()
+        .map(|candidate| candidate.identity.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A mention nobody answers to, said in the server's own words. An unknown one
+/// carries the participant list, because the useful next step is to look at
+/// who is actually here; an ambiguous one carries the two it could be.
+fn unresolved_recipient(channel: &str, unresolved: Unresolved, roster: &[Candidate]) -> StoreError {
+    match unresolved {
+        Unresolved::Unknown { written } => StoreError::NoSuchRecipient {
+            channel: channel.to_string(),
+            written,
+            participants: identities(roster),
+        },
+        Unresolved::Ambiguous {
+            written,
+            candidates,
+        } => StoreError::AmbiguousRecipient {
+            channel: channel.to_string(),
+            written,
+            candidates: candidates.join(", "),
+        },
+    }
+}
+
+/// The one sentence every verb uses when the caller is acting as somebody who
+/// has not joined the channel. The client says it too, so the wording does not
+/// depend on which side noticed.
+pub fn not_a_participant(channel: &str, identity: &str) -> StoreError {
+    StoreError::NotAParticipant {
+        channel: channel.to_string(),
+        identity: identity.to_string(),
+    }
+}
+
+/// A message body: markdown, not empty, and small enough to be a message
+/// rather than an attachment.
+fn validate_body(body: &str) -> Result<(), StoreError> {
+    if body.trim().is_empty() {
+        return Err(StoreError::EmptyBody);
+    }
+    if body.len() > MAX_BODY {
+        return Err(StoreError::BodyTooLarge { size: body.len() });
+    }
+    Ok(())
+}
+
+/// The columns of a message, in the order `read_message_row` reads. The two
+/// participant columns are joined out to identities here, because an identity
+/// is what a message is written by and addressed to everywhere else.
+const MESSAGE_COLUMNS: &str = "m.id, m.kind, sender.identity, subject.identity, m.body, \
+                               m.created_at";
+
+/// A page of a transcript, with everyone each message is addressed to.
+fn read_messages(
+    conn: &Connection,
+    channel: &str,
+    channel_id: i64,
+    after: i64,
+    limit: usize,
+) -> Result<Vec<Message>, StoreError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {MESSAGE_COLUMNS}
+           FROM messages m
+           LEFT JOIN participants sender ON sender.id = m.from_participant
+           LEFT JOIN participants subject ON subject.id = m.about_participant
+          WHERE m.channel_id = ?1 AND m.id > ?2
+          ORDER BY m.id
+          LIMIT ?3"
+    ))?;
+    let rows = statement.query_map(
+        rusqlite::params![channel_id, after, limit as i64],
+        read_message_row,
+    )?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
+
+    let Some(last) = rows.last().map(|row| row.0) else {
+        return Ok(Vec::new());
+    };
+    let mut recipients = read_recipients(conn, channel_id, after, last)?;
+
+    rows.into_iter()
+        .map(|(id, kind, from, about, body, created_at)| {
+            Ok(Message {
+                id,
+                channel: channel.to_string(),
+                kind: kind
+                    .parse()
+                    .map_err(|_| StoreError::UnknownMessageKind(kind.clone()))?,
+                from,
+                about,
+                recipients: recipients.remove(&id).unwrap_or_default(),
+                body,
+                created_at,
+            })
+        })
+        .collect()
+}
+
+/// Who each message in a range is addressed to, in one query rather than one
+/// per message.
+fn read_recipients(
+    conn: &Connection,
+    channel_id: i64,
+    after: i64,
+    last: i64,
+) -> Result<HashMap<i64, Vec<String>>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT r.message_id, p.identity
+           FROM recipients r
+           JOIN participants p ON p.id = r.participant_id
+          WHERE r.channel_id = ?1 AND r.message_id > ?2 AND r.message_id <= ?3
+          ORDER BY r.message_id, p.id",
+    )?;
+    let rows = statement.query_map(rusqlite::params![channel_id, after, last], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut addressed: HashMap<i64, Vec<String>> = HashMap::new();
+    for row in rows {
+        let (message_id, identity) = row?;
+        addressed.entry(message_id).or_default().push(identity);
+    }
+    Ok(addressed)
+}
+
+type MessageRow = (i64, String, Option<String>, Option<String>, String, String);
+
+fn read_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
 }
 
 /// `name@host`, the one place the two halves are put together.
@@ -556,9 +898,15 @@ fn channel_id(conn: &Connection, channel: &str) -> Result<i64, StoreError> {
     .ok_or_else(|| StoreError::NoSuchChannel(channel.to_string()))
 }
 
-/// The row id of a channel that is still open. Nothing sets `closed` yet;
-/// `saneha close` will, and a join must already refuse a closed channel.
-fn open_channel_id(conn: &Connection, channel: &str) -> Result<i64, StoreError> {
+/// The row id of a channel that is still open, for the verbs that add to a
+/// transcript. `refusal` finishes the sentence a closed channel is refused
+/// with, because joining and sending are refused for the same reason and read
+/// differently.
+fn open_channel_id(
+    conn: &Connection,
+    channel: &str,
+    refusal: &'static str,
+) -> Result<i64, StoreError> {
     let row: Option<(i64, String)> = conn
         .query_row(
             "SELECT id, state FROM channels WHERE name = ?1",
@@ -569,7 +917,10 @@ fn open_channel_id(conn: &Connection, channel: &str) -> Result<i64, StoreError> 
     let (id, state) = row.ok_or_else(|| StoreError::NoSuchChannel(channel.to_string()))?;
     match state.parse::<ChannelState>() {
         Ok(ChannelState::Open) => Ok(id),
-        Ok(ChannelState::Closed) => Err(StoreError::ChannelClosed(channel.to_string())),
+        Ok(ChannelState::Closed) => Err(StoreError::ChannelClosed {
+            channel: channel.to_string(),
+            refusal,
+        }),
         Err(_) => Err(StoreError::UnknownChannelState(state)),
     }
 }
@@ -685,8 +1036,22 @@ fn insert_suffixed(
     })
 }
 
-/// Writes one system message, taking the next id from the channel's own
-/// allocator so ids are monotonic within the transcript.
+/// The next id in a channel's transcript, taken from the channel's own
+/// allocator so ids are monotonic within it. Called inside the transaction
+/// that writes the message it belongs to, so an id is never handed out twice
+/// and never left unused.
+fn next_message_id(conn: &Connection, channel_id: i64) -> Result<i64, StoreError> {
+    Ok(conn.query_row(
+        "UPDATE channels SET last_message_id = last_message_id + 1
+          WHERE id = ?1
+      RETURNING last_message_id",
+        [channel_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Writes one system message: the server's own entry in the transcript, about
+/// a participant rather than by one.
 fn write_system_message(
     conn: &Connection,
     channel_id: i64,
@@ -694,13 +1059,7 @@ fn write_system_message(
     about_participant: i64,
     body: &str,
 ) -> Result<i64, StoreError> {
-    let message_id: i64 = conn.query_row(
-        "UPDATE channels SET last_message_id = last_message_id + 1
-          WHERE id = ?1
-      RETURNING last_message_id",
-        [channel_id],
-        |row| row.get(0),
-    )?;
+    let message_id = next_message_id(conn, channel_id)?;
     conn.execute(
         &format!(
             "INSERT INTO messages

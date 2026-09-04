@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -15,7 +15,8 @@ use axum::{Json, Router};
 use tokio::net::TcpListener;
 
 use crate::api::{
-    ApiError, Channel, ChannelList, JoinRequest, Joined, NewChannel, Participant, ParticipantList,
+    ApiError, Channel, ChannelList, CursorUpdate, JoinRequest, Joined, Message, MessageList,
+    MessageQuery, NewChannel, NewMessage, Participant, ParticipantList, DEFAULT_MESSAGE_LIMIT,
 };
 use crate::store::{Store, StoreError};
 
@@ -62,6 +63,17 @@ pub fn router(store: Arc<Store>) -> Router {
         .route(
             "/channels/{channel}/participants/{identity}",
             get(participant),
+        )
+        // Advancing a read cursor is its own route, and not something a fetch
+        // does on the way past: only `read` moves a cursor, and `wait` and a
+        // history read use the same fetch without moving anything (ADR-0004).
+        .route(
+            "/channels/{channel}/participants/{identity}/cursor",
+            post(set_read_cursor),
+        )
+        .route(
+            "/channels/{channel}/messages",
+            post(send_message).get(list_messages),
         )
         .with_state(store)
 }
@@ -136,6 +148,44 @@ async fn participant(
     Ok(Json(participant))
 }
 
+/// One message from a participant, with everyone it is addressed to worked out
+/// from its mentions and from `to`.
+async fn send_message(
+    State(store): State<Arc<Store>>,
+    Path(channel): Path<String>,
+    Json(body): Json<NewMessage>,
+) -> Result<(StatusCode, Json<Message>), Failure> {
+    let message = store.send(&channel, &body.from, &body.body, &body.to)?;
+    Ok((StatusCode::CREATED, Json(message)))
+}
+
+/// A page of a transcript. This moves nothing, so a caller that wants its read
+/// cursor advanced asks for that separately.
+async fn list_messages(
+    State(store): State<Arc<Store>>,
+    Path(channel): Path<String>,
+    Query(query): Query<MessageQuery>,
+) -> Result<Json<MessageList>, Failure> {
+    let messages = store.messages(
+        &channel,
+        query.after.unwrap_or(0),
+        query.limit.unwrap_or(DEFAULT_MESSAGE_LIMIT),
+    )?;
+    Ok(Json(MessageList { messages }))
+}
+
+/// Moves a read cursor forward. A value below the one recorded is ignored
+/// rather than refused, so a cursor never moves backwards however many readers
+/// share an identity.
+async fn set_read_cursor(
+    State(store): State<Arc<Store>>,
+    Path((channel, identity)): Path<(String, String)>,
+    Json(body): Json<CursorUpdate>,
+) -> Result<Json<Participant>, Failure> {
+    let participant = store.set_read_cursor(&channel, &identity, body.read_cursor)?;
+    Ok(Json(participant))
+}
+
 /// A failed request, rendered as `{"error": "..."}` so the subcommand on the
 /// other end can print the server's own words.
 pub struct Failure {
@@ -163,17 +213,22 @@ impl From<StoreError> for Failure {
         let status = match err {
             StoreError::InvalidSlug { .. }
             | StoreError::InvalidPurpose { .. }
-            | StoreError::InvalidRecorded { .. } => StatusCode::BAD_REQUEST,
-            StoreError::NoSuchChannel(_) | StoreError::NoSuchParticipant { .. } => {
-                StatusCode::NOT_FOUND
-            }
+            | StoreError::InvalidRecorded { .. }
+            | StoreError::EmptyBody
+            | StoreError::BodyTooLarge { .. }
+            | StoreError::NoSuchRecipient { .. }
+            | StoreError::AmbiguousRecipient { .. } => StatusCode::BAD_REQUEST,
+            StoreError::NoSuchChannel(_)
+            | StoreError::NoSuchParticipant { .. }
+            | StoreError::NotAParticipant { .. } => StatusCode::NOT_FOUND,
             StoreError::ChannelExists(_)
-            | StoreError::ChannelClosed(_)
+            | StoreError::ChannelClosed { .. }
             | StoreError::ParticipantChanged { .. }
             | StoreError::SuffixExhausted { .. } => StatusCode::CONFLICT,
             StoreError::MintExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
             StoreError::NewerSchema { .. }
             | StoreError::UnknownChannelState(_)
+            | StoreError::UnknownMessageKind(_)
             | StoreError::Sqlite(_)
             | StoreError::Open { .. }
             | StoreError::Directory { .. } => StatusCode::INTERNAL_SERVER_ERROR,

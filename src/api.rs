@@ -149,6 +149,118 @@ pub struct ParticipantList {
     pub participants: Vec<Participant>,
 }
 
+/// What a message is: one written by a participant, or one the server wrote
+/// into the transcript about a participant or about the channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    /// Written by a participant. Everything else is a system message.
+    Message,
+    Join,
+    Leave,
+    Close,
+}
+
+impl MessageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageKind::Message => "message",
+            MessageKind::Join => "join",
+            MessageKind::Leave => "leave",
+            MessageKind::Close => "close",
+        }
+    }
+
+    /// Whether the server wrote this rather than a participant.
+    pub fn is_system(self) -> bool {
+        !matches!(self, MessageKind::Message)
+    }
+}
+
+impl std::str::FromStr for MessageKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "message" => Ok(MessageKind::Message),
+            "join" => Ok(MessageKind::Join),
+            "leave" => Ok(MessageKind::Leave),
+            "close" => Ok(MessageKind::Close),
+            other => Err(format!("unknown message kind {other:?}")),
+        }
+    }
+}
+
+/// A message as the server describes it. Ids increase within a channel, so a
+/// read cursor is a number in this sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Message {
+    pub id: i64,
+    pub channel: String,
+    pub kind: MessageKind,
+    /// The identity that wrote it. A system message has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The identity a join or leave is about. A message written by a
+    /// participant has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+    /// The identities this is addressed to. Empty is a broadcast.
+    pub recipients: Vec<String>,
+    /// Markdown, as it was written.
+    pub body: String,
+    /// RFC 3339, UTC.
+    pub created_at: String,
+}
+
+/// The body of `POST /channels/{name}/messages`. Recipients come from the
+/// mentions in the body and from `to`, which holds what `--to` was given:
+/// `bob`, `bob@quadhost` or `all`, with or without a leading `@`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewMessage {
+    /// The identity writing it, which must already be a participant.
+    pub from: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub to: Vec<String>,
+}
+
+/// The body of `GET /channels/{name}/messages`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageList {
+    pub messages: Vec<Message>,
+}
+
+/// The query of `GET /channels/{name}/messages`: everything after `after`, at
+/// most `limit` of them. Fetching never moves a read cursor, so `wait` and a
+/// history read use the same route as `read` does.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MessageQuery {
+    /// Messages with an id greater than this. Absent means from the start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<i64>,
+    /// At most this many, capped at [`MAX_MESSAGE_LIMIT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// How many messages one fetch returns when the caller does not say.
+pub const DEFAULT_MESSAGE_LIMIT: usize = 500;
+
+/// The most one fetch will return, however large a limit is asked for. A
+/// caller with a longer backlog than this asks again from the last id it got.
+pub const MAX_MESSAGE_LIMIT: usize = 1000;
+
+/// The body of `POST /channels/{name}/participants/{identity}/cursor`.
+/// Advancing is its own request because reading is the only thing that moves a
+/// cursor (ADR-0004), and a cursor never moves backwards: a value below the
+/// one already recorded is ignored, and one beyond the end of the transcript
+/// is held at the last message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorUpdate {
+    pub read_cursor: i64,
+}
+
 /// Every failing response carries this, so the subcommands can print the
 /// server's own words rather than guessing from a status code.
 #[derive(Debug, Clone, Serialize, Deserialize)]
