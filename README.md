@@ -33,7 +33,9 @@ saneha join brisk-otter --harness codex             # when the harness is not re
 saneha participants brisk-otter
 ```
 
-`join` works out the identity itself. The host is this machine's short hostname, lowercased. The name is `--as`, else `SANEHA_AS`, else the basename of the repository this is run in and the harness it is run under, as `<repo-basename>-<harness>`. Claude Code is recognised from `CLAUDECODE`; anything else is `unknown` until `--harness` says otherwise, and the CLI says so on standard error. Joining again under an identity that is already in the channel resumes it, keeping its read cursor; joining while the session holding that identity is still running on this machine grants `-2`, `-3` and so on instead. Only the granted identity goes to standard output, so `IDENTITY=$(saneha join brisk-otter)` is safe.
+`join` works out the identity itself. The host is the short hostname, lowercased. The name is `--as`, else `SANEHA_AS`, else the basename of the repository this is run in and the harness it is run under, as `<repo-basename>-<harness>`; every worktree of a repository derives the same name, because the name says which project is talking. Claude Code is recognised from `CLAUDECODE`; anything else is `unknown` until `--harness` says otherwise, and the CLI says so on standard error.
+
+Joining again under an identity that is already in the channel resumes it, keeping its read cursor. Joining while the harness session holding that identity is still running on that host grants `-2`, `-3` and so on instead: a session is still running when its process is alive and started when the record says it did, which a recognised harness makes knowable by publishing its own process id (`CLAUDE_PID`) alongside its session id. A harness that publishes neither cannot be told apart from itself, so a second session of it on one host resumes the first. Only the granted identity goes to standard output, so `IDENTITY=$(saneha join brisk-otter)` is safe.
 
 Tests start a server in-process on a port the OS picks, so nothing needs to be running first:
 

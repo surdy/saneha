@@ -17,7 +17,12 @@ use tempfile::TempDir;
 
 /// The environment a harness leaves behind, cleared before every run so a test
 /// sees the machine it describes and not the one it is running on.
-const HARNESS_ENV: &[&str] = &["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "SANEHA_AS"];
+const HARNESS_ENV: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_PID",
+    "SANEHA_AS",
+];
 
 pub struct TestServer {
     pub url: String,
@@ -84,6 +89,25 @@ impl TestServer {
     /// Runs the `saneha` binary against this server.
     pub fn run(&self, args: &[&str]) -> std::process::Output {
         self.command(args).output().expect("run the saneha binary")
+    }
+
+    /// A shell that runs `script`, with the binary under test in `$SANEHA`.
+    ///
+    /// This is how a harness runs a command: a shell is spawned for the call
+    /// and is gone the moment it returns, so the `saneha` process has a parent
+    /// that outlives it by nothing at all. Anything a join records about a
+    /// process has to survive that.
+    pub fn shell(&self, script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .env("SANEHA_URL", &self.url)
+            .env("SANEHA", env!("CARGO_BIN_EXE_saneha"));
+        for key in HARNESS_ENV {
+            command.env_remove(key);
+        }
+        command
     }
 
     /// Runs the `saneha` binary from `directory`, with `env` on top.

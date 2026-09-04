@@ -13,25 +13,56 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::api::{Channel, ChannelState, JoinRequest, Joined, Participant};
 use crate::slug;
 
-/// The longest a channel name may be.
-pub const MAX_CHANNEL_NAME: usize = 64;
+/// A kind of name, and how it is described when one is refused. Channel names,
+/// the two halves of an identity and a harness id are all the same alphabet
+/// with different caps, so they are all one check and one error.
+pub struct Slug {
+    /// The plural, as the error names it: "channel names use ...".
+    what: &'static str,
+    /// The longest one of these may be.
+    pub max: usize,
+    /// What the person reading the error can do about it, if anything.
+    hint: &'static str,
+}
+
+/// A channel name: typed by people and pasted between hosts, so it is
+/// deliberately narrow.
+pub const CHANNEL_NAME: Slug = Slug {
+    what: "channel names",
+    max: 64,
+    hint: "",
+};
+
+/// The name half of an identity, held to a channel name's shape for the same
+/// reason.
+pub const PARTICIPANT_NAME: Slug = Slug {
+    what: "participant names",
+    max: CHANNEL_NAME.max,
+    hint: "; name yourself with --as",
+};
+
+/// The host half of an identity. The client folds a real hostname into this
+/// shape before sending it; the server still checks, because an identity is
+/// split on `@` by everything that reads one.
+pub const HOST: Slug = Slug {
+    what: "hosts",
+    max: 64,
+    hint: "",
+};
+
+/// A harness id, which appears in a derived name, so it has a name's shape.
+pub const HARNESS: Slug = Slug {
+    what: "harness ids",
+    max: 32,
+    hint: "",
+};
 
 /// The longest a purpose may be. A purpose is one line saying what a channel is
 /// for, not a document.
 pub const MAX_PURPOSE: usize = 256;
 
-/// The longest the name half of an identity may be. The same cap as a channel
-/// name, because both are typed by people and pasted between machines.
-pub const MAX_PARTICIPANT_NAME: usize = MAX_CHANNEL_NAME;
-
-/// The longest the host half of an identity may be.
-pub const MAX_HOST: usize = 64;
-
-/// The longest a harness id may be.
-pub const MAX_HARNESS: usize = 32;
-
-/// The longest a working directory, harness session id or Madari pane id the
-/// server will record.
+/// The longest a working directory, harness session id, process start time or
+/// Madari pane id the server will record.
 pub const MAX_RECORDED: usize = 1024;
 
 /// How much of a rejected value is echoed back in the error.
@@ -86,25 +117,31 @@ CREATE UNIQUE INDEX channels_name ON channels (name);
     // this" a lie. A `close` is about the channel and fills neither. The CHECK
     // holds that discipline in the schema rather than in prose.
     //
+    // `pid` alone would not do: pids are reused, so a finished session could be
+    // impersonated by whatever the kernel handed the number to next.
+    // `pid_started_at` is that process's start time as the host reports it, and
+    // a session counts as live only when both still match.
+    //
     // `id` is per-channel and monotonic, allocated from
     // `channels.last_message_id` in the same transaction as the insert, so a
     // transcript reads 1, 2, 3 and a read cursor is a number in that sequence.
     r#"
 CREATE TABLE participants (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel_id  INTEGER NOT NULL REFERENCES channels (id) ON DELETE CASCADE,
-    identity    TEXT    NOT NULL,
-    name        TEXT    NOT NULL,
-    host        TEXT    NOT NULL,
-    harness     TEXT    NOT NULL,
-    session_id  TEXT,
-    pid         INTEGER,
-    cwd         TEXT    NOT NULL,
-    madari_pane TEXT,
-    away        INTEGER NOT NULL DEFAULT 0 CHECK (away IN (0, 1)),
-    read_cursor INTEGER NOT NULL DEFAULT 0,
-    joined_at   TEXT    NOT NULL,
-    left_at     TEXT
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id     INTEGER NOT NULL REFERENCES channels (id) ON DELETE CASCADE,
+    identity       TEXT    NOT NULL,
+    name           TEXT    NOT NULL,
+    host           TEXT    NOT NULL,
+    harness        TEXT    NOT NULL,
+    session_id     TEXT,
+    pid            INTEGER,
+    pid_started_at TEXT,
+    cwd            TEXT    NOT NULL,
+    madari_pane    TEXT,
+    away           INTEGER NOT NULL DEFAULT 0 CHECK (away IN (0, 1)),
+    read_cursor    INTEGER NOT NULL DEFAULT 0,
+    joined_at      TEXT    NOT NULL,
+    left_at        TEXT
 );
 
 CREATE UNIQUE INDEX participants_identity ON participants (channel_id, identity);
@@ -134,17 +171,26 @@ CREATE TABLE recipients (
     FOREIGN KEY (channel_id, message_id)
         REFERENCES messages (channel_id, id) ON DELETE CASCADE
 );
+
+-- The primary key answers "who is this message addressed to"; this answers
+-- "which messages are addressed to me", which is what `wait --mentions` and
+-- the relay ask.
+CREATE INDEX recipients_participant ON recipients (participant_id, channel_id, message_id);
 "#,
 ];
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error(
-        "channel names use lowercase letters, digits and hyphens, start with a letter or digit, \
-         and are at most {max} characters (got {name:?})",
-        max = MAX_CHANNEL_NAME
+        "{what} use lowercase letters, digits and hyphens, start with a letter or digit, \
+         and are at most {max} characters (got {value:?}){hint}"
     )]
-    InvalidChannelName { name: String },
+    InvalidSlug {
+        what: &'static str,
+        max: usize,
+        value: String,
+        hint: &'static str,
+    },
 
     #[error(
         "a purpose is one line of at most {max} characters, with no line breaks (got {purpose:?})",
@@ -164,31 +210,17 @@ pub enum StoreError {
     #[error("the channel {0:?} is closed, so nobody can join it")]
     ChannelClosed(String),
 
-    #[error(
-        "participant names use lowercase letters, digits and hyphens, start with a letter or \
-         digit, and are at most {max} characters (got {name:?}); name yourself with --as",
-        max = MAX_PARTICIPANT_NAME
-    )]
-    InvalidParticipantName { name: String },
-
-    #[error(
-        "a host is lowercase letters, digits and hyphens, at most {max} characters (got {host:?})",
-        max = MAX_HOST
-    )]
-    InvalidHost { host: String },
-
-    #[error(
-        "a harness id is lowercase letters, digits and hyphens, at most {max} characters \
-         (got {harness:?})",
-        max = MAX_HARNESS
-    )]
-    InvalidHarness { harness: String },
-
     #[error("{what} must be one line of at most {max} characters (got {value:?})", max = MAX_RECORDED)]
     InvalidRecorded { what: &'static str, value: String },
 
     #[error("nobody named {identity:?} has joined the channel {channel:?}")]
     NoSuchParticipant { channel: String, identity: String },
+
+    #[error(
+        "{identity:?} changed hands in {channel:?} while this join was being made; \
+         look again and join again"
+    )]
+    ParticipantChanged { channel: String, identity: String },
 
     #[error(
         "every name from {name}-2 to {name}-{max} is taken in {channel:?}; name yourself with --as",
@@ -365,6 +397,13 @@ impl Store {
     /// - a participant, and the caller says its session is live on this host:
     ///   the first free `name-2`, `name-3`, ... is granted as a new one.
     ///
+    /// That verdict was formed against a participant the caller looked at
+    /// before asking, so the request carries what it saw in `held_session_id`.
+    /// If the row says something else by the time the join commits, someone
+    /// else joined in between and the verdict is about a participant that no
+    /// longer exists as described; the join is refused rather than resumed on
+    /// top of a stranger.
+    ///
     /// All of it, including the message id allocated from
     /// `channels.last_message_id`, happens in one transaction, so a join
     /// either lands whole or not at all.
@@ -373,11 +412,14 @@ impl Store {
         validate_host(&request.host)?;
         validate_harness(&request.harness)?;
         validate_recorded("a working directory", &request.cwd)?;
-        if let Some(session_id) = &request.session_id {
-            validate_recorded("a harness session id", session_id)?;
-        }
-        if let Some(pane) = &request.madari_pane {
-            validate_recorded("a Madari pane id", pane)?;
+        for (what, value) in [
+            ("a harness session id", &request.session_id),
+            ("a process start time", &request.pid_started_at),
+            ("a Madari pane id", &request.madari_pane),
+        ] {
+            if let Some(value) = value {
+                validate_recorded(what, value)?;
+            }
         }
 
         let mut conn = self.conn();
@@ -389,12 +431,26 @@ impl Store {
             (id, name, false, true)
         } else {
             let identity = identity_of(&request.name, &request.host);
-            match participant_id(&tx, channel_id, &identity)? {
-                Some(id) => {
+            match held_by(&tx, channel_id, &identity)? {
+                Some((id, held_session_id)) => {
+                    if held_session_id != request.held_session_id {
+                        return Err(StoreError::ParticipantChanged {
+                            channel: channel.to_string(),
+                            identity,
+                        });
+                    }
                     resume_participant(&tx, id, request)?;
                     (id, request.name.clone(), true, false)
                 }
                 None => {
+                    // Nobody held it a moment ago either, or the caller would
+                    // have said so.
+                    if request.held_session_id.is_some() {
+                        return Err(StoreError::ParticipantChanged {
+                            channel: channel.to_string(),
+                            identity,
+                        });
+                    }
                     let id = insert_participant(&tx, channel_id, &request.name, request)?;
                     (id, request.name.clone(), false, false)
                 }
@@ -436,8 +492,8 @@ impl Store {
     }
 
     /// One participant by identity, or `None` if nobody holds it here. The
-    /// join flow asks this first, to see whether the identity it wants is
-    /// held by a session still running on this machine.
+    /// join flow asks this first, to see whether the identity it wants is held
+    /// by a harness session still running on that host.
     pub fn participant(
         &self,
         channel: &str,
@@ -464,8 +520,9 @@ pub fn identity_of(name: &str, host: &str) -> String {
 }
 
 /// The columns of a participant, in the order `read_participant_row` reads.
-const PARTICIPANT_COLUMNS: &str = "identity, name, host, harness, session_id, pid, cwd, \
-                                   madari_pane, away, read_cursor, joined_at, left_at";
+const PARTICIPANT_COLUMNS: &str = "identity, name, host, harness, session_id, pid, \
+                                   pid_started_at, cwd, madari_pane, away, read_cursor, \
+                                   joined_at, left_at";
 
 fn read_participant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Participant> {
     let pid: Option<i64> = row.get(5)?;
@@ -478,12 +535,13 @@ fn read_participant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Participant
         // A pid too large for the platform's own type is a pid nothing can be
         // asked about, so it reads as no pid at all rather than as an error.
         pid: pid.and_then(|pid| u32::try_from(pid).ok()),
-        cwd: row.get(6)?,
-        madari_pane: row.get(7)?,
-        away: row.get::<_, i64>(8)? != 0,
-        read_cursor: row.get(9)?,
-        joined_at: row.get(10)?,
-        left_at: row.get(11)?,
+        pid_started_at: row.get(6)?,
+        cwd: row.get(7)?,
+        madari_pane: row.get(8)?,
+        away: row.get::<_, i64>(9)? != 0,
+        read_cursor: row.get(10)?,
+        joined_at: row.get(11)?,
+        left_at: row.get(12)?,
     })
 }
 
@@ -530,6 +588,23 @@ fn participant_id(
         .optional()?)
 }
 
+/// Who holds an identity right now, and under which harness session. The
+/// session id is what a caller's verdict was formed against, so it is what the
+/// join checks has not moved.
+fn held_by(
+    conn: &Connection,
+    channel_id: i64,
+    identity: &str,
+) -> Result<Option<(i64, Option<String>)>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT id, session_id FROM participants WHERE channel_id = ?1 AND identity = ?2",
+            rusqlite::params![channel_id, identity],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
+
 fn insert_participant(
     conn: &Connection,
     channel_id: i64,
@@ -540,9 +615,9 @@ fn insert_participant(
     Ok(conn.query_row(
         &format!(
             "INSERT INTO participants
-                 (channel_id, identity, name, host, harness, session_id, pid, cwd,
-                  madari_pane, away, read_cursor, joined_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, {NOW})
+                 (channel_id, identity, name, host, harness, session_id, pid, pid_started_at,
+                  cwd, madari_pane, away, read_cursor, joined_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, 0, {NOW})
              RETURNING id"
         ),
         rusqlite::params![
@@ -553,6 +628,7 @@ fn insert_participant(
             request.harness,
             request.session_id,
             request.pid.map(i64::from),
+            request.pid_started_at,
             request.cwd,
             request.madari_pane,
         ],
@@ -566,14 +642,15 @@ fn resume_participant(conn: &Connection, id: i64, request: &JoinRequest) -> Resu
     conn.execute(
         &format!(
             "UPDATE participants
-                SET harness = ?1, session_id = ?2, pid = ?3, cwd = ?4, madari_pane = ?5,
-                    away = 0, left_at = NULL, joined_at = {NOW}
-              WHERE id = ?6"
+                SET harness = ?1, session_id = ?2, pid = ?3, pid_started_at = ?4, cwd = ?5,
+                    madari_pane = ?6, away = 0, left_at = NULL, joined_at = {NOW}
+              WHERE id = ?7"
         ),
         rusqlite::params![
             request.harness,
             request.session_id,
             request.pid.map(i64::from),
+            request.pid_started_at,
             request.cwd,
             request.madari_pane,
             id,
@@ -590,7 +667,7 @@ fn insert_suffixed(
     channel: &str,
     request: &JoinRequest,
 ) -> Result<(i64, String), StoreError> {
-    let room = MAX_PARTICIPANT_NAME - (MAX_SUFFIX.to_string().len() + 1);
+    let room = PARTICIPANT_NAME.max - (MAX_SUFFIX.to_string().len() + 1);
     let base: String = request.name.chars().take(room).collect();
     let base = base.trim_end_matches('-');
 
@@ -643,46 +720,34 @@ fn read_participant(conn: &Connection, id: i64) -> Result<Participant, StoreErro
     )?)
 }
 
-/// Channel names are typed by people and pasted between machines, so they are
-/// deliberately narrow: lowercase letters, digits and hyphens only.
 pub fn validate_channel_name(name: &str) -> Result<(), StoreError> {
-    if is_slug(name, MAX_CHANNEL_NAME) {
-        Ok(())
-    } else {
-        Err(StoreError::InvalidChannelName { name: echo(name) })
-    }
+    validate_slug(name, &CHANNEL_NAME)
 }
 
-/// The name half of an identity is typed and pasted the same way a channel
-/// name is, so it is held to the same shape.
 pub fn validate_participant_name(name: &str) -> Result<(), StoreError> {
-    if is_slug(name, MAX_PARTICIPANT_NAME) {
-        Ok(())
-    } else {
-        Err(StoreError::InvalidParticipantName { name: echo(name) })
-    }
+    validate_slug(name, &PARTICIPANT_NAME)
 }
 
-/// The host half of an identity. The client folds a real hostname into this
-/// shape before sending it; the server still checks, because an identity is
-/// split on `@` by everything that reads one.
 pub fn validate_host(host: &str) -> Result<(), StoreError> {
-    if is_slug(host, MAX_HOST) {
-        Ok(())
-    } else {
-        Err(StoreError::InvalidHost { host: echo(host) })
-    }
+    validate_slug(host, &HOST)
 }
 
-/// A harness id, which appears in a derived name, so it has a name's shape.
 pub fn validate_harness(harness: &str) -> Result<(), StoreError> {
-    if is_slug(harness, MAX_HARNESS) {
-        Ok(())
-    } else {
-        Err(StoreError::InvalidHarness {
-            harness: echo(harness),
-        })
+    validate_slug(harness, &HARNESS)
+}
+
+/// A name of the given kind: lowercase letters, digits and hyphens; no hyphen
+/// at either end; not empty; no longer than the kind's cap.
+pub fn validate_slug(value: &str, kind: &Slug) -> Result<(), StoreError> {
+    if is_slug(value, kind.max) {
+        return Ok(());
     }
+    Err(StoreError::InvalidSlug {
+        what: kind.what,
+        max: kind.max,
+        value: echo(value),
+        hint: kind.hint,
+    })
 }
 
 /// The free-text things a join records about the caller: a working directory,
@@ -700,6 +765,23 @@ fn validate_recorded(what: &'static str, value: &str) -> Result<(), StoreError> 
         });
     }
     Ok(())
+}
+
+/// Folds arbitrary text into the alphabet `is_slug` checks: lowercase letters,
+/// digits and single hyphens, with no hyphen at either end. It lives next to
+/// the check so the alphabet is written down once. A hostname or a directory
+/// name goes through here on its way into an identity; what comes out is
+/// something `is_slug` accepts, though it may still be too long.
+pub fn sanitize(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 /// Lowercase letters, digits and hyphens; no hyphen at either end; not empty;
@@ -816,7 +898,7 @@ mod tests {
             "brisk.otter",
             "brisk/otter",
             "ਸੁਨੇਹਾ",
-            &"a".repeat(MAX_CHANNEL_NAME + 1),
+            &"a".repeat(CHANNEL_NAME.max + 1),
         ] {
             assert!(
                 validate_channel_name(name).is_err(),

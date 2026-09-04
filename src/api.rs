@@ -67,7 +67,7 @@ pub struct Participant {
     pub identity: String,
     /// The name half of the identity.
     pub name: String,
-    /// The host half: the machine's short hostname, lowercased.
+    /// The host half: the short hostname, lowercased.
     pub host: String,
     /// The coding-agent program this participant runs inside, or `unknown`.
     pub harness: String,
@@ -75,10 +75,14 @@ pub struct Participant {
     /// publishes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// The process that started the last join: a coarse handle on whether that
-    /// terminal is still there.
+    /// The process whose life is this participant's presence: the harness
+    /// itself when it publishes its pid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// When that process started, as the host reports it. A pid is reused; a
+    /// pid and a start time together are not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_started_at: Option<String>,
     /// The working directory the last join was made from.
     pub cwd: String,
     /// The Madari pane a future relay would nudge. Recorded, unused in v1.
@@ -106,15 +110,23 @@ pub struct JoinRequest {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_started_at: Option<String>,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub madari_pane: Option<String>,
     /// The caller's answer to the one question the server cannot ask: is the
-    /// harness session already holding `name@host` still running on this
-    /// machine? False resumes that participant, true asks for a suffixed name.
-    /// Only a caller on the same host can tell, so only a caller decides.
+    /// harness session already holding `name@host` still running on that host?
+    /// False resumes that participant, true asks for a suffixed name. Only a
+    /// caller on the same host can tell, so only a caller decides.
     #[serde(default)]
     pub same_host_session_live: bool,
+    /// The harness session id of the participant the caller looked at before
+    /// forming that verdict, and `None` when it found nobody holding the
+    /// identity. If the row says otherwise by the time the join is made, the
+    /// verdict is stale and the join is refused rather than acted on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_session_id: Option<String>,
 }
 
 /// The answer to a join: the identity that was granted, and how.
@@ -142,4 +154,9 @@ pub struct ParticipantList {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiError {
     pub error: String,
+    /// Set when the request failed on something that has since changed and is
+    /// worth looking at again: a join whose view of a participant went stale.
+    /// Nothing else asks a caller to try twice.
+    #[serde(default)]
+    pub retry: bool,
 }

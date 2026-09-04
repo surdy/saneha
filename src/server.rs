@@ -141,6 +141,8 @@ async fn participant(
 pub struct Failure {
     status: StatusCode,
     message: String,
+    /// Whether looking again and asking again could get a different answer.
+    retry: bool,
 }
 
 impl IntoResponse for Failure {
@@ -149,6 +151,7 @@ impl IntoResponse for Failure {
             self.status,
             Json(ApiError {
                 error: self.message,
+                retry: self.retry,
             }),
         )
             .into_response()
@@ -158,17 +161,15 @@ impl IntoResponse for Failure {
 impl From<StoreError> for Failure {
     fn from(err: StoreError) -> Self {
         let status = match err {
-            StoreError::InvalidChannelName { .. }
+            StoreError::InvalidSlug { .. }
             | StoreError::InvalidPurpose { .. }
-            | StoreError::InvalidParticipantName { .. }
-            | StoreError::InvalidHost { .. }
-            | StoreError::InvalidHarness { .. }
             | StoreError::InvalidRecorded { .. } => StatusCode::BAD_REQUEST,
             StoreError::NoSuchChannel(_) | StoreError::NoSuchParticipant { .. } => {
                 StatusCode::NOT_FOUND
             }
             StoreError::ChannelExists(_)
             | StoreError::ChannelClosed(_)
+            | StoreError::ParticipantChanged { .. }
             | StoreError::SuffixExhausted { .. } => StatusCode::CONFLICT,
             StoreError::MintExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
             StoreError::NewerSchema { .. }
@@ -179,6 +180,9 @@ impl From<StoreError> for Failure {
         };
         Failure {
             status,
+            // A participant that changed hands is the one failure a caller can
+            // do something about without a person: look again, ask again.
+            retry: matches!(err, StoreError::ParticipantChanged { .. }),
             message: err.to_string(),
         }
     }

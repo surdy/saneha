@@ -4,11 +4,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::api::{Channel, JoinRequest, Participant, ParticipantList};
-use crate::client::{Remote, URL_ENV};
+use crate::client::{JoinAnswer, Remote, URL_ENV};
 use crate::identity;
 use crate::server;
 use crate::store::{self, Store};
@@ -89,13 +89,20 @@ pub struct JoinArgs {
 
     /// The name half of the identity to claim. Without it the name is derived
     /// from the repository this is run in and the harness it is run under, as
-    /// <repo-basename>-<harness>
+    /// <repo-basename>-<harness>. Every worktree of a repository derives the
+    /// same name, so two live checkouts are told apart by the suffix rather
+    /// than by where they happen to sit
     #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
     pub as_name: Option<String>,
 
-    /// The harness to record, overriding what the environment says. Recognised
-    /// harnesses publish a session id that a later join uses to tell a live
-    /// session from a finished one
+    /// The harness to record, overriding what the environment says
+    ///
+    /// A recognised harness publishes the id of the session in progress and
+    /// its own process id, which is how a later join tells a session that is
+    /// still running from one that has finished. A harness that publishes
+    /// neither cannot be told apart from itself, so a second session of it on
+    /// this host resumes the first rather than being granted a name of its
+    /// own. Only Claude Code is recognised so far.
     #[arg(long, value_name = "ID")]
     pub harness: Option<String>,
 
@@ -188,14 +195,22 @@ fn list(args: ListArgs) -> Result<()> {
     write_out(&channel_table(&channels))
 }
 
+/// How many times a join looks again after finding that the participant it
+/// reasoned about is not the one the server has.
+const JOIN_ATTEMPTS: usize = 2;
+
 /// Joins a channel: work out who this is, ask the server whether that identity
-/// is already taken by something still running here, and join accordingly.
+/// is already held by a session still running here, and join accordingly.
 ///
 /// The liveness question is the client's to answer, and only this client's: the
 /// server cannot reach across the network to ask whether a process on another
-/// machine is still there. So `join` probes first
+/// host is still there. So `join` probes first
 /// (`GET /channels/{channel}/participants/{identity}`) and sends its verdict
 /// with the join. One extra round trip buys a server that never guesses.
+///
+/// The probe and the join are two requests, so the participant can change
+/// hands in between. The request carries what the probe saw, the server
+/// refuses a join whose view has gone stale, and this looks again once.
 fn join(args: JoinArgs) -> Result<()> {
     let remote = Remote::from_env()?;
 
@@ -210,15 +225,15 @@ fn join(args: JoinArgs) -> Result<()> {
             .unwrap_or_else(|| identity::UNKNOWN_HARNESS.to_string()),
     };
 
-    let host = identity::host();
+    let host = identity::host(store::HOST.max);
     store::validate_host(&host)?;
 
     let name = match trimmed(args.as_name.as_deref()) {
         Some(given) => given,
         None => identity::derived_name(
-            &identity::repo_basename(),
+            &identity::project_basename(),
             &harness,
-            store::MAX_PARTICIPANT_NAME,
+            store::PARTICIPANT_NAME.max,
         ),
     };
     store::validate_participant_name(&name)?;
@@ -228,27 +243,41 @@ fn join(args: JoinArgs) -> Result<()> {
         .to_string_lossy()
         .into_owned();
     let session_id = identity::session_id(&harness);
-    let pid = identity::parent_pid();
+    let pid = identity::pid(&harness);
+    let pid_started_at = pid.and_then(identity::process_start);
 
     let wanted = store::identity_of(&name, &host);
-    let existing = remote.participant(&args.channel, &wanted)?;
-    let same_host_session_live = existing
-        .as_ref()
-        .is_some_and(|held| session_is_live(held, session_id.as_deref()));
+    let mut held = None;
+    let mut granted = None;
+    let mut stale = String::new();
 
-    let joined = remote.join(
-        &args.channel,
-        &JoinRequest {
-            name,
-            host,
+    for _ in 0..JOIN_ATTEMPTS {
+        held = remote.participant(&args.channel, &wanted)?;
+        let request = JoinRequest {
+            name: name.clone(),
+            host: host.clone(),
             harness: harness.clone(),
-            session_id,
+            session_id: session_id.clone(),
             pid,
-            cwd,
+            pid_started_at: pid_started_at.clone(),
+            cwd: cwd.clone(),
             madari_pane: None,
-            same_host_session_live,
-        },
-    )?;
+            same_host_session_live: held
+                .as_ref()
+                .is_some_and(|held| session_is_live(held, session_id.as_deref())),
+            held_session_id: held.as_ref().and_then(|held| held.session_id.clone()),
+        };
+        match remote.join(&args.channel, &request)? {
+            JoinAnswer::Granted(joined) => {
+                granted = Some(joined);
+                break;
+            }
+            JoinAnswer::Stale(message) => stale = message,
+        }
+    }
+    let Some(joined) = granted else {
+        return Err(anyhow!(stale));
+    };
 
     if args.json {
         say(&serde_json::to_string_pretty(&joined)?)?;
@@ -257,8 +286,7 @@ fn join(args: JoinArgs) -> Result<()> {
     }
 
     if joined.suffixed {
-        let held = existing.as_ref().map(|held| held.identity.as_str());
-        let pid = existing
+        let pid = held
             .as_ref()
             .and_then(|held| held.pid)
             .map(|pid| pid.to_string())
@@ -266,7 +294,7 @@ fn join(args: JoinArgs) -> Result<()> {
         warn(&format!(
             "{} is held by a harness session still running on this host (pid {pid}); \
              joined as {} instead",
-            held.unwrap_or(&wanted),
+            held.as_ref().map_or(wanted.as_str(), |held| &held.identity),
             joined.identity
         ));
     }
@@ -281,16 +309,21 @@ fn join(args: JoinArgs) -> Result<()> {
     Ok(())
 }
 
-/// Whether the participant already holding an identity is a session still
-/// running here.
+/// Whether the participant already holding an identity is a harness session
+/// still running here.
 ///
 /// The host is not compared: an identity carries its host, so anyone holding
-/// this identity is on this machine by construction. A participant with no
-/// recorded session id, or one recorded under the session asking, is this
-/// same participant coming back, which is a resume and not a collision.
+/// this identity is on this host by construction. A participant with no
+/// recorded session id, or one recorded under the session asking, is this same
+/// participant coming back, which is a resume and not a collision. Neither is
+/// a recorded process that has since finished, or a pid that is alive but
+/// started at some other time, which is the number handed on to something
+/// else.
 fn session_is_live(held: &Participant, mine: Option<&str>) -> bool {
     match held.session_id.as_deref() {
-        Some(theirs) if Some(theirs) != mine => held.pid.is_some_and(identity::is_alive),
+        Some(theirs) if Some(theirs) != mine => held
+            .pid
+            .is_some_and(|pid| identity::still_running(pid, held.pid_started_at.as_deref())),
         _ => false,
     }
 }
@@ -470,6 +503,20 @@ mod tests {
     }
 
     fn participant(identity: &str, session_id: Option<&str>, pid: Option<u32>) -> Participant {
+        held(
+            identity,
+            session_id,
+            pid,
+            pid.and_then(identity::process_start),
+        )
+    }
+
+    fn held(
+        identity: &str,
+        session_id: Option<&str>,
+        pid: Option<u32>,
+        pid_started_at: Option<String>,
+    ) -> Participant {
         let (name, host) = identity.split_once('@').expect("name@host");
         Participant {
             identity: identity.to_string(),
@@ -478,6 +525,7 @@ mod tests {
             harness: "claude".to_string(),
             session_id: session_id.map(str::to_string),
             pid,
+            pid_started_at,
             cwd: "/repos/saneha".to_string(),
             madari_pane: None,
             away: false,
@@ -523,20 +571,35 @@ mod tests {
     #[test]
     fn a_live_session_is_one_that_is_someone_else_and_still_running() {
         let mine = Some("session-mine");
-        let live = participant("a@h", Some("session-theirs"), Some(std::process::id()));
+        let running = std::process::id();
+        let live = participant("a@h", Some("session-theirs"), Some(running));
         assert!(session_is_live(&live, mine));
 
         // The same session coming back is a resume, however alive it is.
-        let same = participant("a@h", mine, Some(std::process::id()));
+        let same = participant("a@h", mine, Some(running));
         assert!(!session_is_live(&same, mine));
 
-        // A session that is gone, and a participant that never recorded one.
+        // A process that has finished, and a participant that recorded no
+        // session at all.
         let gone = participant("a@h", Some("session-theirs"), Some(u32::MAX));
         assert!(!session_is_live(&gone, mine));
-        let unrecorded = participant("a@h", None, Some(std::process::id()));
+        let unrecorded = participant("a@h", None, Some(running));
         assert!(!session_is_live(&unrecorded, mine));
         let pidless = participant("a@h", Some("session-theirs"), None);
         assert!(!session_is_live(&pidless, mine));
+
+        // The pid is alive but it is not the process that was recorded: the
+        // number was handed on, and the session it belonged to is over.
+        let reused = held(
+            "a@h",
+            Some("session-theirs"),
+            Some(running),
+            Some("Thu Jan  1 00:00:00 2015".to_string()),
+        );
+        assert!(!session_is_live(&reused, mine));
+        // Nothing recorded about the process is not evidence that it is there.
+        let unpinned = held("a@h", Some("session-theirs"), Some(running), None);
+        assert!(!session_is_live(&unpinned, mine));
     }
 
     #[test]

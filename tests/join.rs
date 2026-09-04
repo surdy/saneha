@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use saneha::api::JoinRequest;
+use saneha::client::JoinAnswer;
 
 mod support;
 
@@ -13,7 +14,7 @@ use support::{stdout_of, TestServer};
 /// This machine as the binary under test sees it. Every granted identity ends
 /// in it, so the tests name it once.
 fn host() -> String {
-    saneha::identity::host()
+    saneha::identity::host(saneha::store::HOST.max)
 }
 
 /// A directory that is not a git repository, named `name`.
@@ -57,10 +58,66 @@ fn request(name: &str, harness: &str) -> JoinRequest {
         harness: harness.to_string(),
         session_id: None,
         pid: None,
+        pid_started_at: None,
         cwd: "/repos/saneha".to_string(),
         madari_pane: None,
         same_host_session_live: false,
+        held_session_id: None,
     }
+}
+
+/// A process this test owns and can end when it likes, standing in for a
+/// harness session that is still running.
+struct Session {
+    child: std::process::Child,
+}
+
+impl Session {
+    /// Starts one, and returns it with the pid a harness would publish.
+    fn start() -> Session {
+        let child = Command::new("sleep")
+            .arg("120")
+            .spawn()
+            .expect("start a process to stand in for a harness session");
+        Session { child }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Ends it and reaps it, so the pid really is gone.
+    fn end(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
+/// A join made the way a harness makes one: through a shell that is gone as
+/// soon as the command returns, with the harness publishing its own pid.
+fn join_as_harness(
+    server: &TestServer,
+    directory: &Path,
+    args: &str,
+    session: &str,
+    pid: u32,
+) -> serde_json::Value {
+    let output = server
+        .shell(&format!("\"$SANEHA\" join {args} --json"))
+        .current_dir(directory)
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", session)
+        .env("CLAUDE_PID", pid.to_string())
+        .output()
+        .expect("run the saneha binary through a shell");
+    let stdout = stdout_of(&format!("saneha join {args} as {session}"), &output);
+    serde_json::from_str(&stdout).expect("--json prints JSON")
 }
 
 #[test]
@@ -147,8 +204,8 @@ fn an_identity_is_the_directory_the_harness_and_the_host() {
         joined["participant"]["cwd"],
         serde_json::json!(real(&directory))
     );
-    // The process that started the command is recorded as a liveness handle,
-    // and that process is this test.
+    // Claude Code was not asked for its own pid here, so the fallback stands:
+    // the process that started the command, which is this test.
     assert_eq!(
         joined["participant"]["pid"],
         serde_json::json!(std::process::id())
@@ -189,6 +246,62 @@ fn an_identity_inside_a_repository_uses_the_repository_name() {
     let output = server.run_in(&nested, &["join", "brisk-otter"], &[("CLAUDECODE", "1")]);
     assert_eq!(
         stdout_of("saneha join", &output),
+        format!("my-repo-claude@{}", host())
+    );
+}
+
+#[test]
+fn every_worktree_of_a_repository_derives_the_repository_name() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+
+    let parent = plain_directory("my-repo");
+    let repository = parent.path().join("my-repo");
+    let git = |args: &[&str], directory: &Path| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "--quiet"], &repository);
+    git(
+        &[
+            "-c",
+            "user.name=saneha",
+            "-c",
+            "user.email=saneha@example.com",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "first",
+        ],
+        &repository,
+    );
+    let checkout = parent.path().join("my-repo-review");
+    git(
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            checkout.to_str().expect("path"),
+            "-b",
+            "review",
+        ],
+        &repository,
+    );
+
+    // The name says which project is talking. Where that project is checked
+    // out is a placement detail, and two live checkouts on one host are told
+    // apart by the suffix, not by the directory they sit in.
+    let output = server.run_in(&checkout, &["join", "brisk-otter"], &[("CLAUDECODE", "1")]);
+    assert_eq!(
+        stdout_of("saneha join from a second checkout", &output),
         format!("my-repo-claude@{}", host())
     );
 }
@@ -285,7 +398,10 @@ fn the_harness_can_be_overridden() {
     assert!(!rejected.status.success());
     let stderr = String::from_utf8_lossy(&rejected.stderr);
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
-    assert!(stderr.contains("a harness id is lowercase"), "{stderr}");
+    assert!(
+        stderr.contains("harness ids use lowercase letters, digits and hyphens"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -370,28 +486,40 @@ fn a_live_session_on_this_host_gets_a_suffixed_identity() {
     let parent = plain_directory("notes-method");
     let directory = parent.path().join("notes-method");
 
-    // The pid recorded for each join is this test process, which is alive; the
-    // session ids differ, so each join finds the last one still running.
-    let claude =
-        |session: &'static str| vec![("CLAUDECODE", "1"), ("CLAUDE_CODE_SESSION_ID", session)];
+    // Three harness sessions, each with a process of its own that this test
+    // starts and ends. Every join goes through a shell that exits immediately,
+    // so nothing here depends on the CLI's parent still being around.
+    let one = Session::start();
+    let two = Session::start();
+    let three = Session::start();
 
-    let first = join_json(
+    let first = join_as_harness(
         &server,
         &directory,
-        &["brisk-otter", "--as", "reviewer"],
-        &claude("session-one"),
+        "brisk-otter --as reviewer",
+        "session-one",
+        one.pid(),
     );
     assert_eq!(
         first["identity"],
         serde_json::json!(format!("reviewer@{}", host()))
     );
     assert_eq!(first["suffixed"], serde_json::json!(false));
+    // The harness's own process is recorded, not the shell that ran the
+    // command and is already gone.
+    assert_eq!(first["participant"]["pid"], serde_json::json!(one.pid()));
+    assert!(
+        first["participant"]["pid_started_at"].is_string(),
+        "{first:?}"
+    );
 
-    let second = join_json(
+    // Another session, while the first is still running: a name of its own.
+    let second = join_as_harness(
         &server,
         &directory,
-        &["brisk-otter", "--as", "reviewer"],
-        &claude("session-two"),
+        "brisk-otter --as reviewer",
+        "session-two",
+        two.pid(),
     );
     assert_eq!(
         second["identity"],
@@ -403,14 +531,19 @@ fn a_live_session_on_this_host_gets_a_suffixed_identity() {
         second["participant"]["name"],
         serde_json::json!("reviewer-2")
     );
+    assert_eq!(second["participant"]["pid"], serde_json::json!(two.pid()));
 
-    // The suffix is explained on standard error, so the identity is still the
-    // only thing on standard output.
-    let third = server.run_in(
-        &directory,
-        &["join", "brisk-otter", "--as", "reviewer"],
-        &claude("session-three"),
-    );
+    // A third walks past the name already taken. The suffix is explained on
+    // standard error, so the identity is still the only thing on standard
+    // output.
+    let third = server
+        .shell("\"$SANEHA\" join brisk-otter --as reviewer")
+        .current_dir(&directory)
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CODE_SESSION_ID", "session-three")
+        .env("CLAUDE_PID", three.pid().to_string())
+        .output()
+        .expect("run the saneha binary through a shell");
     assert_eq!(
         stdout_of("saneha join", &third),
         format!("reviewer-3@{}", host())
@@ -431,19 +564,160 @@ fn a_live_session_on_this_host_gets_a_suffixed_identity() {
         .expect("list");
     assert_eq!(participants.len(), 3);
 
-    // A session that has finished resumes instead of suffixing: the same join
-    // again, under the session that holds it, is that session coming back.
-    let again = join_json(
+    // The session holding the name comes back: its own session id, so this is
+    // a resume however alive it is.
+    let again = join_as_harness(
         &server,
         &directory,
-        &["brisk-otter", "--as", "reviewer"],
-        &claude("session-one"),
+        "brisk-otter --as reviewer",
+        "session-one",
+        one.pid(),
     );
     assert_eq!(
         again["identity"],
         serde_json::json!(format!("reviewer@{}", host()))
     );
     assert_eq!(again["resumed"], serde_json::json!(true));
+}
+
+#[test]
+fn a_finished_session_is_resumed_rather_than_suffixed() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    let parent = plain_directory("notes-method");
+    let directory = parent.path().join("notes-method");
+
+    let mut one = Session::start();
+    let two = Session::start();
+
+    let first = join_as_harness(
+        &server,
+        &directory,
+        "brisk-otter --as reviewer",
+        "session-one",
+        one.pid(),
+    );
+    assert_eq!(first["resumed"], serde_json::json!(false));
+
+    // The session ends, the way a harness that has been closed does.
+    one.end();
+
+    let second = join_as_harness(
+        &server,
+        &directory,
+        "brisk-otter --as reviewer",
+        "session-two",
+        two.pid(),
+    );
+    assert_eq!(
+        second["identity"],
+        serde_json::json!(format!("reviewer@{}", host())),
+        "a finished session must hand its identity on"
+    );
+    assert_eq!(second["resumed"], serde_json::json!(true));
+    assert_eq!(second["suffixed"], serde_json::json!(false));
+    assert_eq!(second["participant"]["pid"], serde_json::json!(two.pid()));
+}
+
+#[test]
+fn a_reused_pid_does_not_make_a_finished_session_look_live() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    let parent = plain_directory("notes-method");
+    let directory = parent.path().join("notes-method");
+
+    let one = Session::start();
+    let two = Session::start();
+
+    join_as_harness(
+        &server,
+        &directory,
+        "brisk-otter --as reviewer",
+        "session-one",
+        one.pid(),
+    );
+
+    // What pid reuse looks like from the outside: the number is alive, but the
+    // process wearing it is not the one that joined.
+    let changed = server
+        .database()
+        .execute(
+            "UPDATE participants SET pid_started_at = 'Thu Jan  1 00:00:00 2015'
+              WHERE identity = ?1",
+            [&format!("reviewer@{}", host())],
+        )
+        .expect("rewrite the recorded start time");
+    assert_eq!(changed, 1);
+
+    let second = join_as_harness(
+        &server,
+        &directory,
+        "brisk-otter --as reviewer",
+        "session-two",
+        two.pid(),
+    );
+    assert_eq!(
+        second["identity"],
+        serde_json::json!(format!("reviewer@{}", host())),
+        "a pid that is alive but is not the recorded process must not suffix"
+    );
+    assert_eq!(second["resumed"], serde_json::json!(true));
+}
+
+#[test]
+fn a_join_made_against_a_participant_that_moved_on_is_refused() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    remote
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+
+    // Someone joins, from wherever.
+    let mut first = request("reviewer", "claude");
+    first.session_id = Some("session-one".to_string());
+    match remote.join("brisk-otter", &first).expect("join") {
+        JoinAnswer::Granted(joined) => assert!(!joined.resumed),
+        JoinAnswer::Stale(message) => panic!("a first join cannot be stale: {message}"),
+    }
+
+    // A join whose probe found nobody, arriving after that one: it would
+    // otherwise resume a participant it has never seen and knows nothing
+    // about.
+    let mut racing = request("reviewer", "claude");
+    racing.session_id = Some("session-two".to_string());
+    match remote.join("brisk-otter", &racing).expect("join") {
+        JoinAnswer::Granted(_) => panic!("a stale join must be refused"),
+        JoinAnswer::Stale(message) => {
+            assert!(message.contains("changed hands"), "{message}");
+            assert!(message.contains("reviewer@"), "{message}");
+        }
+    }
+
+    // Looking again and asking again is what the client does next, and it
+    // works.
+    racing.held_session_id = Some("session-one".to_string());
+    match remote.join("brisk-otter", &racing).expect("join") {
+        JoinAnswer::Granted(joined) => {
+            assert!(joined.resumed);
+            assert_eq!(
+                joined.participant.session_id.as_deref(),
+                Some("session-two")
+            );
+        }
+        JoinAnswer::Stale(message) => panic!("a fresh view must be accepted: {message}"),
+    }
+
+    // Only one participant came out of all that.
+    assert_eq!(
+        remote.list_participants("brisk-otter").expect("list").len(),
+        1
+    );
 }
 
 #[test]
