@@ -1,7 +1,7 @@
 //! The SQLite file the server owns.
 //!
-//! One file holds everything: channels now, and in later tickets participants,
-//! transcripts, read cursors and attachments. The schema is applied by the
+//! One file holds everything: channels, participants and their read cursors,
+//! and the transcript; attachments follow in a later ticket. The schema is applied by the
 //! versioned migration list below, run at every start, so an older file is
 //! brought forward without any separate step.
 
@@ -10,18 +10,66 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::api::{Channel, ChannelState};
+use crate::api::{Channel, ChannelState, JoinRequest, Joined, Participant};
 use crate::slug;
 
-/// The longest a channel name may be.
-pub const MAX_CHANNEL_NAME: usize = 64;
+/// A kind of name, and how it is described when one is refused. Channel names,
+/// the two halves of an identity and a harness id are all the same alphabet
+/// with different caps, so they are all one check and one error.
+pub struct Slug {
+    /// The plural, as the error names it: "channel names use ...".
+    what: &'static str,
+    /// The longest one of these may be.
+    pub max: usize,
+    /// What the person reading the error can do about it, if anything.
+    hint: &'static str,
+}
+
+/// A channel name: typed by people and pasted between hosts, so it is
+/// deliberately narrow.
+pub const CHANNEL_NAME: Slug = Slug {
+    what: "channel names",
+    max: 64,
+    hint: "",
+};
+
+/// The name half of an identity, held to a channel name's shape for the same
+/// reason.
+pub const PARTICIPANT_NAME: Slug = Slug {
+    what: "participant names",
+    max: CHANNEL_NAME.max,
+    hint: "; name yourself with --as",
+};
+
+/// The host half of an identity. The client folds a real hostname into this
+/// shape before sending it; the server still checks, because an identity is
+/// split on `@` by everything that reads one.
+pub const HOST: Slug = Slug {
+    what: "hosts",
+    max: 64,
+    hint: "",
+};
+
+/// A harness id, which appears in a derived name, so it has a name's shape.
+pub const HARNESS: Slug = Slug {
+    what: "harness ids",
+    max: 32,
+    hint: "",
+};
 
 /// The longest a purpose may be. A purpose is one line saying what a channel is
 /// for, not a document.
 pub const MAX_PURPOSE: usize = 256;
 
+/// The longest a working directory, harness session id, process start time or
+/// Madari pane id the server will record.
+pub const MAX_RECORDED: usize = 1024;
+
 /// How much of a rejected value is echoed back in the error.
 const MAX_ECHO: usize = 80;
+
+/// How far the suffix walk goes before a caller is told to name itself.
+const MAX_SUFFIX: u32 = 99;
 
 /// How many slugs the server tries before giving up on minting a name.
 const MINT_ATTEMPTS: usize = 24;
@@ -32,16 +80,16 @@ const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 /// Applied in order; the number applied is kept in SQLite's `user_version`.
 /// Never edit an entry that has shipped, only append.
 ///
-/// Migration 1 creates the channels table alone. The rest of v1 arrives as
-/// further migrations: `participants` (identity, harness, host, read cursor),
-/// `messages` (monotonic id allocated from `channels.last_message_id`,
-/// recipients, kind) and `attachments`. The forward-looking columns here are
-/// the ones the channels table itself will need for that: `closed_at` for
-/// `saneha close`, and `last_message_id` as the per-channel allocator that
-/// makes message ids monotonic within a transcript. `AUTOINCREMENT` keeps a
-/// deleted channel's id from being handed to a later channel, so anything
-/// keyed by channel id stays unambiguous.
-const MIGRATIONS: &[&str] = &[r#"
+/// Migration 1 creates the channels table alone; it is deployed, so it is
+/// frozen. Migration 2 adds participants and the transcript. `attachments` is
+/// still to come. The forward-looking columns in migration 1 are the ones the
+/// channels table itself needs: `closed_at` for `saneha close`, and
+/// `last_message_id` as the per-channel allocator that makes message ids
+/// monotonic within a transcript. `AUTOINCREMENT` keeps a deleted channel's id
+/// from being handed to a later channel, so anything keyed by channel id stays
+/// unambiguous.
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE channels (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT    NOT NULL,
@@ -54,16 +102,95 @@ CREATE TABLE channels (
 );
 
 CREATE UNIQUE INDEX channels_name ON channels (name);
-"#];
+"#,
+    // A participant is one identity in one channel: the same person or agent
+    // in two channels is two rows, because a read cursor belongs to a channel
+    // (ADR-0004). `identity` is `name@host` and is stored whole as well as in
+    // its two halves, so a lookup by identity is an index hit and the halves
+    // never have to be parsed back out.
+    //
+    // A message carries whichever of the two participant columns its kind
+    // means. A `message` is written BY a participant, so it fills
+    // `from_participant`. A `join` or `leave` is written by the server ABOUT a
+    // participant, so it fills `about_participant`; making the server
+    // masquerade as the participant it is describing would make "who wrote
+    // this" a lie. A `close` is about the channel and fills neither. The CHECK
+    // holds that discipline in the schema rather than in prose.
+    //
+    // `pid` alone would not do: pids are reused, so a finished session could be
+    // impersonated by whatever the kernel handed the number to next.
+    // `pid_started_at` is that process's start time as the host reports it, and
+    // a session counts as live only when both still match.
+    //
+    // `id` is per-channel and monotonic, allocated from
+    // `channels.last_message_id` in the same transaction as the insert, so a
+    // transcript reads 1, 2, 3 and a read cursor is a number in that sequence.
+    r#"
+CREATE TABLE participants (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id     INTEGER NOT NULL REFERENCES channels (id) ON DELETE CASCADE,
+    identity       TEXT    NOT NULL,
+    name           TEXT    NOT NULL,
+    host           TEXT    NOT NULL,
+    harness        TEXT    NOT NULL,
+    session_id     TEXT,
+    pid            INTEGER,
+    pid_started_at TEXT,
+    cwd            TEXT    NOT NULL,
+    madari_pane    TEXT,
+    away           INTEGER NOT NULL DEFAULT 0 CHECK (away IN (0, 1)),
+    read_cursor    INTEGER NOT NULL DEFAULT 0,
+    joined_at      TEXT    NOT NULL,
+    left_at        TEXT
+);
+
+CREATE UNIQUE INDEX participants_identity ON participants (channel_id, identity);
+
+CREATE TABLE messages (
+    channel_id        INTEGER NOT NULL REFERENCES channels (id) ON DELETE CASCADE,
+    id                INTEGER NOT NULL,
+    kind              TEXT    NOT NULL
+                              CHECK (kind IN ('message', 'join', 'leave', 'close')),
+    from_participant  INTEGER REFERENCES participants (id) ON DELETE SET NULL,
+    about_participant INTEGER REFERENCES participants (id) ON DELETE SET NULL,
+    body              TEXT    NOT NULL,
+    created_at        TEXT    NOT NULL,
+    PRIMARY KEY (channel_id, id),
+    CHECK (
+        (kind = 'message' AND from_participant IS NOT NULL AND about_participant IS NULL)
+        OR (kind IN ('join', 'leave') AND from_participant IS NULL AND about_participant IS NOT NULL)
+        OR (kind = 'close' AND from_participant IS NULL AND about_participant IS NULL)
+    )
+);
+
+CREATE TABLE recipients (
+    channel_id     INTEGER NOT NULL,
+    message_id     INTEGER NOT NULL,
+    participant_id INTEGER NOT NULL REFERENCES participants (id) ON DELETE CASCADE,
+    PRIMARY KEY (channel_id, message_id, participant_id),
+    FOREIGN KEY (channel_id, message_id)
+        REFERENCES messages (channel_id, id) ON DELETE CASCADE
+);
+
+-- The primary key answers "who is this message addressed to"; this answers
+-- "which messages are addressed to me", which is what `wait --mentions` and
+-- the relay ask.
+CREATE INDEX recipients_participant ON recipients (participant_id, channel_id, message_id);
+"#,
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error(
-        "channel names use lowercase letters, digits and hyphens, start with a letter or digit, \
-         and are at most {max} characters (got {name:?})",
-        max = MAX_CHANNEL_NAME
+        "{what} use lowercase letters, digits and hyphens, start with a letter or digit, \
+         and are at most {max} characters (got {value:?}){hint}"
     )]
-    InvalidChannelName { name: String },
+    InvalidSlug {
+        what: &'static str,
+        max: usize,
+        value: String,
+        hint: &'static str,
+    },
 
     #[error(
         "a purpose is one line of at most {max} characters, with no line breaks (got {purpose:?})",
@@ -76,6 +203,30 @@ pub enum StoreError {
 
     #[error("could not mint a channel name after {0} attempts; name one yourself")]
     MintExhausted(usize),
+
+    #[error("there is no channel named {0:?}; create it with: saneha new {0}")]
+    NoSuchChannel(String),
+
+    #[error("the channel {0:?} is closed, so nobody can join it")]
+    ChannelClosed(String),
+
+    #[error("{what} must be one line of at most {max} characters (got {value:?})", max = MAX_RECORDED)]
+    InvalidRecorded { what: &'static str, value: String },
+
+    #[error("nobody named {identity:?} has joined the channel {channel:?}")]
+    NoSuchParticipant { channel: String, identity: String },
+
+    #[error(
+        "{identity:?} changed hands in {channel:?} while this join was being made; \
+         look again and join again"
+    )]
+    ParticipantChanged { channel: String, identity: String },
+
+    #[error(
+        "every name from {name}-2 to {name}-{max} is taken in {channel:?}; name yourself with --as",
+        max = MAX_SUFFIX
+    )]
+    SuffixExhausted { channel: String, name: String },
 
     #[error(
         "the database was written by a newer saneha (schema {found}, this build understands \
@@ -234,27 +385,419 @@ impl Store {
             .optional()?;
         row.map(build_channel).transpose()
     }
+
+    /// Joins `channel` under `request`, and writes the join system message.
+    ///
+    /// Three outcomes, decided by whether `name@host` is already a participant
+    /// and by the caller's `same_host_session_live` verdict:
+    ///
+    /// - not a participant: a new one, read cursor at 0, not away;
+    /// - a participant, and the caller says its session is not live: that
+    ///   participant resumes, keeping its name and read cursor;
+    /// - a participant, and the caller says its session is live on this host:
+    ///   the first free `name-2`, `name-3`, ... is granted as a new one.
+    ///
+    /// That verdict was formed against a participant the caller looked at
+    /// before asking, so the request carries what it saw in `held_session_id`.
+    /// If the row says something else by the time the join commits, someone
+    /// else joined in between and the verdict is about a participant that no
+    /// longer exists as described; the join is refused rather than resumed on
+    /// top of a stranger.
+    ///
+    /// All of it, including the message id allocated from
+    /// `channels.last_message_id`, happens in one transaction, so a join
+    /// either lands whole or not at all.
+    pub fn join(&self, channel: &str, request: &JoinRequest) -> Result<Joined, StoreError> {
+        validate_participant_name(&request.name)?;
+        validate_host(&request.host)?;
+        validate_harness(&request.harness)?;
+        validate_recorded("a working directory", &request.cwd)?;
+        for (what, value) in [
+            ("a harness session id", &request.session_id),
+            ("a process start time", &request.pid_started_at),
+            ("a Madari pane id", &request.madari_pane),
+        ] {
+            if let Some(value) = value {
+                validate_recorded(what, value)?;
+            }
+        }
+
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let channel_id = open_channel_id(&tx, channel)?;
+
+        let (participant_id, name, resumed, suffixed) = if request.same_host_session_live {
+            let (id, name) = insert_suffixed(&tx, channel_id, channel, request)?;
+            (id, name, false, true)
+        } else {
+            let identity = identity_of(&request.name, &request.host);
+            match held_by(&tx, channel_id, &identity)? {
+                Some((id, held_session_id)) => {
+                    if held_session_id != request.held_session_id {
+                        return Err(StoreError::ParticipantChanged {
+                            channel: channel.to_string(),
+                            identity,
+                        });
+                    }
+                    resume_participant(&tx, id, request)?;
+                    (id, request.name.clone(), true, false)
+                }
+                None => {
+                    // Nobody held it a moment ago either, or the caller would
+                    // have said so.
+                    if request.held_session_id.is_some() {
+                        return Err(StoreError::ParticipantChanged {
+                            channel: channel.to_string(),
+                            identity,
+                        });
+                    }
+                    let id = insert_participant(&tx, channel_id, &request.name, request)?;
+                    (id, request.name.clone(), false, false)
+                }
+            }
+        };
+
+        let identity = identity_of(&name, &request.host);
+        // A resume is still a join: the transcript says who is present now,
+        // not only who is present for the first time.
+        write_system_message(
+            &tx,
+            channel_id,
+            "join",
+            participant_id,
+            &format!("{identity} joined"),
+        )?;
+        let participant = read_participant(&tx, participant_id)?;
+        tx.commit()?;
+
+        Ok(Joined {
+            channel: channel.to_string(),
+            identity,
+            resumed,
+            suffixed,
+            participant,
+        })
+    }
+
+    /// Everyone who has joined a channel, in the order they first joined.
+    /// A closed channel still lists its participants.
+    pub fn list_participants(&self, channel: &str) -> Result<Vec<Participant>, StoreError> {
+        let conn = self.conn();
+        let channel_id = channel_id(&conn, channel)?;
+        let mut statement = conn.prepare(&format!(
+            "SELECT {PARTICIPANT_COLUMNS} FROM participants WHERE channel_id = ?1 ORDER BY id"
+        ))?;
+        let rows = statement.query_map([channel_id], read_participant_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// One participant by identity, or `None` if nobody holds it here. The
+    /// join flow asks this first, to see whether the identity it wants is held
+    /// by a harness session still running on that host.
+    pub fn participant(
+        &self,
+        channel: &str,
+        identity: &str,
+    ) -> Result<Option<Participant>, StoreError> {
+        let conn = self.conn();
+        let channel_id = channel_id(&conn, channel)?;
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT {PARTICIPANT_COLUMNS} FROM participants
+                     WHERE channel_id = ?1 AND identity = ?2"
+                ),
+                rusqlite::params![channel_id, identity],
+                read_participant_row,
+            )
+            .optional()?)
+    }
 }
 
-/// Channel names are typed by people and pasted between machines, so they are
-/// deliberately narrow: lowercase letters, digits and hyphens only.
-pub fn validate_channel_name(name: &str) -> Result<(), StoreError> {
-    let invalid = || StoreError::InvalidChannelName { name: echo(name) };
+/// `name@host`, the one place the two halves are put together.
+pub fn identity_of(name: &str, host: &str) -> String {
+    format!("{name}@{host}")
+}
 
-    if name.is_empty() || name.chars().count() > MAX_CHANNEL_NAME {
-        return Err(invalid());
+/// The columns of a participant, in the order `read_participant_row` reads.
+const PARTICIPANT_COLUMNS: &str = "identity, name, host, harness, session_id, pid, \
+                                   pid_started_at, cwd, madari_pane, away, read_cursor, \
+                                   joined_at, left_at";
+
+fn read_participant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Participant> {
+    let pid: Option<i64> = row.get(5)?;
+    Ok(Participant {
+        identity: row.get(0)?,
+        name: row.get(1)?,
+        host: row.get(2)?,
+        harness: row.get(3)?,
+        session_id: row.get(4)?,
+        // A pid too large for the platform's own type is a pid nothing can be
+        // asked about, so it reads as no pid at all rather than as an error.
+        pid: pid.and_then(|pid| u32::try_from(pid).ok()),
+        pid_started_at: row.get(6)?,
+        cwd: row.get(7)?,
+        madari_pane: row.get(8)?,
+        away: row.get::<_, i64>(9)? != 0,
+        read_cursor: row.get(10)?,
+        joined_at: row.get(11)?,
+        left_at: row.get(12)?,
+    })
+}
+
+/// The row id of a channel, whatever state it is in.
+fn channel_id(conn: &Connection, channel: &str) -> Result<i64, StoreError> {
+    conn.query_row(
+        "SELECT id FROM channels WHERE name = ?1",
+        [channel],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| StoreError::NoSuchChannel(channel.to_string()))
+}
+
+/// The row id of a channel that is still open. Nothing sets `closed` yet;
+/// `saneha close` will, and a join must already refuse a closed channel.
+fn open_channel_id(conn: &Connection, channel: &str) -> Result<i64, StoreError> {
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, state FROM channels WHERE name = ?1",
+            [channel],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (id, state) = row.ok_or_else(|| StoreError::NoSuchChannel(channel.to_string()))?;
+    match state.parse::<ChannelState>() {
+        Ok(ChannelState::Open) => Ok(id),
+        Ok(ChannelState::Closed) => Err(StoreError::ChannelClosed(channel.to_string())),
+        Err(_) => Err(StoreError::UnknownChannelState(state)),
     }
-    if !name
+}
+
+fn participant_id(
+    conn: &Connection,
+    channel_id: i64,
+    identity: &str,
+) -> Result<Option<i64>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM participants WHERE channel_id = ?1 AND identity = ?2",
+            rusqlite::params![channel_id, identity],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Who holds an identity right now, and under which harness session. The
+/// session id is what a caller's verdict was formed against, so it is what the
+/// join checks has not moved.
+fn held_by(
+    conn: &Connection,
+    channel_id: i64,
+    identity: &str,
+) -> Result<Option<(i64, Option<String>)>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT id, session_id FROM participants WHERE channel_id = ?1 AND identity = ?2",
+            rusqlite::params![channel_id, identity],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
+
+fn insert_participant(
+    conn: &Connection,
+    channel_id: i64,
+    name: &str,
+    request: &JoinRequest,
+) -> Result<i64, StoreError> {
+    let identity = identity_of(name, &request.host);
+    Ok(conn.query_row(
+        &format!(
+            "INSERT INTO participants
+                 (channel_id, identity, name, host, harness, session_id, pid, pid_started_at,
+                  cwd, madari_pane, away, read_cursor, joined_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, 0, {NOW})
+             RETURNING id"
+        ),
+        rusqlite::params![
+            channel_id,
+            identity,
+            name,
+            request.host,
+            request.harness,
+            request.session_id,
+            request.pid.map(i64::from),
+            request.pid_started_at,
+            request.cwd,
+            request.madari_pane,
+        ],
+        |row| row.get(0),
+    )?)
+}
+
+/// Continues an existing participant. The name and the read cursor are what a
+/// resume is for, so they are the two columns left alone.
+fn resume_participant(conn: &Connection, id: i64, request: &JoinRequest) -> Result<(), StoreError> {
+    conn.execute(
+        &format!(
+            "UPDATE participants
+                SET harness = ?1, session_id = ?2, pid = ?3, pid_started_at = ?4, cwd = ?5,
+                    madari_pane = ?6, away = 0, left_at = NULL, joined_at = {NOW}
+              WHERE id = ?7"
+        ),
+        rusqlite::params![
+            request.harness,
+            request.session_id,
+            request.pid.map(i64::from),
+            request.pid_started_at,
+            request.cwd,
+            request.madari_pane,
+            id,
+        ],
+    )?;
+    Ok(())
+}
+
+/// The first free `name-2`, `name-3`, ... on this host. The base is cut short
+/// enough that the suffix always fits inside the name cap.
+fn insert_suffixed(
+    conn: &Connection,
+    channel_id: i64,
+    channel: &str,
+    request: &JoinRequest,
+) -> Result<(i64, String), StoreError> {
+    let room = PARTICIPANT_NAME.max - (MAX_SUFFIX.to_string().len() + 1);
+    let base: String = request.name.chars().take(room).collect();
+    let base = base.trim_end_matches('-');
+
+    for suffix in 2..=MAX_SUFFIX {
+        let name = format!("{base}-{suffix}");
+        let identity = identity_of(&name, &request.host);
+        if participant_id(conn, channel_id, &identity)?.is_none() {
+            let id = insert_participant(conn, channel_id, &name, request)?;
+            return Ok((id, name));
+        }
+    }
+    Err(StoreError::SuffixExhausted {
+        channel: channel.to_string(),
+        name: base.to_string(),
+    })
+}
+
+/// Writes one system message, taking the next id from the channel's own
+/// allocator so ids are monotonic within the transcript.
+fn write_system_message(
+    conn: &Connection,
+    channel_id: i64,
+    kind: &str,
+    about_participant: i64,
+    body: &str,
+) -> Result<i64, StoreError> {
+    let message_id: i64 = conn.query_row(
+        "UPDATE channels SET last_message_id = last_message_id + 1
+          WHERE id = ?1
+      RETURNING last_message_id",
+        [channel_id],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        &format!(
+            "INSERT INTO messages
+                 (channel_id, id, kind, from_participant, about_participant, body, created_at)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, {NOW})"
+        ),
+        rusqlite::params![channel_id, message_id, kind, about_participant, body],
+    )?;
+    Ok(message_id)
+}
+
+fn read_participant(conn: &Connection, id: i64) -> Result<Participant, StoreError> {
+    Ok(conn.query_row(
+        &format!("SELECT {PARTICIPANT_COLUMNS} FROM participants WHERE id = ?1"),
+        [id],
+        read_participant_row,
+    )?)
+}
+
+pub fn validate_channel_name(name: &str) -> Result<(), StoreError> {
+    validate_slug(name, &CHANNEL_NAME)
+}
+
+pub fn validate_participant_name(name: &str) -> Result<(), StoreError> {
+    validate_slug(name, &PARTICIPANT_NAME)
+}
+
+pub fn validate_host(host: &str) -> Result<(), StoreError> {
+    validate_slug(host, &HOST)
+}
+
+pub fn validate_harness(harness: &str) -> Result<(), StoreError> {
+    validate_slug(harness, &HARNESS)
+}
+
+/// A name of the given kind: lowercase letters, digits and hyphens; no hyphen
+/// at either end; not empty; no longer than the kind's cap.
+pub fn validate_slug(value: &str, kind: &Slug) -> Result<(), StoreError> {
+    if is_slug(value, kind.max) {
+        return Ok(());
+    }
+    Err(StoreError::InvalidSlug {
+        what: kind.what,
+        max: kind.max,
+        value: echo(value),
+        hint: kind.hint,
+    })
+}
+
+/// The free-text things a join records about the caller: a working directory,
+/// a harness session id, a Madari pane id. They are shown to people, so they
+/// stay one line and stay short.
+fn validate_recorded(what: &'static str, value: &str) -> Result<(), StoreError> {
+    if value.is_empty()
+        || value.chars().count() > MAX_RECORDED
+        || value.contains('\n')
+        || value.contains('\r')
+    {
+        return Err(StoreError::InvalidRecorded {
+            what,
+            value: echo(value),
+        });
+    }
+    Ok(())
+}
+
+/// Folds arbitrary text into the alphabet `is_slug` checks: lowercase letters,
+/// digits and single hyphens, with no hyphen at either end. It lives next to
+/// the check so the alphabet is written down once. A hostname or a directory
+/// name goes through here on its way into an identity; what comes out is
+/// something `is_slug` accepts, though it may still be too long.
+pub fn sanitize(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// Lowercase letters, digits and hyphens; no hyphen at either end; not empty;
+/// no longer than `max`. Channel names, participant names, hosts and harness
+/// ids are all this shape, so they are all this function.
+fn is_slug(value: &str, max: usize) -> bool {
+    if value.is_empty() || value.chars().count() > max {
+        return false;
+    }
+    if !value
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
-        return Err(invalid());
+        return false;
     }
-    let first = name.chars().next().expect("name is not empty");
-    if first == '-' || name.ends_with('-') {
-        return Err(invalid());
-    }
-    Ok(())
+    !value.starts_with('-') && !value.ends_with('-')
 }
 
 /// A purpose is the one line a channel is listed with, so it holds one line.
@@ -355,7 +898,7 @@ mod tests {
             "brisk.otter",
             "brisk/otter",
             "ਸੁਨੇਹਾ",
-            &"a".repeat(MAX_CHANNEL_NAME + 1),
+            &"a".repeat(CHANNEL_NAME.max + 1),
         ] {
             assert!(
                 validate_channel_name(name).is_err(),

@@ -10,13 +10,24 @@ use anyhow::{anyhow, Result};
 use ureq::http::Response;
 use ureq::{Agent, Body};
 
-use crate::api::{ApiError, Channel, ChannelList};
+use crate::api::{
+    ApiError, Channel, ChannelList, JoinRequest, Joined, Participant, ParticipantList,
+};
 
 /// The environment variable that points every subcommand at the server.
 pub const URL_ENV: &str = "SANEHA_URL";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_BODY: usize = 200;
+
+/// What a join came back with: the identity granted, or the server saying the
+/// participant this join reasoned about is not the participant it found, so
+/// the caller should look again before asking again.
+#[derive(Debug)]
+pub enum JoinAnswer {
+    Granted(Box<Joined>),
+    Stale(String),
+}
 
 /// The server as seen from a subcommand.
 pub struct Remote {
@@ -96,11 +107,59 @@ impl Remote {
         Ok(list.channels)
     }
 
+    /// Joins a channel and returns the identity the server granted, or
+    /// `Stale` when the participant the request was reasoned about changed
+    /// hands in between and the caller should look again.
+    pub fn join(&self, channel: &str, request: &JoinRequest) -> Result<JoinAnswer> {
+        let response = self
+            .agent
+            .post(self.url(&format!("/channels/{channel}/participants")))
+            .send_json(request)
+            .map_err(|err| self.unreachable(&err))?;
+        if response.status().is_success() {
+            return Ok(JoinAnswer::Granted(Box::new(read_json(response, "join")?)));
+        }
+        let (message, retry) = server_message(response);
+        if retry {
+            Ok(JoinAnswer::Stale(message))
+        } else {
+            Err(anyhow!(message))
+        }
+    }
+
+    /// Everyone who has joined a channel.
+    pub fn list_participants(&self, channel: &str) -> Result<Vec<Participant>> {
+        let response = self.check(
+            self.agent
+                .get(self.url(&format!("/channels/{channel}/participants")))
+                .call()
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        let list: ParticipantList = read_json(response, "participant list")?;
+        Ok(list.participants)
+    }
+
+    /// One participant by identity, or `None` if nobody holds that identity
+    /// here. An unknown channel reads as `None` too: the join that follows is
+    /// what reports it, in the server's own words.
+    pub fn participant(&self, channel: &str, identity: &str) -> Result<Option<Participant>> {
+        let response = self
+            .agent
+            .get(self.url(&format!("/channels/{channel}/participants/{identity}")))
+            .call()
+            .map_err(|err| self.unreachable(&err))?;
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        let response = self.check(response)?;
+        read_json(response, "participant").map(Some)
+    }
+
     fn check(&self, response: Response<Body>) -> Result<Response<Body>> {
         if response.status().is_success() {
             return Ok(response);
         }
-        Err(anyhow!(server_message(response)))
+        Err(anyhow!(server_message(response).0))
     }
 
     fn unreachable(&self, err: &ureq::Error) -> anyhow::Error {
@@ -129,22 +188,29 @@ fn read_json<T: serde::de::DeserializeOwned>(
     })
 }
 
-/// The server's own words when it sends them, a readable fallback when it does not.
-fn server_message(mut response: Response<Body>) -> String {
+/// The server's own words when it sends them, a readable fallback when it does
+/// not, and whether the server said the request is worth making again.
+fn server_message(mut response: Response<Body>) -> (String, bool) {
     let status = response.status();
     let body = response.body_mut().read_to_string().unwrap_or_default();
     if let Ok(api_error) = serde_json::from_str::<ApiError>(&body) {
-        return api_error.error;
+        return (api_error.error, api_error.retry);
     }
     let body = body.trim();
     if body.is_empty() {
-        return format!("the saneha server refused the request ({status})");
+        return (
+            format!("the saneha server refused the request ({status})"),
+            false,
+        );
     }
     let mut summary: String = body.lines().next().unwrap_or_default().to_string();
     if summary.chars().count() > MAX_ERROR_BODY {
         summary = summary.chars().take(MAX_ERROR_BODY).collect::<String>() + "...";
     }
-    format!("the saneha server refused the request ({status}): {summary}")
+    (
+        format!("the saneha server refused the request ({status}): {summary}"),
+        false,
+    )
 }
 
 /// One line saying why the request never got an answer. ureq's own Display
