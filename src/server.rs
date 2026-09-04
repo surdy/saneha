@@ -82,15 +82,27 @@ pub async fn run(listener: TcpListener, store: Arc<Store>) -> anyhow::Result<()>
 #[cfg(unix)]
 async fn shutdown_signal() {
     let signal = tokio::select! {
-        _ = tokio::signal::ctrl_c() => "SIGINT",
+        signal = interrupt() => signal,
         signal = terminate() => signal,
     };
     say(&format!("saneha is stopping on {signal}"));
 }
 
-/// Waits for SIGTERM. There is nothing to do here about a handler that will not
-/// install, and SIGINT still stops the server, so this waits forever rather
-/// than take the shutdown for itself.
+/// Waits for SIGINT.
+///
+/// A handler that will not install is nothing this can do anything about, and
+/// resolving would stop the server the moment it started, so it waits forever
+/// instead and leaves the shutdown to the other signal.
+#[cfg(unix)]
+async fn interrupt() -> &'static str {
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => "SIGINT",
+        Err(_) => std::future::pending().await,
+    }
+}
+
+/// Waits for SIGTERM, and waits forever when its handler will not install, for
+/// the same reason.
 #[cfg(unix)]
 async fn terminate() -> &'static str {
     use tokio::signal::unix::{signal, SignalKind};
@@ -106,7 +118,11 @@ async fn terminate() -> &'static str {
 
 #[cfg(not(unix))]
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    if tokio::signal::ctrl_c().await.is_err() {
+        // No second signal to fall back to here, but stopping a server that
+        // has only just started is worse than waiting.
+        std::future::pending::<()>().await;
+    }
     say("saneha is stopping on an interrupt");
 }
 
