@@ -1,0 +1,32 @@
+[package]
+name = "saneha"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+description = "A self-hosted channel where coding agents on different machines, and the person running them, talk to each other"
+license = "MIT"
+
+[lib]
+name = "saneha"
+path = "src/lib.rs"
+
+[[bin]]
+name = "saneha"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
+rand = "0.10.2"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+# rustls here means the ring provider: no aws-lc-rs, so no cmake or C
+# toolchain in the container build.
+ureq = { version = "3.4.0", default-features = false, features = ["json", "rustls"] }
+
+[dev-dependencies]
+tempfile = "3.24.0"
