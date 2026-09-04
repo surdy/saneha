@@ -323,6 +323,11 @@ pub fn attachment_is_empty(filename: &str) -> String {
 
 /// The header an upload carries its filename in. The body of that request is
 /// the file itself, so the name it had travels alongside it rather than in it.
+///
+/// The value is percent-encoded by [`encode_filename`]. A header value is
+/// bytes and is read as ASCII by most of what handles one, and a filename is
+/// whatever language it was written in: `résumé.md` and `設計.md` are names,
+/// and they have to arrive as themselves.
 pub const FILENAME_HEADER: &str = "x-saneha-filename";
 
 /// What an attachment is stored as when the uploader does not say what it is.
@@ -354,6 +359,56 @@ pub fn attachment_filename(raw: &str) -> Option<String> {
         return None;
     }
     Some(cleaned.to_string())
+}
+
+/// A filename as it travels in a header: percent-encoded, so a name in any
+/// language survives a hop that only carries bytes a header may hold.
+///
+/// Everything but the unreserved characters is encoded, `%` included, so
+/// encoding and decoding are exact inverses and a name with a `%` in it comes
+/// back as it went. This is the `value-chars` of RFC 8187, which is what
+/// `filename*=UTF-8''...` in a `Content-Disposition` is made of, so one
+/// encoder does both headers.
+pub fn encode_filename(name: &str) -> String {
+    let mut encoded = String::with_capacity(name.len());
+    for byte in name.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(*byte as char);
+        } else {
+            use std::fmt::Write;
+            // Writing to a String cannot fail.
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+/// The inverse, as forgiving as a reader has to be: a `%` that does not start
+/// a pair of hex digits is the character it is, and bytes that turn out not to
+/// be UTF-8 are replaced rather than refused. What comes out still goes
+/// through [`attachment_filename`] before it is used for anything.
+pub fn decode_filename(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let pair = (index + 2 < bytes.len())
+            .then(|| std::str::from_utf8(&bytes[index + 1..index + 3]).ok())
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match (byte, pair) {
+            (b'%', Some(decoded_byte)) => {
+                decoded.push(decoded_byte);
+                index += 3;
+            }
+            _ => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// The one sentence every verb uses when the caller is acting as somebody who
@@ -435,6 +490,37 @@ mod tests {
         assert_eq!(attachment_filename(".."), None);
         assert_eq!(attachment_filename("/"), None);
         assert_eq!(attachment_filename("some/directory/"), None);
+    }
+
+    #[test]
+    fn a_filename_in_any_script_survives_a_header() {
+        for name in [
+            "handoff.md",
+            "résumé.md",
+            "設計メモ.md",
+            "100%-done.md",
+            "a b;c\"d.md",
+        ] {
+            let encoded = encode_filename(name);
+            assert!(
+                encoded.is_ascii() && !encoded.contains([' ', ';', '"']),
+                "{encoded}"
+            );
+            assert_eq!(decode_filename(&encoded), name);
+        }
+    }
+
+    #[test]
+    fn decoding_takes_what_it_is_given() {
+        // A name that was never encoded is the name it is.
+        assert_eq!(decode_filename("handoff.md"), "handoff.md");
+        // A stray `%` is a character, not the start of anything.
+        assert_eq!(decode_filename("100% done.md"), "100% done.md");
+        assert_eq!(decode_filename("ends-in-%"), "ends-in-%");
+        assert_eq!(decode_filename("%zz.md"), "%zz.md");
+        // Bytes that are not UTF-8 are replaced rather than refused, and what
+        // comes out still goes through `attachment_filename`.
+        assert!(!decode_filename("%FF%FE.md").is_empty());
     }
 
     #[test]

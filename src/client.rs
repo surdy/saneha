@@ -13,9 +13,10 @@ use ureq::http::Response;
 use ureq::{Agent, Body, SendBody};
 
 use crate::api::{
-    attachment_filename, attachment_is_empty, attachment_too_large, ApiError, Attachment, Channel,
-    ChannelList, CursorUpdate, JoinRequest, Joined, Message, MessageList, NewMessage, Participant,
-    ParticipantList, DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT,
+    attachment_filename, attachment_is_empty, attachment_too_large, decode_filename,
+    encode_filename, ApiError, Attachment, Channel, ChannelList, CursorUpdate, JoinRequest, Joined,
+    Message, MessageList, NewMessage, Participant, ParticipantList, DEFAULT_CONTENT_TYPE,
+    DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT,
 };
 
 /// The environment variable that points every subcommand at the server.
@@ -261,7 +262,9 @@ impl Remote {
                 .config()
                 .timeout_global(Some(ATTACHMENT_TIMEOUT))
                 .build()
-                .header(FILENAME_HEADER, &filename)
+                // Percent-encoded, because a header value carries ASCII and a
+                // filename is written in whatever language it was named in.
+                .header(FILENAME_HEADER, encode_filename(&filename))
                 .header("content-type", content_type_of(&filename))
                 // The size is known, so the request is length-delimited and
                 // the server can refuse an oversize one before reading it.
@@ -294,7 +297,10 @@ impl Remote {
         let body = response.into_body();
         Ok(Fetched {
             filename,
-            reader: Box::new(body.into_with_config().limit(MAX_ATTACHMENT).reader()),
+            // One past the cap: the limit is what a body may not exceed, and
+            // an attachment of exactly 25 MiB is one the server stored and
+            // must therefore be able to hand back.
+            reader: Box::new(body.into_with_config().limit(MAX_ATTACHMENT + 1).reader()),
         })
     }
 
@@ -341,12 +347,26 @@ impl Fetched {
 }
 
 /// The filename out of a `Content-Disposition`, before it is made safe.
+///
+/// `filename*` first, because that is the one that can hold a name in any
+/// script (RFC 8187, percent-encoded UTF-8); `filename` is the fallback, and
+/// what an older saneha sends. The header is read as bytes, so a server that
+/// put the name in it as it was written is understood too.
 fn filename_from(headers: &ureq::http::HeaderMap) -> Option<String> {
-    let disposition = headers
-        .get("content-disposition")?
-        .to_str()
-        .ok()?
-        .to_string();
+    let disposition =
+        String::from_utf8_lossy(headers.get("content-disposition")?.as_bytes()).into_owned();
+
+    if let Some((_, rest)) = disposition.split_once("filename*=") {
+        let value = rest.split(';').next().unwrap_or_default().trim();
+        // `UTF-8''name`: the charset, the language that is always empty here,
+        // and then the name.
+        let encoded = value.rsplit('\'').next().unwrap_or_default();
+        let decoded = decode_filename(encoded);
+        if !decoded.trim().is_empty() {
+            return Some(decoded);
+        }
+    }
+
     let (_, rest) = disposition.split_once("filename=")?;
     let rest = rest.trim();
     let name = match rest.strip_prefix('"') {
@@ -429,6 +449,36 @@ fn describe(err: &ureq::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `Content-Disposition` as the server writes one, as a header map.
+    fn disposition(value: &str) -> ureq::http::HeaderMap {
+        let mut headers = ureq::http::HeaderMap::new();
+        headers.insert(
+            "content-disposition",
+            ureq::http::HeaderValue::from_str(value).expect("a header value"),
+        );
+        headers
+    }
+
+    #[test]
+    fn a_download_takes_the_name_that_can_hold_any_script() {
+        // Both forms, which is what saneha sends: the encoded one wins.
+        let both =
+            disposition("attachment; filename=\"r_sum_.md\"; filename*=UTF-8''r%C3%A9sum%C3%A9.md");
+        assert_eq!(filename_from(&both).as_deref(), Some("résumé.md"));
+
+        // The old form alone, which is what an older saneha sends.
+        let plain = disposition("attachment; filename=\"handoff.md\"");
+        assert_eq!(filename_from(&plain).as_deref(), Some("handoff.md"));
+
+        // An encoded form that decodes to nothing falls back rather than
+        // taking the name away.
+        let empty = disposition("attachment; filename=\"handoff.md\"; filename*=UTF-8''");
+        assert_eq!(filename_from(&empty).as_deref(), Some("handoff.md"));
+
+        // Nothing to take a name from at all.
+        assert_eq!(filename_from(&ureq::http::HeaderMap::new()), None);
+    }
 
     #[test]
     fn adds_a_scheme_and_trims_trailing_slashes() {

@@ -147,7 +147,17 @@ Attachments are on the same volume and in the same gap. Their bytes live in
 `/data/attachments/<channel id>/<attachment id>`, beside the database rather
 than inside it, so a copy of `saneha.db` alone is not a copy of the channel: a
 backup has to take that directory too, and a restore has to put both back
-together or the transcript will name files that are not there.
+together or the transcript will name files that are not there. Issue #14 should
+snapshot the database **first** and copy `attachments/` after it: a file is
+written and fsynced before its row exists and is never modified afterwards, so
+a database from before a file is consistent with the files from after it, and
+the other order is not.
+
+An attachment's file is fsynced, its directory is not, and SQLite runs at
+`synchronous = NORMAL`, so a power cut can lose the row while leaving the file,
+or lose a file that has no row yet. Neither loses an attachment a message
+already carries: a message is written after its files. What is left over is an
+orphan file, which the hourly sweep removes once it is more than an hour old.
 
 A nightly `sqlite3 .backup` to satyanas, and the restore step to go with it, is
 [issue #14](https://github.com/surdy/saneha/issues/14).

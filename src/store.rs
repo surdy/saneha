@@ -309,9 +309,18 @@ pub enum StoreError {
 
     #[error(
         "there is no attachment {id:?} in the channel {channel:?}; \
-         upload it with: saneha send {channel} <body> --file <path>"
+         the ids are the ones under the messages in: saneha read {channel} --all"
     )]
     NoSuchAttachment { channel: String, id: String },
+
+    /// The row is there and the bytes are not. Said without naming any path on
+    /// the server, because the person reading it is on another machine and the
+    /// path is nothing they can act on.
+    #[error(
+        "the attachment {id:?} in {channel:?} is recorded but its file is not on the server; \
+         it was lost rather than removed, so ask whoever attached it to send it again"
+    )]
+    AttachmentGone { channel: String, id: String },
 
     /// An attachment belongs to the one message that carries it, so a second
     /// send naming the same id is refused rather than quietly moving it.
@@ -919,13 +928,26 @@ impl Store {
         Ok((attachment, path))
     }
 
-    /// Removes the attachments nobody ever bound to a message and that are
-    /// older than `max_age_seconds`: an upload whose send failed, or never
-    /// came. Answers with how many went.
+    /// Removes what no message will ever carry, and answers with what went.
     ///
-    /// The server runs this when it starts and every hour after that. Age is a
-    /// parameter so a test can sweep what it has just made.
-    pub fn sweep_unbound_attachments(&self, max_age_seconds: i64) -> Result<usize, StoreError> {
+    /// Two things go, and they are not the same thing:
+    ///
+    /// - a row nothing bound to a message, older than `max_age_seconds`: an
+    ///   upload whose send failed, or never came;
+    /// - a file no row names, last written longer ago than that: an upload the
+    ///   server was killed in the middle of, which never got as far as its
+    ///   row, and the directory a deleted channel left behind.
+    ///
+    /// The second is why this walks the directories as well as the table.
+    /// Nothing in the database records a file that was being written when the
+    /// process died, so no row-driven pass can ever find it, and it would sit
+    /// on the volume for good. The age is what makes the walk safe: an upload
+    /// in flight has a file and no row too, and it is minutes old rather than
+    /// hours.
+    ///
+    /// The server runs this when it starts and every hour after that. The age
+    /// is a parameter so a test can sweep what it has just made.
+    pub fn sweep_unbound_attachments(&self, max_age_seconds: i64) -> Result<Swept, StoreError> {
         let older_than = format!("-{max_age_seconds} seconds");
         let conn = self.conn();
         let mut statement = conn.prepare(
@@ -942,38 +964,99 @@ impl Store {
 
         for (id, channel_id) in &stale {
             // The file goes first: a row with no file is something a fetch
-            // reports, and a file with no row is something nothing can name.
+            // reports, and a file with no row is something the walk below
+            // finds.
             if let Some(root) = self.attachments.as_deref() {
-                let path = root.join(channel_id.to_string()).join(id);
-                if let Err(err) = std::fs::remove_file(&path) {
-                    if err.kind() != std::io::ErrorKind::NotFound {
-                        return Err(StoreError::AttachmentFile {
-                            doing: "remove",
-                            path,
-                            source: err,
-                        });
-                    }
-                }
+                remove_file(&root.join(channel_id.to_string()).join(id))?;
             }
             conn.execute("DELETE FROM attachments WHERE id = ?1", [id])?;
         }
-        Ok(stale.len())
+        drop(conn);
+
+        Ok(Swept {
+            unbound: stale.len(),
+            orphans: self.sweep_orphan_files(max_age_seconds)?,
+        })
     }
 
-    /// Removes every attachment file of a channel.
+    /// The walk: every file under the attachments directory that no row names
+    /// and that was last written more than `max_age_seconds` ago, and then any
+    /// channel directory left empty by it.
+    fn sweep_orphan_files(&self, max_age_seconds: i64) -> Result<usize, StoreError> {
+        let Some(root) = self.attachments.as_deref() else {
+            return Ok(0);
+        };
+        let cutoff = match std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(max_age_seconds.max(0) as u64))
+        {
+            Some(cutoff) => cutoff,
+            // A machine whose clock is not far enough from the epoch for the
+            // subtraction to hold is a machine whose file times mean nothing;
+            // nothing is removed on the strength of them.
+            None => return Ok(0),
+        };
+
+        let mut removed = 0;
+        for directory in read_directory(root)? {
+            let directory = directory?;
+            // Read before anything is removed from it: taking a file out of a
+            // directory is a write to the directory, so afterwards every
+            // directory this touched looks new.
+            let untouched_since = older_than(&directory, cutoff);
+            let mut left = 0;
+            for file in read_directory(&directory)? {
+                let file = file?;
+                if !older_than(&file, cutoff) || self.is_recorded(&file)? {
+                    left += 1;
+                    continue;
+                }
+                remove_file(&file)?;
+                removed += 1;
+            }
+            // An empty directory is a channel that has been deleted, or one
+            // whose uploads have all just gone. Either way the next upload
+            // makes it again, and a failure here is not worth a word.
+            if left == 0 && untouched_since {
+                let _ = std::fs::remove_dir(&directory);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Whether a file under the attachments directory is one the database
+    /// knows about. A name that is not an id cannot be.
+    fn is_recorded(&self, file: &Path) -> Result<bool, StoreError> {
+        let Some(id) = file.file_name().and_then(|name| name.to_str()) else {
+            return Ok(false);
+        };
+        if !is_attachment_id(id) {
+            return Ok(false);
+        }
+        Ok(self
+            .conn()
+            .query_row("SELECT 1 FROM attachments WHERE id = ?1", [id], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?
+            .is_some())
+    }
+
+    /// Removes the attachment files of the channel with this row id.
     ///
     /// The rows go by themselves: deleting a channel cascades to its
     /// attachments. The bytes are outside SQLite, so nothing cascades to them,
-    /// and the delete verb ([issue #6]) has to call this as well — before it
-    /// deletes the channel row, because the channel's id is what names the
-    /// directory.
+    /// and the delete verb ([issue #6]) has to remove them itself, in this
+    /// order: read the channel's row id, delete the channel row, then call
+    /// this with the id.
+    ///
+    /// That order and not the other one. Files first would mean that a delete
+    /// which then failed to remove the row left a channel that is still there,
+    /// whose transcript names attachments nothing can fetch. This way the
+    /// failure leaves a directory nobody can reach, which the sweep removes
+    /// within the hour.
     ///
     /// [issue #6]: https://github.com/surdy/saneha/issues/6
-    pub fn remove_channel_files(&self, channel: &str) -> Result<(), StoreError> {
-        let channel_id = {
-            let conn = self.conn();
-            channel_id(&conn, channel)?
-        };
+    pub fn remove_channel_files(&self, channel_id: i64) -> Result<(), StoreError> {
         let directory = self.channel_attachments(channel_id)?;
         match std::fs::remove_dir_all(&directory) {
             Ok(()) => Ok(()),
@@ -988,6 +1071,14 @@ impl Store {
         }
     }
 
+    /// The row id of a channel, which is what names its directory of files.
+    /// The delete verb reads this before it deletes the row, because
+    /// afterwards there is nothing left to read it from.
+    pub fn channel_row_id(&self, channel: &str) -> Result<i64, StoreError> {
+        let conn = self.conn();
+        channel_id(&conn, channel)
+    }
+
     /// Where a channel's attachment files live.
     fn channel_attachments(&self, channel_id: i64) -> Result<PathBuf, StoreError> {
         let root = self
@@ -996,6 +1087,84 @@ impl Store {
             .ok_or(StoreError::NoAttachmentStore)?;
         Ok(root.join(channel_id.to_string()))
     }
+}
+
+/// What one sweep removed: rows nothing bound, and files no row named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Swept {
+    /// Uploads whose send never came.
+    pub unbound: usize,
+    /// Files with no row: an upload the server was killed in the middle of, or
+    /// what a deleted channel left behind.
+    pub orphans: usize,
+}
+
+impl Swept {
+    /// Whether the sweep found anything at all to do.
+    pub fn is_empty(self) -> bool {
+        self.unbound == 0 && self.orphans == 0
+    }
+}
+
+impl std::fmt::Display for Swept {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            out,
+            "{} upload(s) no message carried and {} file(s) with no record",
+            self.unbound, self.orphans
+        )
+    }
+}
+
+/// Removes one file, and says nothing about one that is already gone.
+fn remove_file(path: &Path) -> Result<(), StoreError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(StoreError::AttachmentFile {
+            doing: "remove",
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// What is in a directory, as paths, and nothing at all when there is no such
+/// directory: nothing has been uploaded on this server yet.
+fn read_directory(
+    path: &Path,
+) -> Result<Box<dyn Iterator<Item = Result<PathBuf, StoreError>>>, StoreError> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Box::new(std::iter::empty()))
+        }
+        Err(source) => {
+            return Err(StoreError::AttachmentFile {
+                doing: "read",
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    let path = path.to_path_buf();
+    Ok(Box::new(entries.map(move |entry| {
+        entry
+            .map(|entry| entry.path())
+            .map_err(|source| StoreError::AttachmentFile {
+                doing: "read",
+                path: path.clone(),
+                source,
+            })
+    })))
+}
+
+/// Whether this was last written before `cutoff`. Something whose age cannot
+/// be read is treated as new, so the sweep never removes what it cannot date.
+fn older_than(path: &Path, cutoff: std::time::SystemTime) -> bool {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| modified < cutoff)
 }
 
 /// An attachment that has been given an id and a place to be written, and is
@@ -1142,7 +1311,13 @@ fn read_attachment_at(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result
 }
 
 /// What each message in a range carries, in one query rather than one per
-/// message, in the order the files were uploaded.
+/// message.
+///
+/// The order is the order the rows were written, which is the order the files
+/// were uploaded, which is the order `--file` was given in. `created_at` is
+/// only good to the second, and two files attached to one message are usually
+/// uploaded inside the same one, so the row order is what makes a read agree
+/// with what the send answered.
 fn read_attachments(
     conn: &Connection,
     channel_id: i64,
@@ -1153,7 +1328,7 @@ fn read_attachments(
         "SELECT message_id, {ATTACHMENT_COLUMNS}
            FROM attachments
           WHERE channel_id = ?1 AND message_id > ?2 AND message_id <= ?3
-          ORDER BY message_id, created_at, id"
+          ORDER BY message_id, rowid"
     ))?;
     let rows = statement.query_map(rusqlite::params![channel_id, after, last], |row| {
         Ok((row.get::<_, i64>(0)?, read_attachment_at(row, 1)?))

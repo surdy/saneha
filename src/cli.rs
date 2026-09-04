@@ -146,9 +146,9 @@ pub struct SendArgs {
     #[arg(long = "to", value_name = "NAME")]
     pub to: Vec<String>,
 
-    /// Attach a file to the message, at most 25 MiB of it. Repeatable. The
-    /// files are uploaded first and the message carries their ids, which
-    /// `saneha fetch` downloads them by
+    /// Attach a file to the message, at most 25 MiB of it. Repeatable. Each
+    /// file is uploaded first and the message carries its id; `saneha fetch`
+    /// downloads one by that id
     #[arg(long = "file", value_name = "PATH")]
     pub file: Vec<PathBuf>,
 
@@ -597,6 +597,12 @@ fn read(args: ReadArgs) -> Result<()> {
 /// directory. An existing file is never written over unless `--force` says so:
 /// a handoff document fetched twice must not quietly replace the copy that was
 /// already worked on.
+///
+/// The bytes land in a temporary file beside the destination and are renamed
+/// onto it once they have all arrived, so the path asked for holds either the
+/// file that was there before or the whole attachment, and never half of
+/// either. `--force` destroying a copy before the transfer that replaces it
+/// has finished is exactly the accident this is here to prevent.
 fn fetch(args: FetchArgs) -> Result<()> {
     let remote = Remote::from_env()?;
     let fetched = remote.fetch_attachment(&args.channel, &args.id)?;
@@ -607,15 +613,45 @@ fn fetch(args: FetchArgs) -> Result<()> {
     };
     let shown = destination.display().to_string();
 
-    let mut file = std::fs::OpenOptions::new()
+    // Claimed before anything is downloaded, and claimed by making it:
+    // asking whether the file is there and then writing it would be two
+    // answers with a gap between them. `--force` claims nothing, because
+    // there is something there to keep until the last moment.
+    let claimed = if args.force {
+        None
+    } else {
+        Some(claim(&destination, &shown)?)
+    };
+
+    let landing = beside(&destination);
+    let written = write_beside(fetched, &landing).and_then(|size| {
+        std::fs::rename(&landing, &destination)
+            .with_context(|| format!("could not put the attachment in place as {shown}"))?;
+        Ok(size)
+    });
+
+    let size = match written {
+        Ok(size) => size,
+        Err(err) => {
+            // Nothing arrived, so nothing is left behind: not the part that
+            // did arrive, and not the empty file that claimed the name.
+            let _ = std::fs::remove_file(&landing);
+            if let Some(claimed) = claimed {
+                let _ = std::fs::remove_file(&claimed);
+            }
+            return Err(err);
+        }
+    };
+    say(&format!("{shown}  {}", human_size(size)))
+}
+
+/// Makes an empty file at `destination`, and refuses if something is already
+/// there.
+fn claim(destination: &std::path::Path, shown: &str) -> Result<PathBuf> {
+    std::fs::OpenOptions::new()
         .write(true)
-        .truncate(true)
-        .create(true)
-        // `create_new` is the whole of the refusal: asking whether the file is
-        // there and then writing it would be two answers with a gap between
-        // them.
-        .create_new(!args.force)
-        .open(&destination)
+        .create_new(true)
+        .open(destination)
         .map_err(|err| match err.kind() {
             std::io::ErrorKind::AlreadyExists => anyhow!(
                 "{shown} is already there; write it somewhere else with --out, \
@@ -623,9 +659,42 @@ fn fetch(args: FetchArgs) -> Result<()> {
             ),
             _ => anyhow::Error::new(err).context(format!("could not write {shown}")),
         })?;
+    Ok(destination.to_path_buf())
+}
 
+/// Where the bytes land before they are renamed onto the destination: a hidden
+/// name in the same directory, so the rename is within one filesystem and
+/// therefore the one step it has to be.
+fn beside(destination: &std::path::Path) -> PathBuf {
+    use rand::RngExt;
+
+    let name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "attachment".to_string());
+    let tag: u32 = rand::rng().random();
+    let landing = format!(".{name}.{tag:08x}.part");
+    match destination.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(landing),
+        _ => PathBuf::from(landing),
+    }
+}
+
+/// Writes the attachment into `landing`, and answers with how much of it there
+/// was.
+fn write_beside(fetched: crate::client::Fetched, landing: &std::path::Path) -> Result<u64> {
+    let shown = landing.display().to_string();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(landing)
+        .with_context(|| format!("could not write {shown}"))?;
     let size = fetched.write_to(&mut file)?;
-    say(&format!("{shown}  {}", human_size(size)))
+    // On the disk before it is put in place, so what the rename publishes is
+    // the whole file and not the promise of one.
+    file.sync_all()
+        .with_context(|| format!("could not write {shown}"))?;
+    Ok(size)
 }
 
 /// An argument or environment variable that is there and says something.
@@ -842,7 +911,7 @@ fn entry(message: &Message, participants: &[Participant]) -> String {
     // the id is what `saneha fetch` is given.
     for attachment in &message.attachments {
         out.push_str(&format!(
-            "{INDENT}{ATTACHMENT_MARK} {}  {}  {}\n",
+            "{INDENT}{ATTACHMENT_MARK}  {}  {}  {}\n",
             attachment.id,
             attachment.filename,
             human_size(attachment.size)
@@ -852,8 +921,9 @@ fn entry(message: &Message, participants: &[Participant]) -> String {
 }
 
 /// What marks an attachment line, so a reader can tell one from a line of the
-/// body without reading it.
-const ATTACHMENT_MARK: &str = "⎘";
+/// body without reading it. A word rather than a glyph: most of what reads a
+/// transcript is a model, and a word is what a word means.
+const ATTACHMENT_MARK: &str = "attachment";
 
 /// A size as a person reads it. The exact number is in `--json`; this is for
 /// deciding whether to fetch the thing.
@@ -1139,8 +1209,8 @@ mod tests {
             printed,
             "#2  2026-09-04T09:00:00Z  alice@macbookpro  → everyone\n\
              \x20   the handoff\n\
-             \x20   ⎘ 0123456789abcdef0123456789abcdef  handoff.md  2.0 KiB\n\
-             \x20   ⎘ fedcba9876543210fedcba9876543210  notes.txt  1 byte\n"
+             \x20   attachment  0123456789abcdef0123456789abcdef  handoff.md  2.0 KiB\n\
+             \x20   attachment  fedcba9876543210fedcba9876543210  notes.txt  1 byte\n"
         );
     }
 

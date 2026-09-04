@@ -153,8 +153,10 @@ where
 
 /// Serves until the listener fails or the process is asked to stop.
 pub async fn run(listener: TcpListener, store: Arc<Store>) -> anyhow::Result<()> {
-    // Once at the start, because an upload interrupted by the stop that led to
-    // this start left a file nothing will ever bind, and then on the hour.
+    // Once at the start, and then on the hour. A stop the server took part in
+    // finishes the uploads in flight, so what the start finds is what a kill
+    // left: a file part-written and never recorded, which the sweep's walk of
+    // the directories is what catches.
     sweep(&store);
     let sweeper = tokio::spawn(sweep_hourly(Arc::clone(&store)));
 
@@ -180,16 +182,15 @@ async fn sweep_hourly(store: Arc<Store>) {
     }
 }
 
-/// Removes the attachments nobody bound to a message and that are old enough
-/// that nobody is going to. A sweep that fails is worth saying out loud and
-/// nothing more: the next one is an hour away, and a server that stopped
-/// serving over a file it could not delete would be worse than the file.
+/// Removes the uploads nobody bound to a message and the files no row names,
+/// once they are old enough that nobody is coming back for them. A sweep that
+/// fails is worth saying out loud and nothing more: the next one is an hour
+/// away, and a server that stopped serving over a file it could not delete
+/// would be worse than the file.
 fn sweep(store: &Store) {
     match store.sweep_unbound_attachments(UNBOUND_ATTACHMENT_TTL) {
-        Ok(0) => {}
-        Ok(swept) => say(&format!(
-            "removed {swept} attachment(s) no message ever carried"
-        )),
+        Ok(swept) if swept.is_empty() => {}
+        Ok(swept) => say(&format!("swept up {swept}")),
         Err(err) => say(&format!("could not sweep unbound attachments: {err}")),
     }
 }
@@ -439,40 +440,83 @@ async fn download_attachment(
     // An attachment is capped at 25 MiB, so it is read whole rather than
     // streamed: a body that streams would need a body type nothing else here
     // has any use for.
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|source| StoreError::AttachmentFile {
-            doing: "read",
-            path,
-            source,
-        })?;
+    let bytes = tokio::fs::read(&path).await.map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            // The row is there and the bytes are not: a restore that took the
+            // database without the files, or a file removed by hand. The
+            // caller is told what is true, and not where on this server it
+            // would have been.
+            StoreError::AttachmentGone {
+                channel: channel.clone(),
+                id: attachment.id.clone(),
+            }
+        } else {
+            StoreError::AttachmentFile {
+                doing: "read",
+                path,
+                source,
+            }
+        }
+    })?;
 
-    // The filename was made safe on the way in, so it holds no quote to end
-    // this value early.
-    let disposition = format!("attachment; filename=\"{}\"", attachment.filename);
     Ok((
         [
             (header::CONTENT_TYPE, attachment.content_type),
-            (header::CONTENT_DISPOSITION, disposition),
+            (
+                header::CONTENT_DISPOSITION,
+                disposition_of(&attachment.filename),
+            ),
+            // The stored type is whatever the uploader said, and the viewer
+            // (issue #8) will serve this from its own origin: nothing here is
+            // to be sniffed into something a browser will run, and every
+            // attachment is a download rather than a page.
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
         ],
         bytes,
     )
         .into_response())
 }
 
-/// The name an upload gave its file, made safe to store and to write out
-/// again.
+/// The `Content-Disposition` of a download: always an attachment, with the
+/// name twice.
+///
+/// `filename` is the old form and holds ASCII, so a name in any other script
+/// arrives there as underscores; `filename*` is RFC 8187 and holds the name
+/// itself, percent-encoded. Everything that reads one of them prefers the
+/// second when it is there, so both can be sent and the right one is used.
+fn disposition_of(filename: &str) -> String {
+    let ascii: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // The name was made safe on the way in, so it holds no quote to end this
+    // value early.
+    format!(
+        "attachment; filename=\"{ascii}\"; filename*=UTF-8''{}",
+        crate::api::encode_filename(filename)
+    )
+}
+
+/// The name an upload gave its file, decoded and then made safe to store and
+/// to write out again.
+///
+/// The header is read as bytes rather than as a string: percent-encoding is
+/// what a caller is asked to send, and a caller that sent the name as it was
+/// written is still understood rather than told it sent nothing.
 fn filename_of(headers: &HeaderMap) -> Result<String, Failure> {
     let given = headers
         .get(FILENAME_HEADER)
-        .and_then(|value| value.to_str().ok())
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
         .unwrap_or_default();
-    crate::api::attachment_filename(given).ok_or_else(|| {
-        StoreError::InvalidFilename {
-            value: given.to_string(),
-        }
-        .into()
-    })
+    let given = crate::api::decode_filename(&given);
+    crate::api::attachment_filename(&given)
+        .ok_or_else(|| StoreError::InvalidFilename { value: given }.into())
 }
 
 /// What the upload says the file is, or [`DEFAULT_CONTENT_TYPE`] when it says
@@ -590,6 +634,9 @@ impl From<StoreError> for Failure {
             | StoreError::NoSuchParticipant { .. }
             | StoreError::NoSuchAttachment { .. }
             | StoreError::NotAParticipant { .. } => StatusCode::NOT_FOUND,
+            // Gone rather than not found: this id named something, and the
+            // difference is what tells a restore gone wrong from a typo.
+            StoreError::AttachmentGone { .. } => StatusCode::GONE,
             StoreError::ChannelExists(_)
             | StoreError::ChannelClosed { .. }
             | StoreError::ParticipantChanged { .. }
