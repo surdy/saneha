@@ -4,8 +4,11 @@
 //! listens on is the trust boundary, so error text is written for whoever is
 //! reading it rather than hidden.
 
+use std::collections::HashMap;
+use std::future::IntoFuture;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path, Query, Request, State};
@@ -15,11 +18,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use tokio::net::TcpListener;
+use tokio::sync::{watch, Notify};
 
 use crate::api::{
-    ApiError, Channel, ChannelList, CursorUpdate, JoinRequest, Joined, Message, MessageList,
-    MessageQuery, NewChannel, NewMessage, Participant, ParticipantList, DEFAULT_MESSAGE_LIMIT,
-    MAX_BODY,
+    ApiError, Channel, ChannelList, ChannelState, CursorUpdate, JoinRequest, Joined, Message,
+    MessageList, MessageQuery, NewChannel, NewMessage, Participant, ParticipantList, WaitQuery,
+    Waited, DEFAULT_MESSAGE_LIMIT, MAX_BODY, MAX_HOLD,
 };
 use crate::store::{Store, StoreError};
 
@@ -61,8 +65,94 @@ fn env_path(key: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// How long the server goes on draining after it has been asked to stop
+/// before it stops anyway and says so.
+///
+/// A graceful shutdown waits for every request still in flight with no
+/// deadline of its own, and `wait` is a request that is meant to be in flight
+/// for an hour. Ending the held waits (which is what [`Serving::stop`] does)
+/// is what makes the drain finish in milliseconds; this is the backstop for
+/// anything else that will not let go, and it sits under the Quadlet unit's
+/// `TimeoutStopSec=30`, so the process stops itself rather than being killed.
+const DRAIN_LIMIT: Duration = Duration::from_secs(20);
+
+/// Everything a request handler is given: the database, the waiters to wake
+/// when a transcript changes, and the switch that ends every held wait.
+pub struct Serving {
+    store: Arc<Store>,
+    waiters: Waiters,
+    /// Flipped once, when the server has been asked to stop. Held as the
+    /// sender so it outlives every receiver and a waiter's `changed()` only
+    /// ever resolves because the server really is stopping.
+    stopping: watch::Sender<bool>,
+}
+
+impl Serving {
+    fn new(store: Arc<Store>) -> Serving {
+        Serving {
+            store,
+            waiters: Waiters::default(),
+            stopping: watch::channel(false).0,
+        }
+    }
+
+    fn stopping(&self) -> watch::Receiver<bool> {
+        self.stopping.subscribe()
+    }
+
+    /// Ends every wait stream being held open, at once.
+    fn stop(&self) {
+        let _ = self.stopping.send(true);
+    }
+}
+
+/// Who is waiting on which channel.
+///
+/// One [`Notify`] per channel, made when the first waiter on it arrives and
+/// kept for the life of the process. There is one of these per channel anybody
+/// has ever waited on, which is a handful of pointers, and only a channel that
+/// exists ever gets one: the unread check runs before a waiter registers, and
+/// it is what refuses a channel that is not there.
+///
+/// The wake is `notify_waiters`, which wakes everyone registered and remembers
+/// nothing. A waiter therefore registers *before* it looks at the transcript,
+/// so a message written in between is a wake it already holds a ticket for
+/// rather than one it sleeps through.
+#[derive(Default)]
+struct Waiters {
+    channels: Mutex<HashMap<String, Arc<Notify>>>,
+}
+
+impl Waiters {
+    fn on(&self, channel: &str) -> Arc<Notify> {
+        Arc::clone(self.channels().entry(channel.to_string()).or_default())
+    }
+
+    /// Wakes everyone waiting on `channel`. Called after a write has
+    /// committed, never before: a waiter woken by a transaction still open
+    /// would look and find nothing.
+    fn wake(&self, channel: &str) {
+        if let Some(notify) = self.channels().get(channel) {
+            notify.notify_waiters();
+        }
+    }
+
+    fn channels(&self) -> MutexGuard<'_, HashMap<String, Arc<Notify>>> {
+        // A poisoned lock still holds a usable map, for the same reason the
+        // store's connection does.
+        self.channels
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 /// Every route the server answers.
-pub fn router(store: Arc<Store>) -> Router {
+///
+/// The state is filled in by [`run`] rather than here, because half of what a
+/// handler is given only means anything once there is a shutdown to be told
+/// about: a router built on the side would hold waits open that nothing could
+/// ever end.
+fn routes() -> Router<Arc<Serving>> {
     Router::new()
         .route("/", get(root))
         .route("/health", get(health))
@@ -82,12 +172,18 @@ pub fn router(store: Arc<Store>) -> Router {
             "/channels/{channel}/participants/{identity}/cursor",
             post(set_read_cursor),
         )
+        // One request, held open until this participant has something unread.
+        // It is a read like any other and moves no cursor: what a waiter is
+        // told about is still there for its next `read`.
+        .route(
+            "/channels/{channel}/participants/{identity}/wait",
+            get(wait),
+        )
         .route(
             "/channels/{channel}/messages",
             post(send_message).get(list_messages),
         )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
-        .with_state(store)
 }
 
 /// [`Json`] with axum's own refusals rewritten into saneha's `{"error": ...}`
@@ -136,11 +232,48 @@ where
 }
 
 /// Serves until the listener fails or the process is asked to stop.
+///
+/// Stopping is two things rather than one. The signal starts axum's graceful
+/// drain, which waits for every request still in flight; and the same signal
+/// ends every held wait stream, because a wait is in flight on purpose for as
+/// long as an hour and a drain that waited for those would stall until the
+/// supervisor lost patience and sent SIGKILL. [`DRAIN_LIMIT`] is the backstop
+/// under all of it.
 pub async fn run(listener: TcpListener, store: Arc<Store>) -> anyhow::Result<()> {
-    axum::serve(listener, router(store))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let serving = Arc::new(Serving::new(store));
+    let stopping = serving.stopping();
+
+    let stop = Arc::clone(&serving);
+    let serve = axum::serve(listener, routes().with_state(serving))
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            stop.stop();
+        })
+        .into_future();
+
+    let mut serve = std::pin::pin!(serve);
+    tokio::select! {
+        served = &mut serve => served?,
+        () = drain_limit(stopping) => say(&format!(
+            "saneha stopped with requests still in flight after {} seconds",
+            DRAIN_LIMIT.as_secs()
+        )),
+    }
     Ok(())
+}
+
+/// Resolves [`DRAIN_LIMIT`] after the server has been asked to stop, and never
+/// before: a server that is still serving must not be raced by its own
+/// deadline.
+async fn drain_limit(mut stopping: watch::Receiver<bool>) {
+    while !*stopping.borrow_and_update() {
+        if stopping.changed().await.is_err() {
+            // Nothing left to be told by, so there is no shutdown to put a
+            // limit on.
+            std::future::pending::<()>().await;
+        }
+    }
+    tokio::time::sleep(DRAIN_LIMIT).await;
 }
 
 /// Waits for the first signal that means stop, and says which one it was.
@@ -215,26 +348,30 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn create_channel(
-    State(store): State<Arc<Store>>,
+    State(serving): State<Arc<Serving>>,
     ApiJson(body): ApiJson<NewChannel>,
 ) -> Result<(StatusCode, Json<Channel>), Failure> {
-    let channel = store.create_channel(body.name.as_deref(), body.purpose.as_deref())?;
+    let channel = serving
+        .store
+        .create_channel(body.name.as_deref(), body.purpose.as_deref())?;
     Ok((StatusCode::CREATED, Json(channel)))
 }
 
-async fn list_channels(State(store): State<Arc<Store>>) -> Result<Json<ChannelList>, Failure> {
-    let channels = store.list_channels()?;
+async fn list_channels(State(serving): State<Arc<Serving>>) -> Result<Json<ChannelList>, Failure> {
+    let channels = serving.store.list_channels()?;
     Ok(Json(ChannelList { channels }))
 }
 
 /// A join, or a resume, or the grant of a suffixed identity: which one it was
 /// is in the body rather than in the status, because all three succeeded.
 async fn join(
-    State(store): State<Arc<Store>>,
+    State(serving): State<Arc<Serving>>,
     Path(channel): Path<String>,
     ApiJson(body): ApiJson<JoinRequest>,
 ) -> Result<(StatusCode, Json<Joined>), Failure> {
-    let joined = store.join(&channel, &body)?;
+    let joined = serving.store.join(&channel, &body)?;
+    // A join writes a system message, so it is something to be woken for.
+    serving.waiters.wake(&channel);
     let status = if joined.resumed {
         StatusCode::OK
     } else {
@@ -244,45 +381,111 @@ async fn join(
 }
 
 async fn list_participants(
-    State(store): State<Arc<Store>>,
+    State(serving): State<Arc<Serving>>,
     Path(channel): Path<String>,
 ) -> Result<Json<ParticipantList>, Failure> {
-    let participants = store.list_participants(&channel)?;
+    let participants = serving.store.list_participants(&channel)?;
     Ok(Json(ParticipantList { participants }))
 }
 
 async fn participant(
-    State(store): State<Arc<Store>>,
+    State(serving): State<Arc<Serving>>,
     Path((channel, identity)): Path<(String, String)>,
 ) -> Result<Json<Participant>, Failure> {
-    let participant = store.participant(&channel, &identity)?.ok_or_else(|| {
-        Failure::from(StoreError::NoSuchParticipant {
-            channel: channel.clone(),
-            identity: identity.clone(),
-        })
-    })?;
+    let participant = serving
+        .store
+        .participant(&channel, &identity)?
+        .ok_or_else(|| {
+            Failure::from(StoreError::NoSuchParticipant {
+                channel: channel.clone(),
+                identity: identity.clone(),
+            })
+        })?;
     Ok(Json(participant))
 }
 
 /// One message from a participant, with everyone it is addressed to worked out
 /// from its mentions and from `to`.
 async fn send_message(
-    State(store): State<Arc<Store>>,
+    State(serving): State<Arc<Serving>>,
     Path(channel): Path<String>,
     ApiJson(body): ApiJson<NewMessage>,
 ) -> Result<(StatusCode, Json<Message>), Failure> {
-    let message = store.send(&channel, &body.from, &body.body, &body.to)?;
+    let message = serving
+        .store
+        .send(&channel, &body.from, &body.body, &body.to)?;
+    // After the write has committed, so everyone woken by it can see it.
+    serving.waiters.wake(&channel);
     Ok((StatusCode::CREATED, Json(message)))
+}
+
+/// One request, held open until this participant has something unread, the
+/// channel closes, or `hold` seconds pass.
+///
+/// Three answers: `200` with what arrived and the state of the channel, `204`
+/// when the hold elapsed with nothing to say, and `503` with `retry` when the
+/// server is stopping. The caller asks again after a `204`, which is how a
+/// hold short enough to survive a reverse proxy adds up to an hour of waiting.
+///
+/// The loop is register, look, sleep, in that order. Registering first is what
+/// makes it safe: a message written between the look and the sleep has already
+/// left a wake this request will find rather than one it missed. Nothing here
+/// holds the store's lock across an await — the look is one call that takes
+/// the lock, answers, and gives it back — so a wait costs the rest of the
+/// server nothing while it sits there.
+async fn wait(
+    State(serving): State<Arc<Serving>>,
+    Path((channel, identity)): Path<(String, String)>,
+    ApiQuery(query): ApiQuery<WaitQuery>,
+) -> Result<Response, Failure> {
+    let hold = Duration::from_secs(query.hold.unwrap_or(MAX_HOLD).clamp(1, MAX_HOLD));
+    let deadline = tokio::time::Instant::now() + hold;
+    let notify = serving.waiters.on(&channel);
+    let mut stopping = serving.stopping();
+
+    loop {
+        let woken = notify.notified();
+        tokio::pin!(woken);
+        // Registers this waiter now rather than at the first poll, which is
+        // what closes the gap between looking and sleeping.
+        woken.as_mut().enable();
+
+        if *stopping.borrow_and_update() {
+            return Err(Failure::stopping());
+        }
+
+        let (messages, state) =
+            serving
+                .store
+                .unread(&channel, &identity, query.mentions, DEFAULT_MESSAGE_LIMIT)?;
+        if !messages.is_empty() || state == ChannelState::Closed {
+            return Ok(Json(Waited {
+                messages,
+                channel_state: state,
+            })
+            .into_response());
+        }
+
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+        tokio::select! {
+            () = woken => {}
+            () = tokio::time::sleep(left) => return Ok(StatusCode::NO_CONTENT.into_response()),
+            _ = stopping.changed() => return Err(Failure::stopping()),
+        }
+    }
 }
 
 /// A page of a transcript. This moves nothing, so a caller that wants its read
 /// cursor advanced asks for that separately.
 async fn list_messages(
-    State(store): State<Arc<Store>>,
+    State(serving): State<Arc<Serving>>,
     Path(channel): Path<String>,
     ApiQuery(query): ApiQuery<MessageQuery>,
 ) -> Result<Json<MessageList>, Failure> {
-    let messages = store.messages(
+    let messages = serving.store.messages(
         &channel,
         query.after.unwrap_or(0),
         query.limit.unwrap_or(DEFAULT_MESSAGE_LIMIT),
@@ -294,11 +497,13 @@ async fn list_messages(
 /// rather than refused, so a cursor never moves backwards however many readers
 /// share an identity.
 async fn set_read_cursor(
-    State(store): State<Arc<Store>>,
+    State(serving): State<Arc<Serving>>,
     Path((channel, identity)): Path<(String, String)>,
     ApiJson(body): ApiJson<CursorUpdate>,
 ) -> Result<Json<Participant>, Failure> {
-    let participant = store.set_read_cursor(&channel, &identity, body.read_cursor)?;
+    let participant = serving
+        .store
+        .set_read_cursor(&channel, &identity, body.read_cursor)?;
     Ok(Json(participant))
 }
 
@@ -329,6 +534,16 @@ impl Failure {
             status,
             message,
             retry: false,
+        }
+    }
+
+    /// A wait that was ended by the server stopping rather than by anything
+    /// about the request. `retry` says so, and the caller waits again.
+    fn stopping() -> Failure {
+        Failure {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: crate::api::stopping(),
+            retry: true,
         }
     }
 }
@@ -378,5 +593,67 @@ impl From<StoreError> for Failure {
             retry: matches!(err, StoreError::ParticipantChanged { .. }),
             message: err.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The order the wait handler registers in, on its own: a waiter that has
+    /// registered before the write is woken by it.
+    #[tokio::test]
+    async fn a_registered_waiter_is_woken() {
+        let waiters = Waiters::default();
+        let notify = waiters.on("brisk-otter");
+        let woken = notify.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
+
+        waiters.wake("brisk-otter");
+
+        tokio::time::timeout(Duration::from_secs(1), woken)
+            .await
+            .expect("the waiter was not woken");
+    }
+
+    /// A wake on one channel is not a wake on another, and a wake on a channel
+    /// nobody is waiting on is not an error.
+    #[tokio::test]
+    async fn a_wake_reaches_one_channel_only() {
+        let waiters = Waiters::default();
+        let notify = waiters.on("brisk-otter");
+        let woken = notify.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
+
+        waiters.wake("keen-heron");
+        waiters.wake("nobody-is-here");
+
+        tokio::time::timeout(Duration::from_millis(100), woken)
+            .await
+            .expect_err("a wake on another channel woke this waiter");
+    }
+
+    /// The drain backstop is a deadline on stopping, not on serving: until the
+    /// server is asked to stop it never resolves.
+    #[tokio::test]
+    async fn the_drain_limit_waits_for_the_shutdown_before_it_starts() {
+        let serving = Arc::new(Serving::new(Arc::new(
+            Store::open_in_memory().expect("a database"),
+        )));
+        let limit = drain_limit(serving.stopping());
+        tokio::pin!(limit);
+
+        tokio::time::timeout(Duration::from_millis(100), &mut limit)
+            .await
+            .expect_err("the drain limit started before the server was asked to stop");
+
+        // After the shutdown it is a deadline rather than a stop: the drain
+        // gets its DRAIN_LIMIT before this says anything.
+        serving.stop();
+        tokio::time::timeout(Duration::from_millis(100), &mut limit)
+            .await
+            .expect_err("the drain limit left no time to drain in");
     }
 }

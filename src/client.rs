@@ -11,8 +11,8 @@ use ureq::http::Response;
 use ureq::{Agent, Body};
 
 use crate::api::{
-    ApiError, Channel, ChannelList, CursorUpdate, JoinRequest, Joined, Message, MessageList,
-    NewMessage, Participant, ParticipantList, DEFAULT_MESSAGE_LIMIT,
+    ApiError, Channel, ChannelList, ChannelState, CursorUpdate, JoinRequest, Joined, Message,
+    MessageList, NewMessage, Participant, ParticipantList, Waited, DEFAULT_MESSAGE_LIMIT,
 };
 
 /// The environment variable that points every subcommand at the server.
@@ -21,6 +21,11 @@ pub const URL_ENV: &str = "SANEHA_URL";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_BODY: usize = 200;
 
+/// How much longer than the hold it asked for a wait request will sit there
+/// before it decides the answer is not coming. The server answers at the hold
+/// whatever happens, so anything past this is the connection and not the wait.
+const WAIT_MARGIN: Duration = Duration::from_secs(10);
+
 /// What a join came back with: the identity granted, or the server saying the
 /// participant this join reasoned about is not the participant it found, so
 /// the caller should look again before asking again.
@@ -28,6 +33,23 @@ const MAX_ERROR_BODY: usize = 200;
 pub enum JoinAnswer {
     Granted(Box<Joined>),
     Stale(String),
+}
+
+/// How one held wait request ended.
+#[derive(Debug)]
+pub enum Waiting {
+    /// Something unread, and the state of the channel it is in: `Closed` means
+    /// this is the end of the transcript and nothing more is coming.
+    Arrived {
+        messages: Vec<Message>,
+        channel_state: ChannelState,
+    },
+    /// The hold elapsed with nothing to say. Ask again.
+    Nothing,
+    /// Nothing is wrong with the request, but the server could not answer it
+    /// now: it is stopping, or it is not there. Ask again shortly, in these
+    /// words if it never comes back.
+    Later(String),
 }
 
 /// The server as seen from a subcommand.
@@ -199,6 +221,64 @@ impl Remote {
             if !full {
                 return Ok(all);
             }
+        }
+    }
+
+    /// Holds one request open on the server until this participant has
+    /// something unread, the channel closes, or `hold` seconds pass.
+    ///
+    /// The hold is the server's business and this only asks for it, so the
+    /// transport is given the hold plus a margin rather than the agent's usual
+    /// timeout: a wait is a request that is meant to be slow. Everything that
+    /// is worth asking again for — the server stopping, the server not being
+    /// there at all — comes back as `Later` with the words to print if it
+    /// never does come back, because the caller is the one holding the
+    /// stopwatch.
+    pub fn wait(
+        &self,
+        channel: &str,
+        identity: &str,
+        mentions: bool,
+        hold: u64,
+    ) -> Result<Waiting> {
+        let url = self.url(&format!(
+            "/channels/{channel}/participants/{identity}/wait?mentions={mentions}&hold={hold}"
+        ));
+        let response = match self
+            .agent
+            .get(url)
+            .config()
+            .timeout_global(Some(Duration::from_secs(hold) + WAIT_MARGIN))
+            .build()
+            .call()
+        {
+            Ok(response) => response,
+            Err(err) => {
+                let unreachable = self.unreachable(&err);
+                return match err {
+                    // A URL that is not a URL will not become one by asking
+                    // again; anything else is the server being away.
+                    ureq::Error::BadUri(_) => Err(unreachable),
+                    _ => Ok(Waiting::Later(unreachable.to_string())),
+                };
+            }
+        };
+
+        if response.status() == 204 {
+            return Ok(Waiting::Nothing);
+        }
+        if response.status().is_success() {
+            let waited: Waited = read_json(response, "wait")?;
+            return Ok(Waiting::Arrived {
+                messages: waited.messages,
+                channel_state: waited.channel_state,
+            });
+        }
+        let (message, retry) = server_message(response);
+        if retry {
+            Ok(Waiting::Later(message))
+        } else {
+            Err(anyhow!(message))
         }
     }
 
