@@ -301,6 +301,72 @@ fn mentions_sleeps_through_what_is_addressed_to_somebody_else() {
     );
 }
 
+/// The skill loop is wait, read, reply, wait. If the reply woke the wait that
+/// follows it, an agent would spin instead of idling.
+#[test]
+fn nobody_is_woken_by_their_own_message() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    join(&remote, "brisk-otter", "alice");
+    let bob = join(&remote, "brisk-otter", "bob");
+    catch_up(&remote, "brisk-otter", &bob);
+
+    let mine = send(&remote, "brisk-otter", &bob, "@alice on it");
+    // A sender that had read everything stays caught up, so its own message is
+    // not even unread: `read` will not echo it back either.
+    assert_eq!(read_cursor(&remote, "brisk-otter", &bob), mine.id);
+
+    let ended = Waiter::start(
+        &server,
+        &["wait", "brisk-otter", "--as", "bob", "--timeout", "2"],
+    )
+    .finish();
+    ended.exited(3);
+    assert!(
+        ended.printed.is_empty(),
+        "a participant was woken by its own message: {:?}",
+        ended.printed
+    );
+}
+
+/// Not a wake, but not hidden either: a sender that was already behind keeps
+/// its own message in the backlog, and what a wait prints stays byte for byte
+/// what `read` would print.
+#[test]
+fn an_own_message_is_printed_with_the_backlog_it_sits_in() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+    let bob = join(&remote, "brisk-otter", "bob");
+    catch_up(&remote, "brisk-otter", &bob);
+
+    // Alice speaks first, so bob is behind; bob's own message after that does
+    // not move a cursor that was not at the end.
+    send(&remote, "brisk-otter", &alice, "from alice");
+    let before = read_cursor(&remote, "brisk-otter", &bob);
+    send(&remote, "brisk-otter", &bob, "from bob");
+    assert_eq!(
+        read_cursor(&remote, "brisk-otter", &bob),
+        before,
+        "a send moved the cursor of a sender that was behind"
+    );
+
+    let ended = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]).finish();
+    ended.exited(0);
+    assert!(
+        ended.printed.contains("from alice") && ended.printed.contains("from bob"),
+        "the backlog was not printed whole: {:?}",
+        ended.printed
+    );
+    assert_eq!(
+        read_cursor(&remote, "brisk-otter", &bob),
+        before,
+        "the wait moved the read cursor"
+    );
+}
+
 #[test]
 fn mentions_wakes_on_a_broadcast() {
     let server = TestServer::start();

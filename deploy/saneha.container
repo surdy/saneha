@@ -26,6 +26,14 @@ Volume=saneha-data.volume:/data:z,U
 # localhost.
 PublishPort=127.0.0.1:7343:7343/tcp
 
+# How long podman lets the server stop itself before it sends SIGKILL. The
+# default is ten seconds, which is under the server's own drain backstop
+# (DRAIN_LIMIT, 20s in src/server.rs): a request that will not let go would be
+# killed before the server ever got to stop itself and say so. This sits above
+# that backstop and below TimeoutStopSec below, so the order is always: waits
+# end at the signal, the drain finishes, the backstop, podman, systemd.
+StopTimeout=25
+
 User=10001:10001
 ReadOnly=true
 Tmpfs=/tmp:rw,noexec,nosuid,size=32m

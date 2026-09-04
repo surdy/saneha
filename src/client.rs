@@ -268,10 +268,17 @@ impl Remote {
             return Ok(Waiting::Nothing);
         }
         if response.status().is_success() {
-            let waited: Waited = read_json(response, "wait")?;
-            return Ok(Waiting::Arrived {
-                messages: waited.messages,
-                channel_state: waited.channel_state,
+            return Ok(match read_json::<Waited>(response, "wait") {
+                Ok(waited) => Waiting::Arrived {
+                    messages: waited.messages,
+                    channel_state: waited.channel_state,
+                },
+                // A body that stops in the middle is the connection going
+                // away, and nothing has been printed or advanced yet, so it is
+                // worth asking again rather than failing outright. A server
+                // that is genuinely speaking a shape this version cannot read
+                // says so too, in the same words, once the asking runs out.
+                Err(err) => Waiting::Later(err.to_string()),
             });
         }
         let (message, retry) = server_message(response);

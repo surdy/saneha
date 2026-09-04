@@ -237,11 +237,12 @@ pub struct WaitArgs {
 
     /// How long one request may be held open by the server before it is
     /// re-issued, in seconds. The default is the server's own cap and there is
-    /// no reason to set this outside a test.
+    /// no reason to set this outside a test, which is why it is a flag and not
+    /// an environment variable: nothing in a shell should be able to change
+    /// how a wait behaves without saying so on the command line.
     #[arg(
         long,
         value_name = "SECS",
-        env = "SANEHA_HOLD",
         hide = true,
         value_parser = clap::value_parser!(u64).range(1..),
     )]

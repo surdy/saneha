@@ -10,8 +10,10 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// How long a stop may take before the test calls it stalled. A graceful
-/// shutdown with no connections open takes milliseconds; the container's own
-/// patience is ten seconds.
+/// shutdown with no connections open takes milliseconds, and one with a wait
+/// held open should take no longer, because the signal ends the waits. In
+/// production the patience is the Quadlet unit's `StopTimeout=25`, and past
+/// that podman's SIGKILL.
 const PATIENCE: Duration = Duration::from_secs(5);
 
 #[test]
@@ -76,8 +78,8 @@ fn stops_gracefully_on(signal: &str) {
 ///
 /// A graceful shutdown waits for every request in flight, and a wait is in
 /// flight on purpose for as long as an hour. Without the server ending its own
-/// held waits, this stop would wait out `TimeoutStopSec` and end in SIGKILL,
-/// which is exactly the stall the SIGTERM handling above removed.
+/// held waits, this stop would wait out the unit's stop timeout and end in
+/// SIGKILL, which is exactly the stall the SIGTERM handling above removed.
 #[test]
 fn a_held_wait_does_not_stall_the_stop() {
     let database = tempfile::tempdir().expect("temporary directory");
@@ -113,10 +115,12 @@ fn a_held_wait_does_not_stall_the_stop() {
     // that follows really does block.
     saneha(&["read", "brisk-otter", "--as", "alice"]);
 
-    // A timeout far longer than this test is willing to sit here: what ends
-    // this wait has to be the server, not its own clock. Kept under the
-    // client's retry budget so that a server which never comes back is an
-    // error rather than a test that runs for half a minute.
+    // A timeout far longer than the moment the signal arrives, so what ends
+    // this wait is the server rather than its own clock — and deliberately
+    // under the client's thirty-second retry budget, which is the only reason
+    // this test ends promptly. A waiter told its server is stopping goes on
+    // asking for that budget so it survives a redeploy; with a longer
+    // `--timeout` this would sit here for the whole of it before exiting 1.
     let mut waiter = Command::new(env!("CARGO_BIN_EXE_saneha"))
         .args(["wait", "brisk-otter", "--as", "alice", "--timeout", "5"])
         .env("SANEHA_URL", &url)

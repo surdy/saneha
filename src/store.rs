@@ -616,6 +616,25 @@ impl Store {
                 rusqlite::params![channel_id, message_id, recipient],
             )?;
         }
+
+        // A sender that had read everything up to this point stays caught up.
+        // Nobody has to be told what they just said: without this a `read`
+        // echoes the message back to whoever wrote it, and a `wait` wakes on
+        // it, so the skill loop — wait, read, reply, wait — would wake itself
+        // once per reply and never idle.
+        //
+        // The condition is the whole of it: `read_cursor = ?2 - 1` is true
+        // only when the cursor was on the message before this one, which is
+        // what "nothing unread" means at this instant. A sender that was
+        // already behind is left exactly where it is, so what it had not read
+        // is still unread and its own message arrives in that backlog like
+        // anything else.
+        tx.execute(
+            "UPDATE participants SET read_cursor = ?2
+              WHERE id = ?1 AND read_cursor = ?2 - 1",
+            rusqlite::params![from_id, message_id],
+        )?;
+
         tx.commit()?;
 
         // Everything the message is made of was in hand before it was written,

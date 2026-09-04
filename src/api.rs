@@ -229,6 +229,12 @@ impl Message {
     /// says. A `join` or a `leave` does not: a participant that asked to be
     /// woken only for what is addressed to it did not ask to be woken because
     /// somebody arrived, and it will see the arrival in its next `read`.
+    /// Whether `identity` is who wrote this. A system message was written by
+    /// nobody, so it is never anyone's own.
+    pub fn written_by(&self, identity: &str) -> bool {
+        self.from.as_deref() == Some(identity)
+    }
+
     pub fn wakes(&self, identity: &str) -> bool {
         match self.kind {
             MessageKind::Close => true,
@@ -316,9 +322,8 @@ pub const DEFAULT_WAIT_TIMEOUT: u64 = 3600;
 /// What a held request is ended with when the server is stopping. It comes
 /// back as a `503` with `retry` set, because there is nothing wrong with the
 /// request: the server will take it again when it is back.
-pub fn stopping() -> String {
-    "the saneha server is stopping; this wait ended early and can be started again".to_string()
-}
+pub const STOPPING: &str =
+    "the saneha server is stopping; this wait ended early and can be started again";
 
 /// How many messages one fetch returns when the caller does not say.
 pub const DEFAULT_MESSAGE_LIMIT: usize = 500;

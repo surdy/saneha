@@ -108,16 +108,17 @@ impl Serving {
 
 /// Who is waiting on which channel.
 ///
-/// One [`Notify`] per channel, made when the first waiter on it arrives and
-/// kept for the life of the process. There is one of these per channel anybody
-/// has ever waited on, which is a handful of pointers, and only a channel that
-/// exists ever gets one: the unread check runs before a waiter registers, and
-/// it is what refuses a channel that is not there.
+/// One [`Notify`] per channel, made when the first waiter on that channel
+/// settles down to wait. Only a channel that exists gets one: the wait handler
+/// makes its first look before it registers, and that look is what refuses a
+/// channel that is not there, so a made-up name in a URL leaves nothing
+/// behind. What is left is one entry per channel that has ever been waited on,
+/// dropped by [`Waiters::forget`] when the channel itself goes.
 ///
-/// The wake is `notify_waiters`, which wakes everyone registered and remembers
-/// nothing. A waiter therefore registers *before* it looks at the transcript,
-/// so a message written in between is a wake it already holds a ticket for
-/// rather than one it sleeps through.
+/// The wake is `notify_waiters`, which wakes every `Notified` made before the
+/// call and remembers nothing afterwards. A waiter therefore makes its
+/// `Notified` *before* it looks at the transcript, so a message written in
+/// between is a wake it already holds rather than one it sleeps through.
 #[derive(Default)]
 struct Waiters {
     channels: Mutex<HashMap<String, Arc<Notify>>>,
@@ -135,6 +136,18 @@ impl Waiters {
         if let Some(notify) = self.channels().get(channel) {
             notify.notify_waiters();
         }
+    }
+
+    /// Forgets a channel, because the channel itself is gone.
+    ///
+    /// Nothing calls this yet: `saneha delete` is the one verb that makes an
+    /// entry here permanently pointless, and it is its own ticket (#6). That
+    /// ticket must call this after the delete commits, and wake first, so the
+    /// waiters find the channel gone and say so rather than being left holding
+    /// a notifier nothing will ever ring.
+    #[allow(dead_code)]
+    fn forget(&self, channel: &str) {
+        self.channels().remove(channel);
     }
 
     fn channels(&self) -> MutexGuard<'_, HashMap<String, Arc<Notify>>> {
@@ -427,12 +440,17 @@ async fn send_message(
 /// server is stopping. The caller asks again after a `204`, which is how a
 /// hold short enough to survive a reverse proxy adds up to an hour of waiting.
 ///
-/// The loop is register, look, sleep, in that order. Registering first is what
-/// makes it safe: a message written between the look and the sleep has already
-/// left a wake this request will find rather than one it missed. Nothing here
-/// holds the store's lock across an await — the look is one call that takes
-/// the lock, answers, and gives it back — so a wait costs the rest of the
-/// server nothing while it sits there.
+/// The first look comes before anything is registered, because it is also what
+/// says the channel exists and this identity is in it: a name nobody has ever
+/// used must not leave a notifier behind on its way to a 404. After that the
+/// loop is register, look, sleep, and the order is what makes it safe — a
+/// `Notified` created before a `notify_waiters` is woken by it, so a message
+/// written between the look and the sleep is a wake this request finds rather
+/// than one it missed.
+///
+/// Nothing here holds the store's lock across an await: the look is one call
+/// that takes the lock, answers, and gives it back, so a wait costs the rest
+/// of the server nothing while it sits there.
 async fn wait(
     State(serving): State<Arc<Serving>>,
     Path((channel, identity)): Path<(String, String)>,
@@ -440,42 +458,80 @@ async fn wait(
 ) -> Result<Response, Failure> {
     let hold = Duration::from_secs(query.hold.unwrap_or(MAX_HOLD).clamp(1, MAX_HOLD));
     let deadline = tokio::time::Instant::now() + hold;
-    let notify = serving.waiters.on(&channel);
     let mut stopping = serving.stopping();
 
+    if *stopping.borrow_and_update() {
+        return Err(Failure::stopping());
+    }
+    // Costs one look that the loop below would make anyway, and buys a
+    // notifier map that only ever holds channels somebody may really be
+    // woken on.
+    if let Some(answer) = look(&serving, &channel, &identity, query.mentions)? {
+        return Ok(answer);
+    }
+    let notify = serving.waiters.on(&channel);
+
     loop {
-        let woken = notify.notified();
-        tokio::pin!(woken);
-        // Registers this waiter now rather than at the first poll, which is
-        // what closes the gap between looking and sleeping.
-        woken.as_mut().enable();
-
-        if *stopping.borrow_and_update() {
-            return Err(Failure::stopping());
-        }
-
-        let (messages, state) =
-            serving
-                .store
-                .unread(&channel, &identity, query.mentions, DEFAULT_MESSAGE_LIMIT)?;
-        if !messages.is_empty() || state == ChannelState::Closed {
-            return Ok(Json(Waited {
-                messages,
-                channel_state: state,
-            })
-            .into_response());
-        }
-
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         if left.is_zero() {
             return Ok(StatusCode::NO_CONTENT.into_response());
         }
+
+        // Made before the look that follows it. A `Notified` is woken by any
+        // `notify_waiters` after the moment it was created, not after the
+        // moment it is first polled, so a message written between this look
+        // and the sleep below is a wake this request already holds.
+        let woken = notify.notified();
+        tokio::pin!(woken);
+
+        if *stopping.borrow_and_update() {
+            return Err(Failure::stopping());
+        }
+        if let Some(answer) = look(&serving, &channel, &identity, query.mentions)? {
+            return Ok(answer);
+        }
+
         tokio::select! {
             () = woken => {}
             () = tokio::time::sleep(left) => return Ok(StatusCode::NO_CONTENT.into_response()),
             _ = stopping.changed() => return Err(Failure::stopping()),
         }
     }
+}
+
+/// One look at what a waiting participant has not read: `Some` when that is
+/// an answer to give it, `None` when there is nothing to say yet.
+///
+/// The lock is taken and given back inside this call, so a waiter never holds
+/// it across an await.
+fn look(
+    serving: &Serving,
+    channel: &str,
+    identity: &str,
+    mentions: bool,
+) -> Result<Option<Response>, Failure> {
+    let (messages, state) =
+        serving
+            .store
+            .unread(channel, identity, mentions, DEFAULT_MESSAGE_LIMIT)?;
+
+    // Nobody is woken by their own message. A send leaves the sender caught up
+    // when it was caught up, so this only arises for a sender that was already
+    // behind: its own message sits in that backlog, is printed with the rest
+    // of it, and is not by itself a reason to have been woken. Without this
+    // the skill loop — wait, read, reply, wait — would wake itself once per
+    // reply and never idle.
+    let for_me = messages.iter().any(|message| !message.written_by(identity));
+    if !for_me && state == ChannelState::Open {
+        return Ok(None);
+    }
+    Ok(Some(
+        Json(Waited {
+            messages,
+            channel_state: state,
+        })
+        .into_response(),
+    ))
 }
 
 /// A page of a transcript. This moves nothing, so a caller that wants its read
@@ -542,7 +598,7 @@ impl Failure {
     fn stopping() -> Failure {
         Failure {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            message: crate::api::stopping(),
+            message: crate::api::STOPPING.to_string(),
             retry: true,
         }
     }
@@ -600,21 +656,38 @@ impl From<StoreError> for Failure {
 mod tests {
     use super::*;
 
-    /// The order the wait handler registers in, on its own: a waiter that has
-    /// registered before the write is woken by it.
+    /// The order the wait handler works in, on its own: a `Notified` made
+    /// before the wake is woken by it, even though nothing polled it in
+    /// between. That is what lets the handler look at the transcript after
+    /// making this and still not miss a message written while it looked.
     #[tokio::test]
-    async fn a_registered_waiter_is_woken() {
+    async fn a_notified_made_before_the_wake_is_woken_by_it() {
         let waiters = Waiters::default();
         let notify = waiters.on("brisk-otter");
         let woken = notify.notified();
-        tokio::pin!(woken);
-        woken.as_mut().enable();
 
         waiters.wake("brisk-otter");
 
         tokio::time::timeout(Duration::from_secs(1), woken)
             .await
             .expect("the waiter was not woken");
+    }
+
+    /// And a channel that is forgotten takes its waiters' notifier with it,
+    /// which is what `saneha delete` will need (#6).
+    #[tokio::test]
+    async fn a_forgotten_channel_keeps_nothing() {
+        let waiters = Waiters::default();
+        let notify = waiters.on("brisk-otter");
+        waiters.forget("brisk-otter");
+
+        // The wake goes nowhere, because the map no longer holds this.
+        let woken = notify.notified();
+        waiters.wake("brisk-otter");
+        tokio::time::timeout(Duration::from_millis(100), woken)
+            .await
+            .expect_err("a forgotten channel still woke its waiters");
+        assert!(waiters.channels().is_empty());
     }
 
     /// A wake on one channel is not a wake on another, and a wake on a channel
@@ -624,8 +697,6 @@ mod tests {
         let waiters = Waiters::default();
         let notify = waiters.on("brisk-otter");
         let woken = notify.notified();
-        tokio::pin!(woken);
-        woken.as_mut().enable();
 
         waiters.wake("keen-heron");
         waiters.wake("nobody-is-here");
