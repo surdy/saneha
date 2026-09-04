@@ -76,6 +76,11 @@ commit that bump — on a branch, then merged. The repo copy is the record of
 what is deployed, and the drift check at the end of this step only means
 something if it is.
 
+The unit no longer names `StopSignal`, so it relies on the server handling
+SIGTERM ([issue #15](https://github.com/surdy/saneha/issues/15)): install it
+only together with an image built from that fix or later, or every stop stalls
+for `TimeoutStopSec` and ends in SIGKILL.
+
 ```sh
 scp deploy/saneha.container deploy/saneha-data.volume core@192.168.16.169:/tmp/
 ssh core@192.168.16.169 '

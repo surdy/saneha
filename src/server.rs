@@ -74,8 +74,67 @@ pub async fn run(listener: TcpListener, store: Arc<Store>) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Waits for the first signal that means stop, and says which one it was.
+///
+/// SIGTERM is what systemd, Podman and every other supervisor send first, and
+/// the server is PID 1 in the container, where a SIGTERM nothing has handled is
+/// ignored outright: without this the stop stalls and ends in SIGKILL.
+#[cfg(unix)]
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    let signal = tokio::select! {
+        signal = interrupt() => signal,
+        signal = terminate() => signal,
+    };
+    say(&format!("saneha is stopping on {signal}"));
+}
+
+/// Waits for SIGINT.
+///
+/// A handler that will not install is nothing this can do anything about, and
+/// resolving would stop the server the moment it started, so it waits forever
+/// instead and leaves the shutdown to the other signal.
+#[cfg(unix)]
+async fn interrupt() -> &'static str {
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => "SIGINT",
+        Err(_) => std::future::pending().await,
+    }
+}
+
+/// Waits for SIGTERM, and waits forever when its handler will not install, for
+/// the same reason.
+#[cfg(unix)]
+async fn terminate() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    match signal(SignalKind::terminate()) {
+        Ok(mut terminate) => {
+            terminate.recv().await;
+            "SIGTERM"
+        }
+        Err(_) => std::future::pending().await,
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        // No second signal to fall back to here, but stopping a server that
+        // has only just started is worse than waiting.
+        std::future::pending::<()>().await;
+    }
+    say("saneha is stopping on an interrupt");
+}
+
+/// One line on standard output, alongside the lines `saneha serve` prints when
+/// it starts. Standard output that has gone away is not worth failing a
+/// shutdown over.
+fn say(line: &str) {
+    use std::io::Write;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let _ = writeln!(out, "{line}").and_then(|()| out.flush());
 }
 
 async fn root() -> &'static str {
