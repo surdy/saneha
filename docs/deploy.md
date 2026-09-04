@@ -41,9 +41,14 @@ the unit pins to, and `main`, which moves. Read back the tag you are about to
 deploy:
 
 ```sh
-gh api /users/surdy/packages/container/saneha/versions \
-  --jq '.[0].metadata.container.tags'
+curl -s -H "Authorization: Bearer $(curl -s \
+  'https://ghcr.io/token?scope=repository:surdy/saneha:pull' | jq -r .token)" \
+  https://ghcr.io/v2/surdy/saneha/tags/list
 ```
+
+That asks the registry anonymously, which is also the proof that quadhost can
+pull. The `gh api /users/surdy/packages/...` route needs the `read:packages`
+scope and 403s under the ordinary `gh` login.
 
 The GHCR package must be public, since quadhost pulls without credentials. A
 package is private on first publish; make it public once, at
@@ -66,16 +71,24 @@ ssh core@192.168.16.169 'getent hosts saneha.clusterfault.com'    # 192.168.16.1
 
 ## 3. Install or update the unit
 
-Edit `Image=` in `deploy/saneha.container` to the tag you are deploying, then:
+Edit `Image=` in `deploy/saneha.container` to the tag you are deploying, and
+commit that bump — on a branch, then merged. The repo copy is the record of
+what is deployed, and the drift check at the end of this step only means
+something if it is.
 
 ```sh
 scp deploy/saneha.container deploy/saneha-data.volume core@192.168.16.169:/tmp/
 ssh core@192.168.16.169 '
   sudo mkdir -p /etc/containers/systemd/saneha &&
-  sudo mv /tmp/saneha.container /tmp/saneha-data.volume /etc/containers/systemd/saneha/ &&
+  sudo install -m 0644 -o root -g root \
+    /tmp/saneha.container /tmp/saneha-data.volume /etc/containers/systemd/saneha/ &&
   sudo systemctl daemon-reload &&
   sudo systemctl restart saneha.service'
 ```
+
+`install` rather than `mv`: it writes a new inode under `/etc`, which SELinux
+labels `etc_t`. A file moved from `/tmp` keeps `user_tmp_t`, and quadhost is
+Enforcing.
 
 `daemon-reload` is what regenerates the service from the Quadlet; a plain
 restart without it runs the old definition. The volume outlives the unit, so
@@ -84,6 +97,16 @@ restarting and re-tagging never touch the database.
 ```sh
 ssh core@192.168.16.169 'systemctl status saneha.service --no-pager'
 ssh core@192.168.16.169 'journalctl -u saneha.service -n 30 --no-pager'
+```
+
+A stop should be quiet. `resorting to SIGKILL` or `status=137` in that journal
+means the container is not taking the stop signal the unit names.
+
+Last, check that the host and the repo have not drifted apart:
+
+```sh
+diff <(ssh core@192.168.16.169 sudo cat /etc/containers/systemd/saneha/saneha.container) \
+     deploy/saneha.container
 ```
 
 Caddy notices the container's labels by itself; it needs no restart, and its
@@ -102,6 +125,20 @@ export SANEHA_URL=https://saneha.clusterfault.com
 saneha new --purpose "checking the deploy"
 saneha list
 ```
+
+## Durability
+
+Read this before assuming a transcript is safe.
+
+`/data/saneha.db` sits on the `systemd-saneha-data` local volume, which is on
+`/dev/sda4` — quadhost's single root disk. It is deliberately not on NFS from
+satyanas, the way every other stateful service on the host is, because SQLite's
+locking is not safe over NFS. **Nothing compensates for that yet: there is no
+backup.** v1 has no retention or expiry either, so this file is the only copy of
+every transcript, and a disk failure or an FCOS rebuild loses all of it.
+
+A nightly `sqlite3 .backup` to satyanas, and the restore step to go with it, is
+[issue #14](https://github.com/surdy/saneha/issues/14).
 
 ## Installing the binary on a laptop
 
