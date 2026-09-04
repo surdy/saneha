@@ -1,0 +1,63 @@
+# saneha server — Podman Quadlet unit (system-scoped)
+# Install at: /etc/containers/systemd/saneha/saneha.container
+# alongside:  /etc/containers/systemd/saneha/saneha-data.volume
+#
+# See docs/deploy.md for the whole runbook. Bump Image= to the short-SHA tag of
+# the build you want, then daemon-reload and restart saneha.service.
+
+[Unit]
+Description=saneha channel server
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=ghcr.io/surdy/saneha:sha-9ede845
+ContainerName=saneha
+
+# The database. saneha creates saneha.db here on first start.
+Volume=saneha-data.volume:/data:z,U
+
+# Loopback only. There is no authentication (ADR-0003), so nothing reaches the
+# server except through Caddy, which is host-networked and so finds it on
+# localhost.
+PublishPort=127.0.0.1:7343:7343/tcp
+
+User=10001:10001
+ReadOnly=true
+Tmpfs=/tmp:rw,noexec,nosuid,size=32m
+NoNewPrivileges=true
+DropCapability=all
+PidsLimit=128
+LogDriver=journald
+# The server stops on SIGINT alone, and it is PID 1 here, where an unhandled
+# SIGTERM is ignored: with SIGTERM every stop stalled ten seconds and ended in
+# SIGKILL. Drop this line once the server handles SIGTERM too (issue #15).
+StopSignal=SIGINT
+
+HealthCmd=/usr/bin/curl --fail --silent --show-error http://127.0.0.1:7343/health
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=10s
+# Restart=always only fires when the container exits, so an unhealthy one would
+# otherwise sit there serving nothing.
+HealthOnFailure=kill
+
+# ── Caddy reverse proxy labels ──────────────────────────────────────────────
+# caddy-docker-proxy reads these and provisions saneha.clusterfault.com with a
+# Let's Encrypt certificate over the Cloudflare DNS-01 challenge. The double $$
+# is intentional: Podman splits a single $. The name resolves only to the LAN
+# address and the Tailscale CGNAT address, and must never resolve to a publicly
+# routable one.
+Label=caddy=saneha.clusterfault.com
+Label=caddy.reverse_proxy=localhost:7343
+Label="caddy.tls.dns=cloudflare {$$CLOUDFLARE_API_TOKEN}"
+
+[Service]
+Restart=always
+RestartSec=5s
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
