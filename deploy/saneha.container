@@ -11,7 +11,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Container]
-Image=ghcr.io/surdy/saneha:sha-PLACEHOLDER
+Image=ghcr.io/surdy/saneha:sha-9ede845
 ContainerName=saneha
 
 # The database. saneha creates saneha.db here on first start.

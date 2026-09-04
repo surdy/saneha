@@ -19,6 +19,12 @@ There is no authentication (ADR-0003), so the server is published on loopback
 only and Caddy is the one thing that reaches it. The name must never resolve to
 a publicly routable address.
 
+What is running right now is whatever tag the installed unit names:
+
+```sh
+ssh core@192.168.16.169 'grep ^Image= /etc/containers/systemd/saneha/saneha.container'
+```
+
 ## 1. Build and push the image
 
 `.github/workflows/image.yml` builds `linux/amd64` and pushes to GHCR on every

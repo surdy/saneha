@@ -6,7 +6,7 @@ name: Build and push image
 
 on:
   push:
-    branches: [main, issue-2-deploy]
+    branches: [main]
   workflow_dispatch:
 
 env:
