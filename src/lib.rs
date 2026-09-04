@@ -8,6 +8,7 @@
 pub mod api;
 pub mod cli;
 pub mod client;
+pub mod identity;
 pub mod server;
 pub mod slug;
 pub mod store;

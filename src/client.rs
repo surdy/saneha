@@ -10,7 +10,9 @@ use anyhow::{anyhow, Result};
 use ureq::http::Response;
 use ureq::{Agent, Body};
 
-use crate::api::{ApiError, Channel, ChannelList};
+use crate::api::{
+    ApiError, Channel, ChannelList, JoinRequest, Joined, Participant, ParticipantList,
+};
 
 /// The environment variable that points every subcommand at the server.
 pub const URL_ENV: &str = "SANEHA_URL";
@@ -94,6 +96,45 @@ impl Remote {
         )?;
         let list: ChannelList = read_json(response, "channel list")?;
         Ok(list.channels)
+    }
+
+    /// Joins a channel and returns the identity the server granted.
+    pub fn join(&self, channel: &str, request: &JoinRequest) -> Result<Joined> {
+        let response = self.check(
+            self.agent
+                .post(self.url(&format!("/channels/{channel}/participants")))
+                .send_json(request)
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "join")
+    }
+
+    /// Everyone who has joined a channel.
+    pub fn list_participants(&self, channel: &str) -> Result<Vec<Participant>> {
+        let response = self.check(
+            self.agent
+                .get(self.url(&format!("/channels/{channel}/participants")))
+                .call()
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        let list: ParticipantList = read_json(response, "participant list")?;
+        Ok(list.participants)
+    }
+
+    /// One participant by identity, or `None` if nobody holds that identity
+    /// here. An unknown channel reads as `None` too: the join that follows is
+    /// what reports it, in the server's own words.
+    pub fn participant(&self, channel: &str, identity: &str) -> Result<Option<Participant>> {
+        let response = self
+            .agent
+            .get(self.url(&format!("/channels/{channel}/participants/{identity}")))
+            .call()
+            .map_err(|err| self.unreachable(&err))?;
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        let response = self.check(response)?;
+        read_json(response, "participant").map(Some)
     }
 
     fn check(&self, response: Response<Body>) -> Result<Response<Body>> {

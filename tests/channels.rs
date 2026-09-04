@@ -2,65 +2,11 @@
 //! exercised through the same HTTP calls the subcommands make, and through the
 //! `saneha` binary itself.
 
-use std::net::SocketAddr;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::sync::Arc;
-use std::thread;
 
-use saneha::client::Remote;
-use saneha::store::Store;
-use tempfile::TempDir;
+mod support;
 
-/// A server running on a background thread, on a port the OS chose.
-struct TestServer {
-    url: String,
-    _database: TempDir,
-}
-
-impl TestServer {
-    fn start() -> TestServer {
-        let database = tempfile::tempdir().expect("temporary directory");
-        let path = database.path().join("saneha.db");
-        let store = Arc::new(Store::open(&path).expect("open the database"));
-
-        let (send_address, receive_address) = mpsc::channel::<SocketAddr>();
-        thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime");
-            runtime.block_on(async move {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("bind an ephemeral port");
-                send_address
-                    .send(listener.local_addr().expect("local address"))
-                    .expect("hand the address back");
-                saneha::server::run(listener, store).await.expect("serve");
-            });
-        });
-
-        let address = receive_address.recv().expect("the server to bind");
-        TestServer {
-            url: format!("http://{address}"),
-            _database: database,
-        }
-    }
-
-    fn remote(&self) -> Remote {
-        Remote::at(&self.url).expect("remote")
-    }
-
-    /// Runs the `saneha` binary against this server.
-    fn run(&self, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_saneha"))
-            .args(args)
-            .env("SANEHA_URL", &self.url)
-            .output()
-            .expect("run the saneha binary")
-    }
-}
+use support::TestServer;
 
 #[test]
 fn creates_channels_with_minted_and_given_names() {

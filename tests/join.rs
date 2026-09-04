@@ -1,0 +1,607 @@
+//! Joining a channel: the identity that is worked out, the identity that is
+//! granted, and what the transcript says about it.
+
+use std::path::Path;
+use std::process::Command;
+
+use saneha::api::JoinRequest;
+
+mod support;
+
+use support::{stdout_of, TestServer};
+
+/// This machine as the binary under test sees it. Every granted identity ends
+/// in it, so the tests name it once.
+fn host() -> String {
+    saneha::identity::host()
+}
+
+/// A directory that is not a git repository, named `name`.
+fn plain_directory(name: &str) -> tempfile::TempDir {
+    let parent = tempfile::tempdir().expect("temporary directory");
+    std::fs::create_dir(parent.path().join(name)).expect("create the directory");
+    parent
+}
+
+/// A directory as the process running in it reports it: macOS hands out
+/// temporary directories behind a symlink, and a working directory is recorded
+/// as the process sees it.
+fn real(directory: &Path) -> String {
+    directory
+        .canonicalize()
+        .expect("canonicalize")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `saneha join` as JSON, so a test can read every field of the answer.
+fn join_json(
+    server: &TestServer,
+    directory: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> serde_json::Value {
+    let mut all = vec!["join"];
+    all.extend_from_slice(args);
+    all.push("--json");
+    let output = server.run_in(directory, &all, env);
+    let stdout = stdout_of(&format!("saneha join {args:?}"), &output);
+    serde_json::from_str(&stdout).expect("--json prints JSON")
+}
+
+/// What the join flow sends when it has already worked out who it is.
+fn request(name: &str, harness: &str) -> JoinRequest {
+    JoinRequest {
+        name: name.to_string(),
+        host: host(),
+        harness: harness.to_string(),
+        session_id: None,
+        pid: None,
+        cwd: "/repos/saneha".to_string(),
+        madari_pane: None,
+        same_host_session_live: false,
+    }
+}
+
+#[test]
+fn joining_an_unknown_channel_says_so() {
+    let server = TestServer::start();
+
+    let err = server
+        .remote()
+        .join("nobody-here", &request("agent", "claude"))
+        .expect_err("an unknown channel must be refused");
+    let message = format!("{err:#}");
+    assert_eq!(
+        message,
+        "there is no channel named \"nobody-here\"; create it with: saneha new nobody-here"
+    );
+
+    let output = server.run(&["join", "nobody-here"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.starts_with("saneha: there is no channel named \"nobody-here\""),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_closed_channel_refuses_a_join() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    // Nothing closes a channel yet; `saneha close` will, and a join has to
+    // already refuse one.
+    server
+        .database()
+        .execute(
+            "UPDATE channels SET state = 'closed' WHERE name = 'brisk-otter'",
+            [],
+        )
+        .expect("close the channel");
+
+    let err = server
+        .remote()
+        .join("brisk-otter", &request("agent", "claude"))
+        .expect_err("a closed channel must be refused");
+    assert_eq!(
+        format!("{err:#}"),
+        "the channel \"brisk-otter\" is closed, so nobody can join it"
+    );
+}
+
+#[test]
+fn an_identity_is_the_directory_the_harness_and_the_host() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    let parent = plain_directory("notes-method");
+    let directory = parent.path().join("notes-method");
+
+    let joined = join_json(
+        &server,
+        &directory,
+        &["brisk-otter"],
+        &[("CLAUDECODE", "1")],
+    );
+    assert_eq!(
+        joined["identity"],
+        serde_json::json!(format!("notes-method-claude@{}", host()))
+    );
+    assert_eq!(joined["resumed"], serde_json::json!(false));
+    assert_eq!(joined["suffixed"], serde_json::json!(false));
+    assert_eq!(
+        joined["participant"]["harness"],
+        serde_json::json!("claude")
+    );
+    assert_eq!(joined["participant"]["host"], serde_json::json!(host()));
+    assert_eq!(joined["participant"]["read_cursor"], serde_json::json!(0));
+    assert_eq!(joined["participant"]["away"], serde_json::json!(false));
+    assert_eq!(
+        joined["participant"]["cwd"],
+        serde_json::json!(real(&directory))
+    );
+    // The process that started the command is recorded as a liveness handle,
+    // and that process is this test.
+    assert_eq!(
+        joined["participant"]["pid"],
+        serde_json::json!(std::process::id())
+    );
+
+    // With no harness marker the identity still forms, and the CLI says how to
+    // do better.
+    let output = server.run_in(&directory, &["join", "brisk-otter"], &[]);
+    let identity = stdout_of("saneha join", &output);
+    assert_eq!(identity, format!("notes-method-unknown@{}", host()));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no harness was recognised"), "{stderr}");
+    assert!(stderr.contains("--harness"), "{stderr}");
+    assert!(stderr.contains("SANEHA_AS"), "{stderr}");
+}
+
+#[test]
+fn an_identity_inside_a_repository_uses_the_repository_name() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+
+    let parent = plain_directory("my-repo");
+    let repository = parent.path().join("my-repo");
+    let initialised = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&repository)
+        .status()
+        .expect("run git");
+    assert!(initialised.success(), "git init failed");
+    let nested = repository.join("src").join("deep");
+    std::fs::create_dir_all(&nested).expect("create a nested directory");
+
+    // Run from deep inside the repository: the name comes from the top of the
+    // repository, not from the directory the command happened to be in.
+    let output = server.run_in(&nested, &["join", "brisk-otter"], &[("CLAUDECODE", "1")]);
+    assert_eq!(
+        stdout_of("saneha join", &output),
+        format!("my-repo-claude@{}", host())
+    );
+}
+
+#[test]
+fn a_name_can_be_given_outright() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    let parent = plain_directory("notes-method");
+    let directory = parent.path().join("notes-method");
+
+    let with_flag = server.run_in(
+        &directory,
+        &["join", "brisk-otter", "--as", "reviewer"],
+        &[("CLAUDECODE", "1")],
+    );
+    assert_eq!(
+        stdout_of("saneha join --as", &with_flag),
+        format!("reviewer@{}", host())
+    );
+
+    let with_env = server.run_in(
+        &directory,
+        &["join", "brisk-otter"],
+        &[("SANEHA_AS", "planner")],
+    );
+    assert_eq!(
+        stdout_of("saneha join with SANEHA_AS", &with_env),
+        format!("planner@{}", host())
+    );
+
+    // --as wins over the environment.
+    let both = server.run_in(
+        &directory,
+        &["join", "brisk-otter", "--as", "reviewer"],
+        &[("SANEHA_AS", "planner")],
+    );
+    assert_eq!(
+        stdout_of("saneha join --as with SANEHA_AS", &both),
+        format!("reviewer@{}", host())
+    );
+}
+
+#[test]
+fn the_harness_can_be_overridden() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    let parent = plain_directory("notes-method");
+    let directory = parent.path().join("notes-method");
+
+    // The marker says claude; --harness says otherwise and is believed.
+    let joined = join_json(
+        &server,
+        &directory,
+        &["brisk-otter", "--harness", "codex"],
+        &[
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_SESSION_ID", "session-one"),
+        ],
+    );
+    assert_eq!(
+        joined["identity"],
+        serde_json::json!(format!("notes-method-codex@{}", host()))
+    );
+    assert_eq!(joined["participant"]["harness"], serde_json::json!("codex"));
+    // A harness this build does not know publishes no session id, so none is
+    // recorded even though Claude Code's is in the environment.
+    assert_eq!(joined["participant"]["session_id"], serde_json::Value::Null);
+
+    // A harness recognised by name reads its session id even when it was named
+    // rather than detected.
+    let joined = join_json(
+        &server,
+        &directory,
+        &["brisk-otter", "--as", "reviewer", "--harness", "claude"],
+        &[("CLAUDE_CODE_SESSION_ID", "session-one")],
+    );
+    assert_eq!(
+        joined["participant"]["session_id"],
+        serde_json::json!("session-one")
+    );
+
+    let rejected = server.run_in(
+        &directory,
+        &["join", "brisk-otter", "--harness", "Claude Code"],
+        &[],
+    );
+    assert!(!rejected.status.success());
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("a harness id is lowercase"), "{stderr}");
+}
+
+#[test]
+fn rejoining_resumes_the_participant_and_keeps_its_read_cursor() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    let parent = plain_directory("notes-method");
+    let directory = parent.path().join("notes-method");
+
+    let first = join_json(
+        &server,
+        &directory,
+        &["brisk-otter", "--as", "reviewer", "--harness", "codex"],
+        &[],
+    );
+    assert_eq!(first["resumed"], serde_json::json!(false));
+    assert_eq!(first["participant"]["session_id"], serde_json::Value::Null);
+
+    // Reading is a later ticket, so the cursor is moved, and the participant
+    // is marked away, the only way there is today.
+    let identity = format!("reviewer@{}", host());
+    let moved = server
+        .database()
+        .execute(
+            "UPDATE participants SET read_cursor = 7, away = 1 WHERE identity = ?1",
+            [&identity],
+        )
+        .expect("move the read cursor");
+    assert_eq!(moved, 1);
+
+    let second = join_json(
+        &server,
+        &directory,
+        &["brisk-otter", "--as", "reviewer", "--harness", "claude"],
+        &[("CLAUDE_CODE_SESSION_ID", "session-two")],
+    );
+    assert_eq!(second["identity"], serde_json::json!(identity));
+    assert_eq!(second["resumed"], serde_json::json!(true));
+    assert_eq!(second["suffixed"], serde_json::json!(false));
+    // The cursor and the name are what a resume is for.
+    assert_eq!(second["participant"]["read_cursor"], serde_json::json!(7));
+    assert_eq!(second["participant"]["name"], serde_json::json!("reviewer"));
+    // Everything about the session that is joining is refreshed.
+    assert_eq!(
+        second["participant"]["session_id"],
+        serde_json::json!("session-two")
+    );
+    assert_eq!(
+        second["participant"]["harness"],
+        serde_json::json!("claude")
+    );
+    assert_eq!(second["participant"]["away"], serde_json::json!(false));
+    let joined_at = |value: &serde_json::Value| {
+        value["participant"]["joined_at"]
+            .as_str()
+            .expect("joined_at")
+            .to_string()
+    };
+    assert!(joined_at(&second) >= joined_at(&first), "{second:?}");
+
+    // A resume is not a second participant.
+    assert_eq!(
+        server
+            .remote()
+            .list_participants("brisk-otter")
+            .expect("list")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_live_session_on_this_host_gets_a_suffixed_identity() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    let parent = plain_directory("notes-method");
+    let directory = parent.path().join("notes-method");
+
+    // The pid recorded for each join is this test process, which is alive; the
+    // session ids differ, so each join finds the last one still running.
+    let claude =
+        |session: &'static str| vec![("CLAUDECODE", "1"), ("CLAUDE_CODE_SESSION_ID", session)];
+
+    let first = join_json(
+        &server,
+        &directory,
+        &["brisk-otter", "--as", "reviewer"],
+        &claude("session-one"),
+    );
+    assert_eq!(
+        first["identity"],
+        serde_json::json!(format!("reviewer@{}", host()))
+    );
+    assert_eq!(first["suffixed"], serde_json::json!(false));
+
+    let second = join_json(
+        &server,
+        &directory,
+        &["brisk-otter", "--as", "reviewer"],
+        &claude("session-two"),
+    );
+    assert_eq!(
+        second["identity"],
+        serde_json::json!(format!("reviewer-2@{}", host()))
+    );
+    assert_eq!(second["suffixed"], serde_json::json!(true));
+    assert_eq!(second["resumed"], serde_json::json!(false));
+    assert_eq!(
+        second["participant"]["name"],
+        serde_json::json!("reviewer-2")
+    );
+
+    // The suffix is explained on standard error, so the identity is still the
+    // only thing on standard output.
+    let third = server.run_in(
+        &directory,
+        &["join", "brisk-otter", "--as", "reviewer"],
+        &claude("session-three"),
+    );
+    assert_eq!(
+        stdout_of("saneha join", &third),
+        format!("reviewer-3@{}", host())
+    );
+    let stderr = String::from_utf8_lossy(&third.stderr);
+    assert!(
+        stderr.contains(&format!("reviewer@{}", host())) && stderr.contains("still running"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("reviewer-3@{}", host())),
+        "{stderr}"
+    );
+
+    let participants = server
+        .remote()
+        .list_participants("brisk-otter")
+        .expect("list");
+    assert_eq!(participants.len(), 3);
+
+    // A session that has finished resumes instead of suffixing: the same join
+    // again, under the session that holds it, is that session coming back.
+    let again = join_json(
+        &server,
+        &directory,
+        &["brisk-otter", "--as", "reviewer"],
+        &claude("session-one"),
+    );
+    assert_eq!(
+        again["identity"],
+        serde_json::json!(format!("reviewer@{}", host()))
+    );
+    assert_eq!(again["resumed"], serde_json::json!(true));
+}
+
+#[test]
+fn a_join_is_written_into_the_transcript() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    let parent = plain_directory("notes-method");
+    let directory = parent.path().join("notes-method");
+
+    for args in [
+        vec!["join", "brisk-otter", "--as", "reviewer"],
+        vec!["join", "brisk-otter", "--as", "planner"],
+        // A resume is still a join, and still shows in the transcript.
+        vec!["join", "brisk-otter", "--as", "reviewer"],
+    ] {
+        let output = server.run_in(&directory, &args, &[]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // There is no read verb yet, so the transcript is read from the table.
+    let database = server.database();
+    let mut statement = database
+        .prepare(
+            "SELECT m.id, m.kind, m.body, m.from_participant, p.identity
+               FROM messages m
+               JOIN channels c ON c.id = m.channel_id
+               JOIN participants p ON p.id = m.about_participant
+              WHERE c.name = 'brisk-otter'
+              ORDER BY m.id",
+        )
+        .expect("prepare");
+    let rows: Vec<(i64, String, String, Option<i64>, String)> = statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rows");
+
+    let host = host();
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    for (index, (id, kind, body, from, identity)) in rows.iter().enumerate() {
+        // Ids are per-channel and monotonic from 1.
+        assert_eq!(*id, index as i64 + 1, "{rows:?}");
+        assert_eq!(kind, "join", "{rows:?}");
+        // A system message is written by the server about a participant, so it
+        // is not from anyone.
+        assert_eq!(*from, None, "{rows:?}");
+        assert_eq!(body, &format!("{identity} joined"), "{rows:?}");
+    }
+    assert_eq!(rows[0].4, format!("reviewer@{host}"));
+    assert_eq!(rows[1].4, format!("planner@{host}"));
+    assert_eq!(rows[2].4, format!("reviewer@{host}"));
+
+    // The channel's own allocator is where those ids came from.
+    let last: i64 = database
+        .query_row(
+            "SELECT last_message_id FROM channels WHERE name = 'brisk-otter'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("last_message_id");
+    assert_eq!(last, 3);
+}
+
+#[test]
+fn participants_are_listed() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    let parent = plain_directory("notes-method");
+    let directory = parent.path().join("notes-method");
+
+    let empty = server.run(&["participants", "brisk-otter"]);
+    assert_eq!(
+        stdout_of("saneha participants", &empty),
+        "Nobody has joined brisk-otter yet. Join it with: saneha join brisk-otter"
+    );
+
+    server.run_in(
+        &directory,
+        &["join", "brisk-otter", "--as", "reviewer"],
+        &[("CLAUDECODE", "1")],
+    );
+    server.run_in(
+        &directory,
+        &[
+            "join",
+            "brisk-otter",
+            "--as",
+            "planner",
+            "--harness",
+            "codex",
+        ],
+        &[],
+    );
+
+    let listed = server.run(&["participants", "brisk-otter"]);
+    let table = stdout_of("saneha participants", &listed);
+    let lines: Vec<&str> = table.lines().collect();
+    assert_eq!(lines.len(), 3, "{table}");
+    assert!(lines[0].starts_with("IDENTITY"), "{table}");
+    assert!(
+        lines[0].contains("HARNESS") && lines[0].contains("HOST"),
+        "{table}"
+    );
+    assert!(
+        lines[0].contains("AWAY") && lines[0].contains("JOINED"),
+        "{table}"
+    );
+    // Listed in the order they joined.
+    assert!(
+        lines[1].starts_with(&format!("reviewer@{}", host())),
+        "{table}"
+    );
+    assert!(
+        lines[1].contains("claude") && lines[1].contains("here"),
+        "{table}"
+    );
+    assert!(
+        lines[2].starts_with(&format!("planner@{}", host())),
+        "{table}"
+    );
+    assert!(lines[2].contains("codex"), "{table}");
+
+    let json = server.run(&["participants", "brisk-otter", "--json"]);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout_of("saneha participants --json", &json))
+            .expect("--json prints JSON");
+    let participants = parsed["participants"].as_array().expect("participants");
+    assert_eq!(participants.len(), 2);
+    assert_eq!(
+        participants[0]["identity"],
+        serde_json::json!(format!("reviewer@{}", host()))
+    );
+    assert_eq!(participants[0]["cwd"], serde_json::json!(real(&directory)));
+
+    let unknown = server.run(&["participants", "nobody-here"]);
+    assert!(!unknown.status.success());
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.starts_with("saneha: there is no channel named \"nobody-here\""),
+        "{stderr}"
+    );
+}

@@ -59,6 +59,84 @@ pub struct ChannelList {
     pub channels: Vec<Channel>,
 }
 
+/// A participant as the server describes it: who joined a channel, from where,
+/// and how far through the transcript they have read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Participant {
+    /// `name@host`, unique within the channel.
+    pub identity: String,
+    /// The name half of the identity.
+    pub name: String,
+    /// The host half: the machine's short hostname, lowercased.
+    pub host: String,
+    /// The coding-agent program this participant runs inside, or `unknown`.
+    pub harness: String,
+    /// The id of the harness session that last joined, when the harness
+    /// publishes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The process that started the last join: a coarse handle on whether that
+    /// terminal is still there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// The working directory the last join was made from.
+    pub cwd: String,
+    /// The Madari pane a future relay would nudge. Recorded, unused in v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub madari_pane: Option<String>,
+    /// Set once this participant has left and not resumed.
+    pub away: bool,
+    /// The message id this participant has read up to. 0 means nothing read.
+    pub read_cursor: i64,
+    /// RFC 3339, UTC: when the current join, or resume, happened.
+    pub joined_at: String,
+    /// RFC 3339, UTC: when this participant last left, if it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_at: Option<String>,
+}
+
+/// The body of `POST /channels/{name}/participants`: everything the caller
+/// knows about itself, plus its verdict on the identity it is claiming.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinRequest {
+    pub name: String,
+    pub host: String,
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub madari_pane: Option<String>,
+    /// The caller's answer to the one question the server cannot ask: is the
+    /// harness session already holding `name@host` still running on this
+    /// machine? False resumes that participant, true asks for a suffixed name.
+    /// Only a caller on the same host can tell, so only a caller decides.
+    #[serde(default)]
+    pub same_host_session_live: bool,
+}
+
+/// The answer to a join: the identity that was granted, and how.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Joined {
+    pub channel: String,
+    /// The granted identity, which is not always the one that was asked for.
+    pub identity: String,
+    /// True when an existing participant was continued rather than created.
+    pub resumed: bool,
+    /// True when a live session held the requested name, so a suffixed one was
+    /// granted instead.
+    pub suffixed: bool,
+    pub participant: Participant,
+}
+
+/// The body of `GET /channels/{name}/participants`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantList {
+    pub participants: Vec<Participant>,
+}
+
 /// Every failing response carries this, so the subcommands can print the
 /// server's own words rather than guessing from a status code.
 #[derive(Debug, Clone, Serialize, Deserialize)]

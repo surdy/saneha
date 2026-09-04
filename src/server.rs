@@ -7,14 +7,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use tokio::net::TcpListener;
 
-use crate::api::{ApiError, Channel, ChannelList, NewChannel};
+use crate::api::{
+    ApiError, Channel, ChannelList, JoinRequest, Joined, NewChannel, Participant, ParticipantList,
+};
 use crate::store::{Store, StoreError};
 
 /// Where `saneha serve` listens unless told otherwise.
@@ -53,6 +55,14 @@ pub fn router(store: Arc<Store>) -> Router {
         .route("/", get(root))
         .route("/health", get(health))
         .route("/channels", post(create_channel).get(list_channels))
+        .route(
+            "/channels/{channel}/participants",
+            post(join).get(list_participants),
+        )
+        .route(
+            "/channels/{channel}/participants/{identity}",
+            get(participant),
+        )
         .with_state(store)
 }
 
@@ -89,6 +99,43 @@ async fn list_channels(State(store): State<Arc<Store>>) -> Result<Json<ChannelLi
     Ok(Json(ChannelList { channels }))
 }
 
+/// A join, or a resume, or the grant of a suffixed identity: which one it was
+/// is in the body rather than in the status, because all three succeeded.
+async fn join(
+    State(store): State<Arc<Store>>,
+    Path(channel): Path<String>,
+    Json(body): Json<JoinRequest>,
+) -> Result<(StatusCode, Json<Joined>), Failure> {
+    let joined = store.join(&channel, &body)?;
+    let status = if joined.resumed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(joined)))
+}
+
+async fn list_participants(
+    State(store): State<Arc<Store>>,
+    Path(channel): Path<String>,
+) -> Result<Json<ParticipantList>, Failure> {
+    let participants = store.list_participants(&channel)?;
+    Ok(Json(ParticipantList { participants }))
+}
+
+async fn participant(
+    State(store): State<Arc<Store>>,
+    Path((channel, identity)): Path<(String, String)>,
+) -> Result<Json<Participant>, Failure> {
+    let participant = store.participant(&channel, &identity)?.ok_or_else(|| {
+        Failure::from(StoreError::NoSuchParticipant {
+            channel: channel.clone(),
+            identity: identity.clone(),
+        })
+    })?;
+    Ok(Json(participant))
+}
+
 /// A failed request, rendered as `{"error": "..."}` so the subcommand on the
 /// other end can print the server's own words.
 pub struct Failure {
@@ -111,10 +158,18 @@ impl IntoResponse for Failure {
 impl From<StoreError> for Failure {
     fn from(err: StoreError) -> Self {
         let status = match err {
-            StoreError::InvalidChannelName { .. } | StoreError::InvalidPurpose { .. } => {
-                StatusCode::BAD_REQUEST
+            StoreError::InvalidChannelName { .. }
+            | StoreError::InvalidPurpose { .. }
+            | StoreError::InvalidParticipantName { .. }
+            | StoreError::InvalidHost { .. }
+            | StoreError::InvalidHarness { .. }
+            | StoreError::InvalidRecorded { .. } => StatusCode::BAD_REQUEST,
+            StoreError::NoSuchChannel(_) | StoreError::NoSuchParticipant { .. } => {
+                StatusCode::NOT_FOUND
             }
-            StoreError::ChannelExists(_) => StatusCode::CONFLICT,
+            StoreError::ChannelExists(_)
+            | StoreError::ChannelClosed(_)
+            | StoreError::SuffixExhausted { .. } => StatusCode::CONFLICT,
             StoreError::MintExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
             StoreError::NewerSchema { .. }
             | StoreError::UnknownChannelState(_)
