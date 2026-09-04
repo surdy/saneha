@@ -74,7 +74,7 @@ A participant a message is addressed to.
 _Avoid_: target, to, addressee
 
 **Mention**:
-An `@name` at the start of a message body or after whitespace that names a recipient. A mention that matches no participant is an error, not text.
+An `@name` in the prose of a message body, at the start or after whitespace, that names a recipient. Text inside code blocks or code spans is never a mention, nor is a package scope like `@types/node`. Case does not matter. A mention that matches no participant is an error, not text.
 _Avoid_: tag, ping
 
 **Broadcast**:
