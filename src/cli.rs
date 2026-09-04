@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 
-use crate::api::{Channel, JoinRequest, Participant, ParticipantList};
+use crate::api::{Channel, JoinRequest, Message, NewMessage, Participant, ParticipantList};
 use crate::client::{JoinAnswer, Remote, URL_ENV};
 use crate::identity;
 use crate::server;
@@ -41,6 +41,10 @@ pub enum Command {
     Join(JoinArgs),
     /// List the participants of a channel
     Participants(ParticipantsArgs),
+    /// Write a message to a channel
+    Send(SendArgs),
+    /// Read the messages of a channel that this participant has not read
+    Read(ReadArgs),
 }
 
 #[derive(Debug, Args)]
@@ -122,6 +126,64 @@ pub struct ParticipantsArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct SendArgs {
+    /// The channel to write to; this identity must already have joined it
+    #[arg(value_name = "CHANNEL")]
+    pub channel: String,
+
+    /// The message body, as markdown. The words are joined with single spaces,
+    /// so quote anything whose spacing matters. A body of a single `-` is read
+    /// from standard input instead, which is how a multi-line body is sent:
+    /// `saneha send brisk-otter - <<'EOF'`
+    #[arg(value_name = "BODY", num_args = 1.., required = true)]
+    pub body: Vec<String>,
+
+    /// Address the message to a participant, as a name, a full name@host, or
+    /// all. Repeatable, and on top of whatever the body mentions
+    #[arg(long = "to", value_name = "NAME")]
+    pub to: Vec<String>,
+
+    /// The name half of this identity, as `saneha join` works it out
+    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
+    pub as_name: Option<String>,
+
+    /// The harness to derive the name from, overriding what the environment says
+    #[arg(long, value_name = "ID")]
+    pub harness: Option<String>,
+
+    /// Print the message as JSON rather than only its id
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ReadArgs {
+    /// The channel to read; this identity must already have joined it
+    #[arg(value_name = "CHANNEL")]
+    pub channel: String,
+
+    /// Read the whole transcript without moving the read cursor
+    #[arg(long, conflicts_with = "since")]
+    pub all: bool,
+
+    /// Read everything after this message id without moving the read cursor
+    #[arg(long, value_name = "ID")]
+    pub since: Option<i64>,
+
+    /// The name half of this identity, as `saneha join` works it out
+    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
+    pub as_name: Option<String>,
+
+    /// The harness to derive the name from, overriding what the environment says
+    #[arg(long, value_name = "ID")]
+    pub harness: Option<String>,
+
+    /// Print the messages as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Parses the command line and runs it.
 pub fn run() -> Result<()> {
     execute(Cli::parse())
@@ -135,6 +197,8 @@ pub fn execute(cli: Cli) -> Result<()> {
         Command::List(args) => list(args),
         Command::Join(args) => join(args),
         Command::Participants(args) => participants(args),
+        Command::Send(args) => send(args),
+        Command::Read(args) => read(args),
     }
 }
 
@@ -195,6 +259,59 @@ fn list(args: ListArgs) -> Result<()> {
     write_out(&channel_table(&channels))
 }
 
+/// Who this command is: the identity a join would claim, worked out the same
+/// way wherever it is asked for. `send` and `read` act as a participant, so
+/// they have to arrive at the identity `join` was granted rather than at one
+/// of their own.
+struct Caller {
+    name: String,
+    host: String,
+    harness: String,
+    /// True when `--harness` said which, rather than the environment.
+    harness_given: bool,
+}
+
+impl Caller {
+    fn identity(&self) -> String {
+        store::identity_of(&self.name, &self.host)
+    }
+}
+
+/// The identity behind this command: `--as`, else `SANEHA_AS`, else the
+/// project and the harness, on this host.
+fn caller(as_name: Option<&str>, harness: Option<&str>) -> Result<Caller> {
+    let given_harness = trimmed(harness);
+    let harness = match &given_harness {
+        Some(given) => {
+            store::validate_harness(given)?;
+            given.clone()
+        }
+        None => identity::detect_harness()
+            .map(|marker| marker.id.to_string())
+            .unwrap_or_else(|| identity::UNKNOWN_HARNESS.to_string()),
+    };
+
+    let host = identity::host(store::HOST.max);
+    store::validate_host(&host)?;
+
+    let name = match trimmed(as_name) {
+        Some(given) => given,
+        None => identity::derived_name(
+            &identity::project_basename(),
+            &harness,
+            store::PARTICIPANT_NAME.max,
+        ),
+    };
+    store::validate_participant_name(&name)?;
+
+    Ok(Caller {
+        name,
+        host,
+        harness,
+        harness_given: given_harness.is_some(),
+    })
+}
+
 /// How many times a join looks again after finding that the participant it
 /// reasoned about is not the one the server has.
 const JOIN_ATTEMPTS: usize = 2;
@@ -214,29 +331,13 @@ const JOIN_ATTEMPTS: usize = 2;
 fn join(args: JoinArgs) -> Result<()> {
     let remote = Remote::from_env()?;
 
-    let given_harness = trimmed(args.harness.as_deref());
-    let harness = match &given_harness {
-        Some(given) => {
-            store::validate_harness(given)?;
-            given.clone()
-        }
-        None => identity::detect_harness()
-            .map(|marker| marker.id.to_string())
-            .unwrap_or_else(|| identity::UNKNOWN_HARNESS.to_string()),
-    };
-
-    let host = identity::host(store::HOST.max);
-    store::validate_host(&host)?;
-
-    let name = match trimmed(args.as_name.as_deref()) {
-        Some(given) => given,
-        None => identity::derived_name(
-            &identity::project_basename(),
-            &harness,
-            store::PARTICIPANT_NAME.max,
-        ),
-    };
-    store::validate_participant_name(&name)?;
+    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let Caller {
+        name,
+        host,
+        harness,
+        harness_given,
+    } = caller;
 
     let cwd = std::env::current_dir()
         .context("could not read the working directory to record with the join")?
@@ -298,7 +399,7 @@ fn join(args: JoinArgs) -> Result<()> {
             joined.identity
         ));
     }
-    if given_harness.is_none() && harness == identity::UNKNOWN_HARNESS {
+    if !harness_given && harness == identity::UNKNOWN_HARNESS {
         warn(&format!(
             "no harness was recognised, so this joined as {}; pass --harness ID or set {} \
              to name yourself",
@@ -339,6 +440,116 @@ fn participants(args: ParticipantsArgs) -> Result<()> {
     write_out(&participant_table(&args.channel, &participants))
 }
 
+/// The marker that says the body is on standard input, so a multi-line
+/// markdown body does not have to survive a shell's quoting.
+const BODY_FROM_STDIN: &str = "-";
+
+/// Writes one message. Who it is addressed to is the server's to work out: it
+/// holds the participants, and it refuses the whole send if a mention names
+/// nobody, so nothing here has to guess.
+fn send(args: SendArgs) -> Result<()> {
+    let remote = Remote::from_env()?;
+    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let body = message_body(&args.body)?;
+
+    let message = remote.send_message(
+        &args.channel,
+        &NewMessage {
+            from: caller.identity(),
+            body,
+            to: args.to,
+        },
+    )?;
+
+    if args.json {
+        say(&serde_json::to_string_pretty(&message)?)
+    } else {
+        // Only the id, so `ID=$(saneha send ...)` is safe.
+        say(&message.id.to_string())
+    }
+}
+
+/// The body as it was given: the words joined with single spaces, or standard
+/// input when the body is a single `-`.
+///
+/// The cap is checked here as well as by the server. A body larger than a
+/// message can hold is not worth a round trip, and one large enough for the
+/// server to refuse before it has read the JSON would come back in the
+/// framework's words rather than in saneha's.
+fn message_body(words: &[String]) -> Result<String> {
+    use std::io::Read;
+
+    let body = if words.len() == 1 && words[0] == BODY_FROM_STDIN {
+        let mut body = String::new();
+        std::io::stdin()
+            .read_to_string(&mut body)
+            .context("could not read the message body from standard input")?;
+        // A heredoc ends in a newline that is not part of what was written.
+        body.trim_end().to_string()
+    } else {
+        words.join(" ")
+    };
+
+    if body.len() > crate::api::MAX_BODY {
+        return Err(anyhow!(crate::api::body_too_large(body.len())));
+    }
+    Ok(body)
+}
+
+/// Reads a channel. By default that is the unread messages, and reading them
+/// is what advances the read cursor; `--all` and `--since` are history reads
+/// and move nothing (ADR-0004).
+///
+/// The fetch and the advance are two requests on purpose: `wait` will reuse
+/// the fetch, and waiting never moves a cursor.
+///
+/// The order is fetch, print, then advance, and the cursor lands on the last
+/// message that actually reached the reader. `saneha read brisk-otter | head`
+/// closes the pipe part-way through, and a cursor moved before that would
+/// leave everything after the first message neither seen nor unread.
+/// Advancing last means the worst a crash, or a reader walking away, can cost
+/// is reading something twice.
+fn read(args: ReadArgs) -> Result<()> {
+    let remote = Remote::from_env()?;
+    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let identity = caller.identity();
+
+    // One request answers three questions: does the channel exist, is this
+    // caller in it, and how far has it read.
+    let participants = remote.list_participants(&args.channel)?;
+    let me = participants
+        .iter()
+        .find(|participant| participant.identity == identity)
+        .ok_or_else(|| anyhow!(crate::api::not_a_participant(&args.channel, &identity)))?;
+
+    let (after, advance) = match (args.all, args.since) {
+        (true, _) => (0, false),
+        (false, Some(since)) => (since, false),
+        (false, None) => (me.read_cursor, true),
+    };
+
+    let messages = remote.messages_after(&args.channel, after)?;
+    let delivered = if args.json {
+        // An array is all or nothing: half of one is not JSON.
+        let printed = deliver(&format!("{}\n", serde_json::to_string_pretty(&messages)?))?;
+        match printed {
+            Printed::Delivered => messages.last().map(|last| last.id),
+            Printed::ReaderGone => None,
+        }
+    } else {
+        // Nothing unread prints nothing at all, so a skill can run this on a
+        // loop and say something only when there is something to say.
+        transcript(&messages, &participants, deliver)?
+    };
+
+    if advance {
+        if let Some(last) = delivered {
+            remote.set_read_cursor(&args.channel, &identity, last)?;
+        }
+    }
+    Ok(())
+}
+
 /// An argument or environment variable that is there and says something.
 fn trimmed(value: Option<&str>) -> Option<String> {
     value
@@ -347,19 +558,37 @@ fn trimmed(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Whether what was printed reached the reader.
+///
+/// It is not the same question as whether the command failed. A closed pipe is
+/// a success for `saneha list | head`, and it must not be one for `saneha read
+/// | head`: nothing that was not delivered may be marked as read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Printed {
+    Delivered,
+    /// The reader walked away part-way through, or before this started.
+    ReaderGone,
+}
+
 /// Everything printed goes through here. A closed pipe (`saneha list | head`)
 /// is the reader walking away, not a failure: Rust does not restore the
 /// default SIGPIPE, so writing to one is an error the process must swallow
 /// rather than a signal that ends it.
 fn write_out(text: &str) -> Result<()> {
+    deliver(text).map(|_| ())
+}
+
+/// The same write, with the answer to whether it arrived. Only `read` needs
+/// that answer, and it needs it before it can say anything has been read.
+fn deliver(text: &str) -> Result<Printed> {
     use std::io::Write;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let written = write!(out, "{text}").and_then(|()| out.flush());
     match written {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Ok(()) => Ok(Printed::Delivered),
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(Printed::ReaderGone),
         Err(err) => Err(anyhow::Error::new(err).context("could not write to standard output")),
     }
 }
@@ -435,22 +664,120 @@ fn participant_table(channel: &str, participants: &[Participant]) -> String {
     let harness_width = width("HARNESS", |p| &p.harness);
     let host_width = width("HOST", |p| &p.host);
     let away = |p: &Participant| if p.away { "away" } else { "here" };
+    // The read cursor is a message id, so it is as wide as the widest id.
+    let read_width = participants
+        .iter()
+        .map(|p| p.read_cursor.to_string().len())
+        .chain(std::iter::once("READ".len()))
+        .max()
+        .unwrap_or(4);
 
     let mut out = format!(
-        "{:identity_width$}  {:harness_width$}  {:host_width$}  {:4}  {}\n",
-        "IDENTITY", "HARNESS", "HOST", "AWAY", "JOINED"
+        "{:identity_width$}  {:harness_width$}  {:host_width$}  {:4}  {:read_width$}  {}\n",
+        "IDENTITY", "HARNESS", "HOST", "AWAY", "READ", "JOINED"
     );
     for participant in participants {
         out.push_str(&format!(
-            "{:identity_width$}  {:harness_width$}  {:host_width$}  {:4}  {}\n",
+            "{:identity_width$}  {:harness_width$}  {:host_width$}  {:4}  {:read_width$}  {}\n",
             participant.identity,
             participant.harness,
             participant.host,
             away(participant),
+            participant.read_cursor.to_string(),
             participant.joined_at,
         ));
     }
     out
+}
+
+/// How far a message body is set in under its header.
+const INDENT: &str = "    ";
+
+/// The `read` output: a header line naming the message, then its body indented
+/// under it, with a blank line between messages. A system message is one line,
+/// because the server writes it and it is one sentence.
+///
+/// Recipients are shown by name alone when only one participant in the channel
+/// answers to that name, which is the same rule a mention is resolved by, so
+/// what is printed is what can be typed back. A broadcast is `everyone`, which
+/// nothing can be confused with: `→ all` would read as the `@all` mention,
+/// which is a list of names and not the same message at all.
+/// It prints one message at a time, through `print`, and answers with the id
+/// of the last message that reached the reader, or `None` if none did.
+///
+/// One write per message rather than one for the whole lot, so that when a
+/// reader walks away part-way through, what it did take can be marked as read
+/// and what it did not is still waiting. Nothing that was not delivered is
+/// ever counted, which is what makes `saneha read brisk-otter | head` safe.
+fn transcript(
+    messages: &[Message],
+    participants: &[Participant],
+    mut print: impl FnMut(&str) -> Result<Printed>,
+) -> Result<Option<i64>> {
+    let mut delivered = None;
+    for (index, message) in messages.iter().enumerate() {
+        // Every message but the first has a blank line before it, and it
+        // belongs to the message it precedes: a message that never arrives
+        // must not leave a stray line behind either.
+        let separator = if index > 0 { "\n" } else { "" };
+        let block = format!("{separator}{}", entry(message, participants));
+        if print(&block)? == Printed::ReaderGone {
+            break;
+        }
+        delivered = Some(message.id);
+    }
+    Ok(delivered)
+}
+
+/// One message: its header line, and its body set in under it.
+fn entry(message: &Message, participants: &[Participant]) -> String {
+    if message.kind.is_system() {
+        return format!(
+            "#{}  {}  ·  {}\n",
+            message.id, message.created_at, message.body
+        );
+    }
+
+    let from = message.from.as_deref().unwrap_or("system");
+    let to = if message.recipients.is_empty() {
+        "everyone".to_string()
+    } else {
+        message
+            .recipients
+            .iter()
+            .map(|identity| short_name(identity, participants))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = format!(
+        "#{}  {}  {}  → {}\n",
+        message.id, message.created_at, from, to
+    );
+    for line in message.body.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&format!("{INDENT}{line}\n"));
+        }
+    }
+    out
+}
+
+/// An identity as short as it can be said without becoming ambiguous: the name
+/// alone when one participant has it, the whole identity when two do.
+fn short_name(identity: &str, participants: &[Participant]) -> String {
+    let Some((name, _)) = identity.split_once('@') else {
+        return identity.to_string();
+    };
+    let sharing = participants
+        .iter()
+        .filter(|participant| participant.name == name)
+        .count();
+    if sharing == 1 {
+        name.to_string()
+    } else {
+        identity.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -600,6 +927,161 @@ mod tests {
         // Nothing recorded about the process is not evidence that it is there.
         let unpinned = held("a@h", Some("session-theirs"), Some(running), None);
         assert!(!session_is_live(&unpinned, mine));
+    }
+
+    fn message(id: i64, from: Option<&str>, recipients: &[&str], body: &str) -> Message {
+        use crate::api::MessageKind;
+
+        Message {
+            id,
+            channel: "brisk-otter".to_string(),
+            kind: if from.is_some() {
+                MessageKind::Message
+            } else {
+                MessageKind::Join
+            },
+            from: from.map(str::to_string),
+            about: None,
+            recipients: recipients.iter().map(|to| (*to).to_string()).collect(),
+            body: body.to_string(),
+            created_at: "2026-09-04T09:00:00Z".to_string(),
+        }
+    }
+
+    /// The three messages a rendering test needs: a system one, one addressed
+    /// to somebody with a body that breaks across lines, and a broadcast.
+    fn conversation() -> Vec<Message> {
+        vec![
+            message(1, None, &[], "alice@macbookpro joined"),
+            message(
+                2,
+                Some("alice@macbookpro"),
+                &["bob@quadhost"],
+                "first\n\nthird",
+            ),
+            message(3, Some("bob@quadhost"), &[], "and back"),
+        ]
+    }
+
+    fn roster() -> Vec<Participant> {
+        vec![
+            participant("alice@macbookpro", None, None),
+            participant("bob@quadhost", None, None),
+        ]
+    }
+
+    #[test]
+    fn nothing_unread_prints_nothing_at_all() {
+        let mut printed = String::new();
+        let delivered = transcript(&[], &[], |block| {
+            printed.push_str(block);
+            Ok(Printed::Delivered)
+        })
+        .expect("print");
+
+        assert_eq!(printed, "");
+        // Nothing arrived because there was nothing to send, so there is
+        // nothing to mark as read either.
+        assert_eq!(delivered, None);
+    }
+
+    #[test]
+    fn a_transcript_sets_each_body_under_its_own_header() {
+        let mut printed = String::new();
+        let delivered = transcript(&conversation(), &roster(), |block| {
+            printed.push_str(block);
+            Ok(Printed::Delivered)
+        })
+        .expect("print");
+
+        assert_eq!(delivered, Some(3));
+        assert_eq!(
+            printed,
+            "#1  2026-09-04T09:00:00Z  ·  alice@macbookpro joined\n\
+             \n\
+             #2  2026-09-04T09:00:00Z  alice@macbookpro  → bob\n\
+             \x20   first\n\
+             \n\
+             \x20   third\n\
+             \n\
+             #3  2026-09-04T09:00:00Z  bob@quadhost  → everyone\n\
+             \x20   and back\n"
+        );
+    }
+
+    #[test]
+    fn a_reader_that_walks_away_leaves_the_rest_unread() {
+        // The reader takes the first message and goes, the way `head` does.
+        let mut printed = String::new();
+        let mut taken = 0;
+        let delivered = transcript(&conversation(), &roster(), |block| {
+            taken += 1;
+            if taken > 1 {
+                return Ok(Printed::ReaderGone);
+            }
+            printed.push_str(block);
+            Ok(Printed::Delivered)
+        })
+        .expect("print");
+
+        // Only what arrived counts as read; the rest is still waiting.
+        assert_eq!(delivered, Some(1));
+        assert_eq!(
+            printed,
+            "#1  2026-09-04T09:00:00Z  ·  alice@macbookpro joined\n"
+        );
+
+        // A reader that was never there marks nothing at all.
+        let delivered =
+            transcript(&conversation(), &roster(), |_| Ok(Printed::ReaderGone)).expect("print");
+        assert_eq!(delivered, None);
+
+        // A write that failed for a real reason is a failure, not an empty
+        // read: nothing is marked and the command says so.
+        let broken = transcript(&conversation(), &roster(), |_| {
+            Err(anyhow!("the disk is full"))
+        });
+        assert!(broken.is_err());
+    }
+
+    #[test]
+    fn a_recipient_is_shortened_only_while_the_name_is_its_own() {
+        let alone = [participant("bob@quadhost", None, None)];
+        assert_eq!(short_name("bob@quadhost", &alone), "bob");
+
+        let shared = [
+            participant("bob@quadhost", None, None),
+            participant("bob@macbookpro", None, None),
+        ];
+        assert_eq!(short_name("bob@quadhost", &shared), "bob@quadhost");
+        // Anything that is not an identity is printed as it came.
+        assert_eq!(short_name("bob", &shared), "bob");
+    }
+
+    #[test]
+    fn the_participant_listing_says_how_far_each_one_has_read() {
+        let mut read = participant("bob@quadhost", None, None);
+        read.read_cursor = 42;
+        let table = participant_table("brisk-otter", &[read]);
+        let lines: Vec<&str> = table.lines().collect();
+        assert!(lines[0].contains("READ"), "{:?}", lines[0]);
+        assert!(lines[1].contains("42"), "{:?}", lines[1]);
+
+        let read_column = |line: &str| line.find("42").or_else(|| line.find("READ"));
+        assert_eq!(read_column(lines[0]), read_column(lines[1]));
+    }
+
+    #[test]
+    fn a_body_is_the_words_as_typed() {
+        assert_eq!(
+            message_body(&["hello".to_string(), "there".to_string()]).expect("body"),
+            "hello there"
+        );
+        // A lone `-` means standard input, which this test does not feed.
+        assert_eq!(
+            message_body(&["-".to_string(), "x".to_string()]).expect("body"),
+            "- x"
+        );
     }
 
     #[test]

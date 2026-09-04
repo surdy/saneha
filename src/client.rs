@@ -11,7 +11,8 @@ use ureq::http::Response;
 use ureq::{Agent, Body};
 
 use crate::api::{
-    ApiError, Channel, ChannelList, JoinRequest, Joined, Participant, ParticipantList,
+    ApiError, Channel, ChannelList, CursorUpdate, JoinRequest, Joined, Message, MessageList,
+    NewMessage, Participant, ParticipantList, DEFAULT_MESSAGE_LIMIT,
 };
 
 /// The environment variable that points every subcommand at the server.
@@ -153,6 +154,71 @@ impl Remote {
         }
         let response = self.check(response)?;
         read_json(response, "participant").map(Some)
+    }
+
+    /// Writes one message. The server works out who it is addressed to and
+    /// refuses the whole thing if a mention names nobody, so what comes back
+    /// is the message as the transcript now holds it.
+    pub fn send_message(&self, channel: &str, message: &NewMessage) -> Result<Message> {
+        let response = self.check(
+            self.agent
+                .post(self.url(&format!("/channels/{channel}/messages")))
+                .send_json(message)
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "message")
+    }
+
+    /// One page of a transcript: at most `limit` messages after `after`.
+    pub fn messages(&self, channel: &str, after: i64, limit: usize) -> Result<Vec<Message>> {
+        let response = self.check(
+            self.agent
+                .get(self.url(&format!(
+                    "/channels/{channel}/messages?after={after}&limit={limit}"
+                )))
+                .call()
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        let list: MessageList = read_json(response, "message list")?;
+        Ok(list.messages)
+    }
+
+    /// Every message after `after`, however many pages that takes. A backlog
+    /// longer than one page is still read whole, and reading it moves nothing:
+    /// the cursor is advanced by its own request, if at all.
+    pub fn messages_after(&self, channel: &str, after: i64) -> Result<Vec<Message>> {
+        let mut all: Vec<Message> = Vec::new();
+        let mut after = after;
+        loop {
+            let page = self.messages(channel, after, DEFAULT_MESSAGE_LIMIT)?;
+            let full = page.len() == DEFAULT_MESSAGE_LIMIT;
+            if let Some(last) = page.last() {
+                after = last.id;
+            }
+            all.extend(page);
+            if !full {
+                return Ok(all);
+            }
+        }
+    }
+
+    /// Moves a participant's read cursor, and returns the participant as it
+    /// now stands. The server holds it where it is if this is behind.
+    pub fn set_read_cursor(
+        &self,
+        channel: &str,
+        identity: &str,
+        read_cursor: i64,
+    ) -> Result<Participant> {
+        let response = self.check(
+            self.agent
+                .post(self.url(&format!(
+                    "/channels/{channel}/participants/{identity}/cursor"
+                )))
+                .send_json(&CursorUpdate { read_cursor })
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "participant")
     }
 
     fn check(&self, response: Response<Body>) -> Result<Response<Body>> {

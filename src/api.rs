@@ -1,4 +1,6 @@
-//! The wire shapes shared by the server and the subcommands that talk to it.
+//! The wire shapes shared by the server and the subcommands that talk to it,
+//! along with the limits both sides hold to and the two sentences both sides
+//! have to be able to say.
 
 use serde::{Deserialize, Serialize};
 
@@ -147,6 +149,140 @@ pub struct Joined {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParticipantList {
     pub participants: Vec<Participant>,
+}
+
+/// What a message is: one written by a participant, or one the server wrote
+/// into the transcript about a participant or about the channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    /// Written by a participant. Everything else is a system message.
+    Message,
+    Join,
+    Leave,
+    Close,
+}
+
+impl MessageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageKind::Message => "message",
+            MessageKind::Join => "join",
+            MessageKind::Leave => "leave",
+            MessageKind::Close => "close",
+        }
+    }
+
+    /// Whether the server wrote this rather than a participant.
+    pub fn is_system(self) -> bool {
+        !matches!(self, MessageKind::Message)
+    }
+}
+
+impl std::str::FromStr for MessageKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "message" => Ok(MessageKind::Message),
+            "join" => Ok(MessageKind::Join),
+            "leave" => Ok(MessageKind::Leave),
+            "close" => Ok(MessageKind::Close),
+            other => Err(format!("unknown message kind {other:?}")),
+        }
+    }
+}
+
+/// A message as the server describes it. Ids increase within a channel, so a
+/// read cursor is a number in this sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Message {
+    pub id: i64,
+    pub channel: String,
+    pub kind: MessageKind,
+    /// The identity that wrote it. A system message has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The identity a join or leave is about. A message written by a
+    /// participant has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+    /// The identities this is addressed to. Empty is a broadcast.
+    pub recipients: Vec<String>,
+    /// Markdown, as it was written.
+    pub body: String,
+    /// RFC 3339, UTC.
+    pub created_at: String,
+}
+
+/// The body of `POST /channels/{name}/messages`. Recipients come from the
+/// mentions in the body and from `to`, which holds what `--to` was given:
+/// `bob`, `bob@quadhost` or `all`, with or without a leading `@`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewMessage {
+    /// The identity writing it, which must already be a participant.
+    pub from: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub to: Vec<String>,
+}
+
+/// The body of `GET /channels/{name}/messages`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageList {
+    pub messages: Vec<Message>,
+}
+
+/// The query of `GET /channels/{name}/messages`: everything after `after`, at
+/// most `limit` of them. Fetching never moves a read cursor, so `wait` and a
+/// history read use the same route as `read` does.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MessageQuery {
+    /// Messages with an id greater than this. Absent means from the start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<i64>,
+    /// At most this many, capped at [`MAX_MESSAGE_LIMIT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// How many messages one fetch returns when the caller does not say.
+pub const DEFAULT_MESSAGE_LIMIT: usize = 500;
+
+/// The most one fetch will return, however large a limit is asked for. A
+/// caller with a longer backlog than this asks again from the last id it got.
+pub const MAX_MESSAGE_LIMIT: usize = 1000;
+
+/// The longest a message body may be, in bytes. Anything longer is an
+/// attachment rather than a message (v1 scope). Both sides hold callers to it:
+/// the subcommand so nothing large is sent at all, and the server because it
+/// is the one that must be right.
+pub const MAX_BODY: usize = 64 * 1024;
+
+/// Why a body was refused, in the one wording both sides use.
+pub fn body_too_large(size: usize) -> String {
+    format!(
+        "a message body is at most {MAX_BODY} bytes and this one is {size}; \
+         send the long part as an attachment instead"
+    )
+}
+
+/// The one sentence every verb uses when the caller is acting as somebody who
+/// has not joined the channel: the server when it refuses a send, the
+/// subcommand when it looks at the participants and does not find itself. It
+/// lives here so both sides say it the same way.
+pub fn not_a_participant(channel: &str, identity: &str) -> String {
+    format!("{identity} has not joined {channel:?}; join it first: saneha join {channel}")
+}
+
+/// The body of `POST /channels/{name}/participants/{identity}/cursor`.
+/// Advancing is its own request because reading is the only thing that moves a
+/// cursor (ADR-0004), and a cursor never moves backwards: a value below the
+/// one already recorded is ignored, and one beyond the end of the transcript
+/// is held at the last message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorUpdate {
+    pub read_cursor: i64,
 }
 
 /// Every failing response carries this, so the subcommands can print the
