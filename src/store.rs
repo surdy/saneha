@@ -7,11 +7,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension};
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
 
 use crate::api::{Channel, ChannelState};
 use crate::slug;
@@ -19,11 +16,21 @@ use crate::slug;
 /// The longest a channel name may be.
 pub const MAX_CHANNEL_NAME: usize = 64;
 
+/// The longest a purpose may be. A purpose is one line saying what a channel is
+/// for, not a document.
+pub const MAX_PURPOSE: usize = 256;
+
+/// How much of a rejected value is echoed back in the error.
+const MAX_ECHO: usize = 80;
+
 /// How many slugs the server tries before giving up on minting a name.
 const MINT_ATTEMPTS: usize = 24;
 
-/// Applied in order; the index of the last applied entry is kept in SQLite's
-/// `user_version`. Never edit an entry that has shipped, only append.
+/// SQLite renders timestamps itself, so there is one clock and one format.
+const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
+
+/// Applied in order; the number applied is kept in SQLite's `user_version`.
+/// Never edit an entry that has shipped, only append.
 ///
 /// Migration 1 creates the channels table alone. The rest of v1 arrives as
 /// further migrations: `participants` (identity, harness, host, read cursor),
@@ -31,16 +38,18 @@ const MINT_ATTEMPTS: usize = 24;
 /// recipients, kind) and `attachments`. The forward-looking columns here are
 /// the ones the channels table itself will need for that: `closed_at` for
 /// `saneha close`, and `last_message_id` as the per-channel allocator that
-/// makes message ids monotonic within a transcript.
+/// makes message ids monotonic within a transcript. `AUTOINCREMENT` keeps a
+/// deleted channel's id from being handed to a later channel, so anything
+/// keyed by channel id stays unambiguous.
 const MIGRATIONS: &[&str] = &[r#"
 CREATE TABLE channels (
-    id              INTEGER PRIMARY KEY,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT    NOT NULL,
     purpose         TEXT,
     state           TEXT    NOT NULL DEFAULT 'open'
                             CHECK (state IN ('open', 'closed')),
-    created_at      INTEGER NOT NULL,
-    closed_at       INTEGER,
+    created_at      TEXT    NOT NULL,
+    closed_at       TEXT,
     last_message_id INTEGER NOT NULL DEFAULT 0
 );
 
@@ -56,11 +65,26 @@ pub enum StoreError {
     )]
     InvalidChannelName { name: String },
 
+    #[error(
+        "a purpose is one line of at most {max} characters, with no line breaks (got {purpose:?})",
+        max = MAX_PURPOSE
+    )]
+    InvalidPurpose { purpose: String },
+
     #[error("a channel named {0:?} already exists")]
     ChannelExists(String),
 
     #[error("could not mint a channel name after {0} attempts; name one yourself")]
     MintExhausted(usize),
+
+    #[error(
+        "the database was written by a newer saneha (schema {found}, this build understands \
+         {supported}); upgrade saneha or point --db at another file"
+    )]
+    NewerSchema { found: usize, supported: usize },
+
+    #[error("the database holds a channel state this build does not understand: {0:?}")]
+    UnknownChannelState(String),
 
     #[error("database error")]
     Sqlite(#[from] rusqlite::Error),
@@ -137,18 +161,20 @@ impl Store {
         purpose: Option<&str>,
     ) -> Result<Channel, StoreError> {
         let purpose = purpose.map(str::trim).filter(|p| !p.is_empty());
-        let created_at = now_unix();
+        if let Some(purpose) = purpose {
+            validate_purpose(purpose)?;
+        }
 
         match name {
             Some(name) => {
                 let name = name.trim();
                 validate_channel_name(name)?;
-                self.insert_channel(name, purpose, created_at)
+                self.insert_channel(name, purpose)
             }
             None => {
                 for _ in 0..MINT_ATTEMPTS {
                     let minted = slug::mint();
-                    match self.insert_channel(&minted, purpose, created_at) {
+                    match self.insert_channel(&minted, purpose) {
                         Err(StoreError::ChannelExists(_)) => continue,
                         other => return other,
                     }
@@ -158,24 +184,23 @@ impl Store {
         }
     }
 
-    fn insert_channel(
-        &self,
-        name: &str,
-        purpose: Option<&str>,
-        created_at: i64,
-    ) -> Result<Channel, StoreError> {
+    fn insert_channel(&self, name: &str, purpose: Option<&str>) -> Result<Channel, StoreError> {
         let conn = self.conn();
-        let result = conn.execute(
-            "INSERT INTO channels (name, purpose, state, created_at)
-             VALUES (?1, ?2, 'open', ?3)",
-            rusqlite::params![name, purpose, created_at],
+        let created_at: Result<String, rusqlite::Error> = conn.query_row(
+            &format!(
+                "INSERT INTO channels (name, purpose, state, created_at)
+                 VALUES (?1, ?2, 'open', {NOW})
+                 RETURNING created_at"
+            ),
+            rusqlite::params![name, purpose],
+            |row| row.get(0),
         );
-        match result {
-            Ok(_) => Ok(Channel {
+        match created_at {
+            Ok(created_at) => Ok(Channel {
                 name: name.to_string(),
                 purpose: purpose.map(str::to_string),
                 state: ChannelState::Open,
-                created_at: to_rfc3339(created_at),
+                created_at,
             }),
             Err(err) if is_unique_violation(&err) => {
                 Err(StoreError::ChannelExists(name.to_string()))
@@ -190,46 +215,33 @@ impl Store {
         let mut statement = conn.prepare(
             "SELECT name, purpose, state, created_at FROM channels ORDER BY created_at, id",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok(Channel {
-                name: row.get(0)?,
-                purpose: row.get(1)?,
-                state: parse_state(&row.get::<_, String>(2)?),
-                created_at: to_rfc3339(row.get(3)?),
-            })
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let rows = statement.query_map([], read_row)?;
+        rows.collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(build_channel)
+            .collect()
     }
 
     /// One channel by name, or `None` if there is no such channel.
     pub fn channel(&self, name: &str) -> Result<Option<Channel>, StoreError> {
         let conn = self.conn();
-        let channel = conn
+        let row = conn
             .query_row(
                 "SELECT name, purpose, state, created_at FROM channels WHERE name = ?1",
                 [name],
-                |row| {
-                    Ok(Channel {
-                        name: row.get(0)?,
-                        purpose: row.get(1)?,
-                        state: parse_state(&row.get::<_, String>(2)?),
-                        created_at: to_rfc3339(row.get(3)?),
-                    })
-                },
+                read_row,
             )
             .optional()?;
-        Ok(channel)
+        row.map(build_channel).transpose()
     }
 }
 
 /// Channel names are typed by people and pasted between machines, so they are
 /// deliberately narrow: lowercase letters, digits and hyphens only.
 pub fn validate_channel_name(name: &str) -> Result<(), StoreError> {
-    let invalid = || StoreError::InvalidChannelName {
-        name: name.to_string(),
-    };
+    let invalid = || StoreError::InvalidChannelName { name: echo(name) };
 
-    if name.is_empty() || name.len() > MAX_CHANNEL_NAME {
+    if name.is_empty() || name.chars().count() > MAX_CHANNEL_NAME {
         return Err(invalid());
     }
     if !name
@@ -245,9 +257,54 @@ pub fn validate_channel_name(name: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// A purpose is the one line a channel is listed with, so it holds one line.
+pub fn validate_purpose(purpose: &str) -> Result<(), StoreError> {
+    if purpose.chars().count() > MAX_PURPOSE || purpose.contains('\n') || purpose.contains('\r') {
+        return Err(StoreError::InvalidPurpose {
+            purpose: echo(purpose),
+        });
+    }
+    Ok(())
+}
+
+/// A rejected value, short enough to sit in a one-line error.
+fn echo(value: &str) -> String {
+    if value.chars().count() <= MAX_ECHO {
+        return value.to_string();
+    }
+    let head: String = value.chars().take(MAX_ECHO).collect();
+    format!("{head}...")
+}
+
+type ChannelRow = (String, Option<String>, String, String);
+
+fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelRow> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+}
+
+fn build_channel(row: ChannelRow) -> Result<Channel, StoreError> {
+    let (name, purpose, state, created_at) = row;
+    Ok(Channel {
+        name,
+        purpose,
+        state: state
+            .parse()
+            .map_err(|_| StoreError::UnknownChannelState(state.clone()))?,
+        created_at,
+    })
+}
+
 fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     let mut applied: usize =
         conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? as usize;
+    if applied > MIGRATIONS.len() {
+        // The file has been through migrations this build has never heard of,
+        // so its tables may not mean what this build thinks they mean.
+        return Err(StoreError::NewerSchema {
+            found: applied,
+            supported: MIGRATIONS.len(),
+        });
+    }
     while applied < MIGRATIONS.len() {
         let tx = conn.transaction()?;
         tx.execute_batch(MIGRATIONS[applied])?;
@@ -259,37 +316,20 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// A duplicate name specifically, not any constraint: a CHECK or NOT NULL
+/// failure must not be reported as "already exists", and must not send the
+/// mint loop round again.
 fn is_unique_violation(err: &rusqlite::Error) -> bool {
     matches!(
         err,
         rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error {
-                code: rusqlite::ErrorCode::ConstraintViolation,
+                extended_code: rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE,
                 ..
             },
             _
         )
     )
-}
-
-fn parse_state(raw: &str) -> ChannelState {
-    // The column has a CHECK constraint, so anything else is a database written
-    // by a newer saneha; treat it as open rather than failing the whole listing.
-    raw.parse().unwrap_or(ChannelState::Open)
-}
-
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn to_rfc3339(seconds: i64) -> String {
-    OffsetDateTime::from_unix_timestamp(seconds)
-        .ok()
-        .and_then(|t| t.format(&Rfc3339).ok())
-        .unwrap_or_else(|| seconds.to_string())
 }
 
 #[cfg(test)]
@@ -325,6 +365,46 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_value_is_echoed_short() {
+        let long = "a".repeat(10_000);
+        let message = validate_channel_name(&long).unwrap_err().to_string();
+        assert!(message.chars().count() < 300, "{} chars", message.len());
+        assert!(message.contains("..."), "{message}");
+    }
+
+    #[test]
+    fn accepts_one_line_purposes() {
+        for purpose in ["", "coordinating the refactor", &"p".repeat(MAX_PURPOSE)] {
+            validate_purpose(purpose).unwrap_or_else(|err| panic!("{purpose:?}: {err}"));
+        }
+    }
+
+    #[test]
+    fn rejects_purposes_that_are_not_one_line() {
+        for purpose in [
+            "line one\nline two",
+            "line one\r\nline two",
+            "trailing\r",
+            &"p".repeat(MAX_PURPOSE + 1),
+        ] {
+            assert!(
+                validate_purpose(purpose).is_err(),
+                "expected {purpose:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_channel_will_not_take_a_multiline_purpose() {
+        let store = Store::open_in_memory().expect("open");
+        let err = store
+            .create_channel(Some("brisk-otter"), Some("line one\nline two"))
+            .expect_err("multi-line purpose");
+        assert!(matches!(err, StoreError::InvalidPurpose { .. }), "{err}");
+        assert!(store.list_channels().expect("list").is_empty());
+    }
+
+    #[test]
     fn creates_lists_and_refuses_duplicates() {
         let store = Store::open_in_memory().expect("open");
 
@@ -334,6 +414,8 @@ mod tests {
         assert_eq!(created.name, "brisk-otter");
         assert_eq!(created.purpose.as_deref(), Some("the refactor"));
         assert_eq!(created.state, ChannelState::Open);
+        assert!(created.created_at.ends_with('Z'), "{}", created.created_at);
+        assert_eq!(created.created_at.len(), 20, "{}", created.created_at);
 
         let minted = store.create_channel(None, None).expect("mint");
         assert!(minted.name.contains('-'), "minted {:?}", minted.name);
@@ -365,5 +447,70 @@ mod tests {
         assert_eq!(store.list_channels().expect("list").len(), 1);
         assert!(store.channel("quiet-heron").expect("lookup").is_some());
         assert!(store.channel("nobody-here").expect("lookup").is_none());
+    }
+
+    #[test]
+    fn refuses_a_database_from_a_newer_saneha() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("saneha.db");
+        drop(Store::open(&path).expect("create the database"));
+
+        let conn = Connection::open(&path).expect("open directly");
+        conn.execute_batch(&format!("PRAGMA user_version = {}", MIGRATIONS.len() + 2))
+            .expect("pretend a newer saneha migrated it");
+        drop(conn);
+
+        let err = match Store::open(&path) {
+            Err(err) => err,
+            Ok(_) => panic!("a newer schema must be refused"),
+        };
+        assert!(
+            matches!(err, StoreError::NewerSchema { found, supported }
+                if found == MIGRATIONS.len() + 2 && supported == MIGRATIONS.len()),
+            "{err}"
+        );
+        assert!(err.to_string().contains("newer saneha"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_channel_state_it_does_not_understand() {
+        // What a row written by a newer saneha, past a relaxed CHECK
+        // constraint, would look like on the way out of the database.
+        let row = (
+            "brisk-otter".to_string(),
+            None,
+            "paused".to_string(),
+            "2026-09-04T09:00:00Z".to_string(),
+        );
+        let err = build_channel(row).expect_err("unknown state");
+        assert!(
+            matches!(&err, StoreError::UnknownChannelState(state) if state == "paused"),
+            "{err}"
+        );
+
+        let known = (
+            "brisk-otter".to_string(),
+            None,
+            "closed".to_string(),
+            "2026-09-04T09:00:00Z".to_string(),
+        );
+        assert_eq!(
+            build_channel(known).expect("closed is understood").state,
+            ChannelState::Closed
+        );
+    }
+
+    #[test]
+    fn a_constraint_that_is_not_a_duplicate_is_not_reported_as_one() {
+        let store = Store::open_in_memory().expect("open");
+        let err = store
+            .conn()
+            .execute(
+                "INSERT INTO channels (name, purpose, state, created_at)
+                 VALUES ('brisk-otter', NULL, 'paused', '2026-09-04T09:00:00Z')",
+                [],
+            )
+            .expect_err("the CHECK constraint rejects it");
+        assert!(!is_unique_violation(&err), "{err}");
     }
 }

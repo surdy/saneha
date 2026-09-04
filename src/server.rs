@@ -111,12 +111,16 @@ impl IntoResponse for Failure {
 impl From<StoreError> for Failure {
     fn from(err: StoreError) -> Self {
         let status = match err {
-            StoreError::InvalidChannelName { .. } => StatusCode::BAD_REQUEST,
+            StoreError::InvalidChannelName { .. } | StoreError::InvalidPurpose { .. } => {
+                StatusCode::BAD_REQUEST
+            }
             StoreError::ChannelExists(_) => StatusCode::CONFLICT,
             StoreError::MintExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
-            StoreError::Sqlite(_) | StoreError::Open { .. } | StoreError::Directory { .. } => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            StoreError::NewerSchema { .. }
+            | StoreError::UnknownChannelState(_)
+            | StoreError::Sqlite(_)
+            | StoreError::Open { .. }
+            | StoreError::Directory { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Failure {
             status,

@@ -107,9 +107,20 @@ fn serve(args: ServeArgs) -> Result<()> {
             .local_addr()
             .context("could not read the address the server is listening on")?;
 
-        println!("saneha is serving on http://{address}");
-        println!("database: {}", database.display());
-        println!("point subcommands at it with: export {URL_ENV}=http://{address}");
+        say(&format!("saneha is serving on http://{address}"))?;
+        say(&format!("database: {}", database.display()))?;
+        if address.ip().is_unspecified() {
+            // http://0.0.0.0:7343 is not an address anything can connect to.
+            say(&format!(
+                "listening on every interface; point subcommands at a host that reaches \
+                 this one, as {URL_ENV}=http://<host>:{}",
+                address.port()
+            ))?;
+        } else {
+            say(&format!(
+                "point subcommands at it with: export {URL_ENV}=http://{address}"
+            ))?;
+        }
 
         server::run(listener, store).await
     })
@@ -119,25 +130,43 @@ fn new(args: NewArgs) -> Result<()> {
     let remote = Remote::from_env()?;
     let channel = remote.create_channel(args.name.as_deref(), args.purpose.as_deref())?;
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&channel)?);
+        say(&serde_json::to_string_pretty(&channel)?)
     } else {
-        println!("{}", channel.name);
+        say(&channel.name)
     }
-    Ok(())
 }
 
 fn list(args: ListArgs) -> Result<()> {
     let remote = Remote::from_env()?;
     let channels = remote.list_channels()?;
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&crate::api::ChannelList { channels })?
-        );
-        return Ok(());
+        return say(&serde_json::to_string_pretty(&crate::api::ChannelList {
+            channels,
+        })?);
     }
-    print!("{}", channel_table(&channels));
-    Ok(())
+    write_out(&channel_table(&channels))
+}
+
+/// Everything printed goes through here. A closed pipe (`saneha list | head`)
+/// is the reader walking away, not a failure: Rust does not restore the
+/// default SIGPIPE, so writing to one is an error the process must swallow
+/// rather than a signal that ends it.
+fn write_out(text: &str) -> Result<()> {
+    use std::io::Write;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let written = write!(out, "{text}").and_then(|()| out.flush());
+    match written {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(err) => Err(anyhow::Error::new(err).context("could not write to standard output")),
+    }
+}
+
+/// One line on standard output.
+fn say(line: &str) -> Result<()> {
+    write_out(&format!("{line}\n"))
 }
 
 /// The `list` output: aligned columns, purpose last so it can run long.

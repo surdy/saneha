@@ -3,7 +3,7 @@
 //! `saneha` binary itself.
 
 use std::net::SocketAddr;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -121,6 +121,74 @@ fn an_invalid_name_fails_clearly() {
         );
         assert!(message.contains(name), "{message} does not name {name:?}");
         assert_eq!(message.lines().count(), 1, "{message}");
+    }
+}
+
+#[test]
+fn a_purpose_that_is_not_one_line_fails_clearly() {
+    let server = TestServer::start();
+    let remote = server.remote();
+
+    let too_long = "p".repeat(100_000);
+    for purpose in ["line one\nline two", "line one\r\nline two", &too_long] {
+        let err = remote
+            .create_channel(Some("brisk-otter"), Some(purpose))
+            .expect_err("the purpose must be rejected");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("one line") && message.contains("256 characters"),
+            "unhelpful message: {message}"
+        );
+        assert_eq!(message.lines().count(), 1, "{message}");
+        assert!(message.chars().count() < 400, "{} chars", message.len());
+    }
+
+    // Nothing was written on the way to any of those errors.
+    assert!(remote.list_channels().expect("list").is_empty());
+
+    let rejected = server.run(&["new", "brisk-otter", "--purpose", "line one\nline two"]);
+    assert!(!rejected.status.success());
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.starts_with("saneha: a purpose is one line"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_closed_pipe_ends_the_listing_quietly() {
+    let server = TestServer::start();
+    let remote = server.remote();
+
+    // More output than a pipe buffer holds, so the write is still going when
+    // the reader goes away.
+    let purpose = "p".repeat(200);
+    for index in 0..400 {
+        remote
+            .create_channel(Some(&format!("channel-{index}")), Some(&purpose))
+            .expect("create");
+    }
+
+    for args in [vec!["list"], vec!["list", "--json"]] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_saneha"))
+            .args(&args)
+            .env("SANEHA_URL", &server.url)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run the saneha binary");
+        // Close the read end straight away, the way `saneha list | true` does.
+        drop(child.stdout.take());
+
+        let output = child.wait_with_output().expect("wait");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "saneha {args:?} exited with {:?}: {stderr}",
+            output.status.code()
+        );
+        assert!(!stderr.contains("panicked"), "{stderr}");
     }
 }
 

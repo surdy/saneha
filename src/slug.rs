@@ -92,11 +92,6 @@ pub fn mint() -> String {
     format!("{adjective}-{noun}")
 }
 
-/// How many distinct slugs `mint` can produce.
-pub fn space() -> usize {
-    ADJECTIVES.len() * NOUNS.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,7 +114,11 @@ mod tests {
                 "{word} is not plain lowercase"
             );
         }
-        assert!(space() > 1000, "slug space is only {}", space());
+        let combinations = ADJECTIVES.len() * NOUNS.len();
+        assert!(
+            combinations > 1000,
+            "only {combinations} slugs to mint from"
+        );
     }
 
     #[test]

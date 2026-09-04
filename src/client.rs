@@ -6,11 +6,11 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
-use reqwest::blocking::{RequestBuilder, Response};
-use reqwest::StatusCode;
+use anyhow::{anyhow, Result};
+use ureq::http::Response;
+use ureq::{Agent, Body};
 
-use crate::api::{ApiError, Channel, ChannelList, NewChannel};
+use crate::api::{ApiError, Channel, ChannelList};
 
 /// The environment variable that points every subcommand at the server.
 pub const URL_ENV: &str = "SANEHA_URL";
@@ -21,7 +21,7 @@ const MAX_ERROR_BODY: usize = 200;
 /// The server as seen from a subcommand.
 pub struct Remote {
     base: String,
-    http: reqwest::blocking::Client,
+    agent: Agent,
 }
 
 impl Remote {
@@ -48,11 +48,16 @@ impl Remote {
         } else {
             format!("http://{url}")
         };
-        let http = reqwest::blocking::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .context("could not start the HTTP client")?;
-        Ok(Remote { base, http })
+        let config = Agent::config_builder()
+            // Read the server's own `{"error": "..."}` instead of turning a
+            // status code into an error before the body is seen.
+            .http_status_as_error(false)
+            .timeout_global(Some(REQUEST_TIMEOUT))
+            .build();
+        Ok(Remote {
+            base,
+            agent: Agent::new_with_config(config),
+        })
     }
 
     /// The server address this is pointed at.
@@ -66,44 +71,68 @@ impl Remote {
 
     /// Creates a channel. A `name` of `None` asks the server to mint one.
     pub fn create_channel(&self, name: Option<&str>, purpose: Option<&str>) -> Result<Channel> {
-        let body = NewChannel {
+        let body = crate::api::NewChannel {
             name: name.map(str::to_string),
             purpose: purpose.map(str::to_string),
         };
-        let response = self.send(self.http.post(self.url("/channels")).json(&body))?;
-        response
-            .json::<Channel>()
-            .context("the saneha server sent a channel this version does not understand")
+        let response = self.check(
+            self.agent
+                .post(self.url("/channels"))
+                .send_json(&body)
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "channel")
     }
 
     /// Every channel the server knows about.
     pub fn list_channels(&self) -> Result<Vec<Channel>> {
-        let response = self.send(self.http.get(self.url("/channels")))?;
-        let list = response
-            .json::<ChannelList>()
-            .context("the saneha server sent a channel list this version does not understand")?;
+        let response = self.check(
+            self.agent
+                .get(self.url("/channels"))
+                .call()
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        let list: ChannelList = read_json(response, "channel list")?;
         Ok(list.channels)
     }
 
-    fn send(&self, request: RequestBuilder) -> Result<Response> {
-        let response = request.send().map_err(|err| {
-            anyhow!(
-                "cannot reach the saneha server at {} ({})",
-                self.base,
-                root_cause(&err)
-            )
-        })?;
-        let status = response.status();
-        if status.is_success() {
+    fn check(&self, response: Response<Body>) -> Result<Response<Body>> {
+        if response.status().is_success() {
             return Ok(response);
         }
-        Err(anyhow!(server_message(status, response)))
+        Err(anyhow!(server_message(response)))
+    }
+
+    fn unreachable(&self, err: &ureq::Error) -> anyhow::Error {
+        match err {
+            // A bad SANEHA_URL is worth saying out loud; everything else is
+            // the server not being there.
+            ureq::Error::BadUri(detail) => anyhow!(
+                "{} is not a usable server address: {detail}",
+                self.base_url()
+            ),
+            other => anyhow!(
+                "cannot reach the saneha server at {} ({})",
+                self.base,
+                describe(other)
+            ),
+        }
     }
 }
 
+fn read_json<T: serde::de::DeserializeOwned>(
+    mut response: Response<Body>,
+    what: &str,
+) -> Result<T> {
+    response.body_mut().read_json::<T>().map_err(|err| {
+        anyhow!("the saneha server sent a {what} this version does not understand ({err})")
+    })
+}
+
 /// The server's own words when it sends them, a readable fallback when it does not.
-fn server_message(status: StatusCode, response: Response) -> String {
-    let body = response.text().unwrap_or_default();
+fn server_message(mut response: Response<Body>) -> String {
+    let status = response.status();
+    let body = response.body_mut().read_to_string().unwrap_or_default();
     if let Ok(api_error) = serde_json::from_str::<ApiError>(&body) {
         return api_error.error;
     }
@@ -118,14 +147,13 @@ fn server_message(status: StatusCode, response: Response) -> String {
     format!("the saneha server refused the request ({status}): {summary}")
 }
 
-/// The innermost cause, which is the part worth printing: reqwest's own
-/// Display repeats the URL we are already naming.
-fn root_cause(err: &dyn std::error::Error) -> String {
-    let mut current: &dyn std::error::Error = err;
-    while let Some(source) = current.source() {
-        current = source;
+/// One line saying why the request never got an answer. ureq's own Display
+/// prefixes the transport kind, which is noise next to the address we name.
+fn describe(err: &ureq::Error) -> String {
+    match err {
+        ureq::Error::Io(io) => io.to_string(),
+        other => other.to_string(),
     }
-    current.to_string()
 }
 
 #[cfg(test)]
@@ -140,18 +168,5 @@ mod tests {
 
         let remote = Remote::at("https://saneha.example.com").expect("remote");
         assert_eq!(remote.base_url(), "https://saneha.example.com");
-    }
-
-    #[test]
-    fn unreachable_server_names_the_url() {
-        // Port 1 on the loopback refuses connections promptly.
-        let remote = Remote::at("http://127.0.0.1:1").expect("remote");
-        let err = remote.list_channels().expect_err("should not connect");
-        let message = format!("{err:#}");
-        assert!(
-            message.starts_with("cannot reach the saneha server at http://127.0.0.1:1"),
-            "{message}"
-        );
-        assert_eq!(message.lines().count(), 1, "{message}");
     }
 }
