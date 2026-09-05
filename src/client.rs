@@ -4,7 +4,7 @@
 //! `SANEHA_URL`, makes one request, and turns anything that goes wrong into a
 //! single line a person can act on.
 
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -260,13 +260,15 @@ impl Remote {
     /// refuses the whole thing if a mention names nobody, so what comes back
     /// is the message as the transcript now holds it.
     pub fn send_message(&self, channel: &str, message: &NewMessage) -> Result<Message> {
+        // Made once, and not through `retrying`: a signal can land on the
+        // read of the answer to a send the server has already written down,
+        // and making that one again puts the message in the transcript twice
+        // under two ids. An interruption here is reported, as it always was.
         let response = self.check(
-            retrying(|| {
-                self.agent
-                    .post(self.url(&format!("/channels/{channel}/messages")))
-                    .send_json(message)
-            })
-            .map_err(|err| self.unreachable(&err))?,
+            self.agent
+                .post(self.url(&format!("/channels/{channel}/messages")))
+                .send_json(message)
+                .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "message")
     }
@@ -423,27 +425,25 @@ impl Remote {
 
         let mut reading =
             std::fs::File::open(file).with_context(|| format!("could not open {shown}"))?;
+        // Made once, and not through `retrying`: an upload the server has
+        // already stored leaves a second, unbound attachment behind if it is
+        // made again, and the body is a file being streamed rather than
+        // something this can hand over twice.
         let response = self.check(
-            retrying(|| {
-                // An upload that is made again is made from the beginning of
-                // the file, wherever the interrupted attempt left the reader.
-                reading.rewind().map_err(ureq::Error::Io)?;
-                self.agent
-                    .post(self.url(&format!("/channels/{channel}/attachments")))
-                    .config()
-                    .timeout_global(Some(ATTACHMENT_TIMEOUT))
-                    .build()
-                    // Percent-encoded, because a header value carries ASCII and
-                    // a filename is written in whatever language it was named
-                    // in.
-                    .header(FILENAME_HEADER, encode_filename(&filename))
-                    .header("content-type", content_type_of(&filename))
-                    // The size is known, so the request is length-delimited and
-                    // the server can refuse an oversize one before reading it.
-                    .header("content-length", size.to_string())
-                    .send(SendBody::from_reader(&mut reading))
-            })
-            .map_err(|err| self.unreachable(&err))?,
+            self.agent
+                .post(self.url(&format!("/channels/{channel}/attachments")))
+                .config()
+                .timeout_global(Some(ATTACHMENT_TIMEOUT))
+                .build()
+                // Percent-encoded, because a header value carries ASCII and a
+                // filename is written in whatever language it was named in.
+                .header(FILENAME_HEADER, encode_filename(&filename))
+                .header("content-type", content_type_of(&filename))
+                // The size is known, so the request is length-delimited and
+                // the server can refuse an oversize one before reading it.
+                .header("content-length", size.to_string())
+                .send(SendBody::from_reader(&mut reading))
+                .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "attachment")
     }
@@ -654,12 +654,22 @@ fn server_message(mut response: Response<Body>) -> (String, bool) {
 /// busy machine reads as a saneha server that is not there. There is nothing
 /// wrong with such a request, so it goes again straight away — a bounded
 /// number of times, so a machine being signalled steadily still ends in an
-/// answer rather than a loop.
+/// answer rather than a loop. An interrupted attempt fails at once rather than
+/// sitting out its timeout, so the whole budget still fits inside the deadline
+/// the caller set for one request.
 ///
-/// `attempt` is the whole request, from connect to response, so a request is
-/// only ever made again when no response came back at all. Nothing else is
-/// retried: every other error is the server's answer or a real failure to
-/// reach it, and is reported in the same words as before.
+/// **Only a request that is harmless to repeat goes through here.** An
+/// interruption is not proof that nothing reached the server: it can land on
+/// the read of the answer to a request the server has already carried out. So
+/// this is for the reads, and for the writes that land in the same place
+/// however many times they are made — a join, a leave, a close, a cursor that
+/// only moves forward, a delete whose second answer the caller already reads
+/// as gone. The two verbs that create something, `send_message` and
+/// `upload_attachment`, are made once and say so at their call sites.
+///
+/// Nothing but an interruption is retried: every other error is the server's
+/// answer or a real failure to reach it, and is reported in the same words as
+/// before.
 fn retrying<T>(mut attempt: impl FnMut() -> Result<T, ureq::Error>) -> Result<T, ureq::Error> {
     for _ in 0..INTERRUPTED_RETRIES {
         match attempt() {
@@ -819,6 +829,40 @@ mod tests {
         .expect_err("a bad address to stand");
         assert_eq!(attempts, 1);
         assert!(!interrupted(&bad));
+    }
+
+    /// The text of one method of `Remote`, out of this file's own source.
+    fn body_of(method: &str) -> &'static str {
+        const SOURCE: &str = include_str!("client.rs");
+        let from = SOURCE.find(method).expect("the method to be in this file");
+        let body = &SOURCE[from..];
+        let to = body.find("\n    }\n").expect("the method to end");
+        &body[..to]
+    }
+
+    #[test]
+    fn what_cannot_be_repeated_safely_is_made_once() {
+        // An interruption is not proof that nothing reached the server: it can
+        // land on the read of the answer to a POST the server has already
+        // carried out. Making that one again writes a second message, or
+        // leaves a second attachment, so the two verbs that create something
+        // do not go through `retrying`. The exclusion is the absence of a
+        // call, which is why this is asserted over the source.
+        for creating in ["pub fn send_message", "pub fn upload_attachment"] {
+            assert!(
+                !body_of(creating).contains("retrying("),
+                "{creating} must not be made again: a second one is a second thing"
+            );
+        }
+
+        // And the rule says nothing unless the helper is used where repeating
+        // a request only asks the same question twice.
+        for repeatable in ["pub fn messages", "pub fn join", "pub fn set_read_cursor"] {
+            assert!(
+                body_of(repeatable).contains("retrying("),
+                "{repeatable} is safe to make again and should be"
+            );
+        }
     }
 
     #[test]
