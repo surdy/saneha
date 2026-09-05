@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use rand::RngExt;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::api::{
@@ -91,9 +90,10 @@ const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 ///
 /// Migration 1 creates the channels table alone; it is deployed, so it is
 /// frozen. Migration 2 adds participants and the transcript, migration 3 the
-/// attachments, and migration 4 makes a participant's working directory
-/// nullable. The forward-looking columns in migration 1 are the ones the
-/// channels table itself needs: `closed_at` for `saneha close`, and
+/// attachments, migration 4 makes a participant's working directory nullable,
+/// and migration 5 gives a message the key its sender wrote it under. The
+/// forward-looking columns in migration 1 are the ones the channels table
+/// itself needs: `closed_at` for `saneha close`, and
 /// `last_message_id` as the per-channel allocator that makes message ids
 /// monotonic within a transcript. `AUTOINCREMENT` keeps a deleted channel's id
 /// from being handed to a later channel, so anything keyed by channel id stays
@@ -255,6 +255,28 @@ ALTER TABLE participants DROP COLUMN cwd;
 ALTER TABLE participants RENAME COLUMN cwd_optional TO cwd;
 UPDATE participants SET cwd = NULL WHERE cwd = 'viewer';
 "#,
+    // The key the sender wrote a message under, which is what makes a send
+    // safe to make again (issue #38). A sender cannot tell an answer that was
+    // lost on the way back from a message that was never written, so it says
+    // up front which message this is; the unique index is what holds the
+    // server to one message per key, whatever arrives twice.
+    //
+    // Nullable, and unique only where it is not null, because a send without a
+    // key is still a send: every message written before this has none, and an
+    // older client sends none. SQLite treats NULLs in a unique index as
+    // distinct, so the partial index says the same thing more plainly than
+    // relying on that.
+    //
+    // The index is on (channel_id, client_key) rather than on the key alone: a
+    // key belongs to the channel it was sent to, so the same key sent to
+    // another channel is another message. It is also what the look-up before
+    // an insert reads, so one index answers both.
+    r#"
+ALTER TABLE messages ADD COLUMN client_key TEXT;
+
+CREATE UNIQUE INDEX messages_client_key ON messages (channel_id, client_key)
+    WHERE client_key IS NOT NULL;
+"#,
 ];
 
 /// How long an attachment nobody bound to a message is kept before the sweep
@@ -322,6 +344,11 @@ pub enum StoreError {
 
     #[error("a message needs a body")]
     EmptyBody,
+
+    /// A key is looked up and then indexed, so it is held to the shape it is
+    /// minted in rather than stored as whatever arrived.
+    #[error("{}", crate::api::invalid_key(key))]
+    InvalidKey { key: String },
 
     #[error("{}", crate::api::body_too_large(*size))]
     BodyTooLarge { size: usize },
@@ -866,6 +893,16 @@ impl Store {
     /// discipline as a mention that names nobody, and for the same reason —
     /// a message that quietly carried less than it was asked to would be worse
     /// than no message at all.
+    ///
+    /// `key` is what the sender wrote this message under, and it is what makes
+    /// a send safe to make again (issue #38): a second send carrying a key
+    /// this channel has already seen writes nothing and answers with the
+    /// message the first one wrote, so a request repeated because its answer
+    /// was lost leaves one message rather than two. The key is looked up
+    /// before the channel is held to being open, because a repeat is answering
+    /// for a message that is already in the transcript, and a close that
+    /// landed in between must not turn it into a failure. `None` is a send
+    /// written unconditionally, which is what an older client sends.
     pub fn send(
         &self,
         channel: &str,
@@ -873,12 +910,30 @@ impl Store {
         body: &str,
         to: &[String],
         attachments: &[String],
-    ) -> Result<Message, StoreError> {
+        key: Option<&str>,
+    ) -> Result<Sent, StoreError> {
         validate_body(body)?;
+        if let Some(key) = key.filter(|key| !crate::api::is_id(key)) {
+            return Err(StoreError::InvalidKey { key: echo(key) });
+        }
 
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let channel_id = open_channel_id(&tx, channel, "nothing more can be sent to it")?;
+        let (channel_id, state) = channel_and_state(&tx, channel)?;
+        if let Some(key) = key {
+            if let Some(message) = message_with_key(&tx, channel, channel_id, key)? {
+                return Ok(Sent {
+                    message,
+                    created: false,
+                });
+            }
+        }
+        if state == ChannelState::Closed {
+            return Err(StoreError::ChannelClosed {
+                channel: channel.to_string(),
+                refusal: "nothing more can be sent to it",
+            });
+        }
         let from_id =
             participant_id(&tx, channel_id, from)?.ok_or_else(|| StoreError::NotAParticipant {
                 channel: channel.to_string(),
@@ -901,16 +956,39 @@ impl Store {
             .map_err(|unresolved| unresolved_recipient(channel, unresolved, &roster))?;
 
         let message_id = next_message_id(&tx, channel_id)?;
-        let created_at: String = tx.query_row(
+        let written: Result<String, rusqlite::Error> = tx.query_row(
             &format!(
                 "INSERT INTO messages
-                     (channel_id, id, kind, from_participant, about_participant, body, created_at)
-                 VALUES (?1, ?2, 'message', ?3, NULL, ?4, {NOW})
+                     (channel_id, id, kind, from_participant, about_participant, body,
+                      created_at, client_key)
+                 VALUES (?1, ?2, 'message', ?3, NULL, ?4, {NOW}, ?5)
                  RETURNING created_at"
             ),
-            rusqlite::params![channel_id, message_id, from_id, body],
+            rusqlite::params![channel_id, message_id, from_id, body, key],
             |row| row.get(0),
-        )?;
+        );
+        let created_at: String = match (written, key) {
+            (Ok(created_at), _) => created_at,
+            // The key was not there when this transaction looked and is there
+            // now, which is another send carrying it that committed in
+            // between. One message per key: this one rolls back — taking the
+            // id it allocated with it — and answers with the message that send
+            // wrote, which is what the look-up above would have found.
+            (Err(err), Some(key)) if is_unique_violation(&err) => {
+                drop(tx);
+                return match message_with_key(&conn, channel, channel_id, key)? {
+                    Some(message) => Ok(Sent {
+                        message,
+                        created: false,
+                    }),
+                    // Nothing holds that key, so the collision was not the one
+                    // this is here for; it is reported as the database error it
+                    // is.
+                    None => Err(err.into()),
+                };
+            }
+            (Err(err), _) => return Err(err.into()),
+        };
         for recipient in &recipients {
             tx.execute(
                 "INSERT INTO recipients (channel_id, message_id, participant_id)
@@ -951,20 +1029,23 @@ impl Store {
 
         // Everything the message is made of was in hand before it was written,
         // so it is described from that rather than read back.
-        Ok(Message {
-            id: message_id,
-            channel: channel.to_string(),
-            kind: MessageKind::Message,
-            from: Some(from.to_string()),
-            about: None,
-            recipients: recipients
-                .iter()
-                .filter_map(|id| roster.iter().find(|candidate| candidate.id == *id))
-                .map(|candidate| candidate.identity.clone())
-                .collect(),
-            body: body.to_string(),
-            attachments: bound,
-            created_at,
+        Ok(Sent {
+            message: Message {
+                id: message_id,
+                channel: channel.to_string(),
+                kind: MessageKind::Message,
+                from: Some(from.to_string()),
+                about: None,
+                recipients: recipients
+                    .iter()
+                    .filter_map(|id| roster.iter().find(|candidate| candidate.id == *id))
+                    .map(|candidate| candidate.identity.clone())
+                    .collect(),
+                body: body.to_string(),
+                attachments: bound,
+                created_at,
+            },
+            created: true,
         })
     }
 
@@ -1377,6 +1458,20 @@ impl std::fmt::Display for Swept {
     }
 }
 
+/// A send that landed: the message the transcript now holds, and whether this
+/// call is the one that wrote it.
+///
+/// A send carrying a key that has already been used in this channel wrote
+/// nothing: it answers with the message that key wrote the first time, and
+/// `created` is false. The server turns that into `200` rather than `201`, so
+/// a caller that cares can tell the two apart; a caller that does not gets the
+/// same message either way, which is the whole point.
+#[derive(Debug)]
+pub struct Sent {
+    pub message: Message,
+    pub created: bool,
+}
+
 /// Removes one file, and says nothing about one that is already gone.
 fn remove_file(path: &Path) -> Result<(), StoreError> {
     match std::fs::remove_file(path) {
@@ -1550,6 +1645,34 @@ fn read_messages(
         .collect()
 }
 
+/// The message a key has already written in this channel, if it wrote one.
+///
+/// It is read back the way a transcript read reads it, so a send that is made
+/// again is answered with the message exactly as the first one was — the same
+/// id, the same recipients, the same attachments — rather than with something
+/// assembled a second way that could differ in a detail.
+fn message_with_key(
+    conn: &Connection,
+    channel: &str,
+    channel_id: i64,
+    key: &str,
+) -> Result<Option<Message>, StoreError> {
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM messages WHERE channel_id = ?1 AND client_key = ?2",
+            rusqlite::params![channel_id, key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    // Everything after the one before it, one message: that message.
+    Ok(read_messages(conn, channel, channel_id, id - 1, 1)?
+        .into_iter()
+        .next())
+}
+
 /// The columns of an attachment, in the order `read_attachment_row` reads.
 const ATTACHMENT_COLUMNS: &str = "id, filename, size, content_type, created_at";
 
@@ -1649,25 +1772,16 @@ fn bind_attachment(
 }
 
 /// A fresh attachment id: 128 random bits as 32 lowercase hex characters.
+/// The same minting as the key a sender puts on a message, in one place.
 fn mint_attachment_id() -> String {
-    let bytes: [u8; 16] = rand::rng().random();
-    let mut id = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write;
-        // Writing to a String cannot fail.
-        let _ = write!(id, "{byte:02x}");
-    }
-    id
+    crate::api::mint_id()
 }
 
 /// Whether this is the shape [`mint_attachment_id`] makes. An id becomes a
 /// path segment, so anything else is refused before it is looked up rather
 /// than after.
 fn is_attachment_id(id: &str) -> bool {
-    id.len() == 32
-        && id
-            .chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+    crate::api::is_id(id)
 }
 
 /// Who each message in a range is addressed to, in one query rather than one
@@ -2292,6 +2406,68 @@ mod tests {
             .record_attachment(&attachment, "notes.md", 8, "text/markdown")
             .expect("record");
         assert_eq!(recorded.filename, "notes.md");
+    }
+
+    #[test]
+    fn a_database_from_before_the_send_key_is_brought_forward() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("saneha.db");
+
+        // A file as the saneha before migration 5 left it, with a transcript
+        // in it: every message that was written before a send carried a key
+        // has none, and the unique index has to allow all of them.
+        let conn = Connection::open(&path).expect("open directly");
+        for migration in &MIGRATIONS[..4] {
+            conn.execute_batch(migration).expect("apply a migration");
+        }
+        conn.execute_batch(
+            "PRAGMA user_version = 4;
+             INSERT INTO channels (id, name, created_at, last_message_id)
+                 VALUES (1, 'quiet-heron', '2026-09-04T09:00:00Z', 2);
+             INSERT INTO participants
+                 (id, channel_id, identity, name, host, harness, cwd, joined_at)
+                 VALUES (1, 1, 'alpha@macbookpro', 'alpha', 'macbookpro', 'claude',
+                         '/repos/saneha', '2026-09-04T09:00:00Z');
+             INSERT INTO messages (channel_id, id, kind, from_participant, body, created_at)
+                 VALUES (1, 1, 'message', 1, 'hello', '2026-09-04T09:00:01Z'),
+                        (1, 2, 'message', 1, 'hello', '2026-09-04T09:00:02Z');",
+        )
+        .expect("fill the older database");
+        drop(conn);
+
+        let store = Store::open(&path).expect("open the older database");
+
+        // The messages are still there, and they carry no key: two rows that
+        // say the same thing, which is exactly what a unique index over a
+        // column of NULLs must not object to.
+        // The connection is taken and given back inside the block, so the
+        // send below can have it.
+        let keys: Vec<Option<String>> = {
+            let conn = store.conn();
+            let mut statement = conn
+                .prepare("SELECT client_key FROM messages ORDER BY id")
+                .expect("prepare");
+            statement
+                .query_map([], |row| row.get::<_, Option<String>>(0))
+                .expect("read the keys")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("the keys")
+        };
+        assert_eq!(keys, vec![None, None], "an older message grew a key");
+
+        // And a send into that transcript now carries one.
+        let sent = store
+            .send(
+                "quiet-heron",
+                "alpha@macbookpro",
+                "carrying a key",
+                &[],
+                &[],
+                Some(&crate::api::mint_id()),
+            )
+            .expect("send");
+        assert!(sent.created);
+        assert_eq!(sent.message.id, 3);
     }
 
     #[test]

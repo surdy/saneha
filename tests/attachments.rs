@@ -66,6 +66,7 @@ fn send_with(
             body: body.to_string(),
             to: Vec::new(),
             attachments: attachments.to_vec(),
+            key: None,
         },
     )
 }

@@ -304,6 +304,7 @@ fn a_hold_ends_when_a_message_lands() {
                     body: "the build is green".to_string(),
                     to: Vec::new(),
                     attachments: Vec::new(),
+                    key: None,
                 },
             )
             .expect("send");
