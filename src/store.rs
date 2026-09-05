@@ -16,8 +16,8 @@ use rand::RngExt;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::api::{
-    Attachment, Channel, ChannelState, JoinRequest, Joined, Message, MessageKind, Participant,
-    MAX_BODY, MAX_MESSAGE_LIMIT,
+    Attachment, Channel, ChannelCounts, ChannelDetail, ChannelState, Closed, Deleted, JoinRequest,
+    Joined, Left, Message, MessageKind, Participant, MAX_BODY, MAX_MESSAGE_LIMIT,
 };
 use crate::mention::{self, Candidate, Unresolved};
 use crate::slug;
@@ -278,6 +278,11 @@ pub enum StoreError {
     #[error("nobody named {identity:?} has joined the channel {channel:?}")]
     NoSuchParticipant { channel: String, identity: String },
 
+    /// A close carries the identity closing it, and that identity goes into
+    /// the transcript, so it has to be one.
+    #[error("an identity is name@host, and {0:?} is not one")]
+    InvalidIdentity(String),
+
     /// The caller is acting as somebody who is not in the channel. Every verb
     /// that acts as a participant says this in the same words, so an agent
     /// reading it always sees the same next step.
@@ -502,6 +507,7 @@ impl Store {
                 purpose: purpose.map(str::to_string),
                 state: ChannelState::Open,
                 created_at,
+                closed_at: None,
             }),
             Err(err) if is_unique_violation(&err) => {
                 Err(StoreError::ChannelExists(name.to_string()))
@@ -514,7 +520,7 @@ impl Store {
     pub fn list_channels(&self) -> Result<Vec<Channel>, StoreError> {
         let conn = self.conn();
         let mut statement = conn.prepare(
-            "SELECT name, purpose, state, created_at FROM channels ORDER BY created_at, id",
+            "SELECT name, purpose, state, created_at, closed_at FROM channels ORDER BY created_at, id",
         )?;
         let rows = statement.query_map([], read_row)?;
         rows.collect::<Result<Vec<_>, _>>()?
@@ -528,7 +534,7 @@ impl Store {
         let conn = self.conn();
         let row = conn
             .query_row(
-                "SELECT name, purpose, state, created_at FROM channels WHERE name = ?1",
+                "SELECT name, purpose, state, created_at, closed_at FROM channels WHERE name = ?1",
                 [name],
                 read_row,
             )
@@ -614,7 +620,7 @@ impl Store {
             &tx,
             channel_id,
             "join",
-            participant_id,
+            Some(participant_id),
             &format!("{identity} joined"),
         )?;
         let participant = read_participant(&tx, participant_id)?;
@@ -661,6 +667,152 @@ impl Store {
                 read_participant_row,
             )
             .optional()?)
+    }
+
+    /// Marks a participant away and writes the leave system message.
+    ///
+    /// A leave is a declaration, not a departure: the participant stays in the
+    /// channel, stays in the transcript, can still be mentioned, and goes on
+    /// accumulating unread messages. A later join resumes it and clears both
+    /// `away` and `left_at` (see [`resume_participant`]).
+    ///
+    /// Asking twice is not an error. The second call finds `away` already set,
+    /// writes nothing, and says so with `left: false` — a verb that failed the
+    /// second time would make "leave, then leave again after a crash" into
+    /// something a skill has to reason about.
+    ///
+    /// A closed channel is the other way of changing nothing. A leave is a
+    /// message, and a closed channel accepts no more messages; leaving one is
+    /// therefore accepted and does nothing, rather than refused, because there
+    /// is nothing left to leave.
+    pub fn leave(&self, channel: &str, identity: &str) -> Result<Left, StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let (channel_id, state) = channel_and_state(&tx, channel)?;
+        let participant_id = participant_id(&tx, channel_id, identity)?.ok_or_else(|| {
+            StoreError::NotAParticipant {
+                channel: channel.to_string(),
+                identity: identity.to_string(),
+            }
+        })?;
+
+        let away: bool = tx.query_row(
+            "SELECT away FROM participants WHERE id = ?1",
+            [participant_id],
+            |row| row.get(0),
+        )?;
+        let left = state == ChannelState::Open && !away;
+        if left {
+            tx.execute(
+                &format!("UPDATE participants SET away = 1, left_at = {NOW} WHERE id = ?1"),
+                [participant_id],
+            )?;
+            write_system_message(
+                &tx,
+                channel_id,
+                "leave",
+                Some(participant_id),
+                &format!("{identity} left"),
+            )?;
+        }
+        let participant = read_participant(&tx, participant_id)?;
+        tx.commit()?;
+
+        Ok(Left {
+            channel: channel.to_string(),
+            identity: identity.to_string(),
+            left,
+            channel_state: state,
+            participant,
+        })
+    }
+
+    /// Closes a channel and writes the close system message.
+    ///
+    /// `by` is an identity and not a participant. The scope says any
+    /// participant or a person may close, and a person closing from the viewer
+    /// is `surdy@web`, who has joined nothing; so who closed it is recorded in
+    /// the body of the message rather than in `about_participant`, which the
+    /// schema holds NULL for a `close` because a close is about the channel.
+    ///
+    /// Closing a closed channel changes nothing and is not an error, for the
+    /// same reason leaving twice is not.
+    pub fn close(&self, channel: &str, by: &str) -> Result<Closed, StoreError> {
+        validate_identity(by)?;
+
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let (channel_id, state) = channel_and_state(&tx, channel)?;
+        let closed = state == ChannelState::Open;
+        if closed {
+            tx.execute(
+                &format!("UPDATE channels SET state = 'closed', closed_at = {NOW} WHERE id = ?1"),
+                [channel_id],
+            )?;
+            write_system_message(
+                &tx,
+                channel_id,
+                "close",
+                None,
+                &format!("{by} closed the channel"),
+            )?;
+        }
+        let row = tx.query_row(
+            "SELECT name, purpose, state, created_at, closed_at FROM channels WHERE id = ?1",
+            [channel_id],
+            read_row,
+        )?;
+        tx.commit()?;
+
+        Ok(Closed {
+            channel: build_channel(row)?,
+            closed,
+        })
+    }
+
+    /// One channel and what it holds. This is what a delete asks before it is
+    /// confirmed, so that what is about to go is said in numbers.
+    pub fn channel_detail(&self, channel: &str) -> Result<ChannelDetail, StoreError> {
+        let conn = self.conn();
+        let channel_id = channel_id(&conn, channel)?;
+        let row = conn.query_row(
+            "SELECT name, purpose, state, created_at, closed_at FROM channels WHERE id = ?1",
+            [channel_id],
+            read_row,
+        )?;
+        Ok(ChannelDetail {
+            channel: build_channel(row)?,
+            counts: channel_counts(&conn, channel_id)?,
+        })
+    }
+
+    /// Deletes a channel row, and with it — by the cascade the schema
+    /// declares — its participants, its transcript, its recipients and its
+    /// attachment rows. Answers with the channel's row id and what went, so
+    /// the caller can remove the files that row id names.
+    ///
+    /// The row goes first and the files after it, which is the order the
+    /// attachments work settled on: a channel whose files were removed and
+    /// whose row survived would be a live transcript naming attachments
+    /// nothing can fetch, while a row removed and files left behind is a
+    /// directory nobody can reach, which the hourly sweep takes within the
+    /// hour. Open or closed makes no difference here: delete is for when you
+    /// want one gone.
+    pub fn remove_channel(&self, channel: &str) -> Result<(i64, Deleted), StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let channel_id = channel_id(&tx, channel)?;
+        let counts = channel_counts(&tx, channel_id)?;
+        tx.execute("DELETE FROM channels WHERE id = ?1", [channel_id])?;
+        tx.commit()?;
+
+        Ok((
+            channel_id,
+            Deleted {
+                channel: channel.to_string(),
+                counts,
+            },
+        ))
     }
 
     /// Writes one message from a participant, with everyone it is addressed
@@ -1730,13 +1882,42 @@ fn next_message_id(conn: &Connection, channel_id: i64) -> Result<i64, StoreError
     )?)
 }
 
+/// What a channel holds, counted rather than listed: the numbers a delete is
+/// confirmed against.
+///
+/// One statement rather than four, because these numbers are read together and
+/// are only ever shown together. The unbound uploads are counted too: they are
+/// files this channel is holding, and a delete takes them with the rest.
+fn channel_counts(conn: &Connection, channel_id: i64) -> Result<ChannelCounts, StoreError> {
+    let (participants, messages, attachments, bytes): (i64, i64, i64, i64) = conn.query_row(
+        "SELECT
+             (SELECT COUNT(*) FROM participants WHERE channel_id = ?1),
+             (SELECT COUNT(*) FROM messages WHERE channel_id = ?1),
+             (SELECT COUNT(*) FROM attachments WHERE channel_id = ?1),
+             (SELECT COALESCE(SUM(size), 0) FROM attachments WHERE channel_id = ?1)",
+        [channel_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+
+    Ok(ChannelCounts {
+        participants: participants.max(0) as usize,
+        messages: messages.max(0) as usize,
+        attachments: attachments.max(0) as usize,
+        attachment_bytes: bytes.max(0) as u64,
+    })
+}
+
 /// Writes one system message: the server's own entry in the transcript, about
 /// a participant rather than by one.
+///
+/// `about_participant` is `None` for a `close`, which is about the channel and
+/// not about anybody; the schema's CHECK holds that difference, so this passes
+/// it through rather than deciding it.
 fn write_system_message(
     conn: &Connection,
     channel_id: i64,
     kind: &str,
-    about_participant: i64,
+    about_participant: Option<i64>,
     body: &str,
 ) -> Result<i64, StoreError> {
     let message_id = next_message_id(conn, channel_id)?;
@@ -1773,6 +1954,18 @@ pub fn validate_host(host: &str) -> Result<(), StoreError> {
 
 pub fn validate_harness(harness: &str) -> Result<(), StoreError> {
     validate_slug(harness, &HARNESS)
+}
+
+/// A whole identity, `name@host`, both halves held to the shape they have
+/// everywhere else. A close records who closed it in the transcript, and what
+/// goes into a transcript is checked before it gets there.
+pub fn validate_identity(identity: &str) -> Result<(), StoreError> {
+    let (name, host) = identity
+        .split_once('@')
+        .ok_or_else(|| StoreError::InvalidIdentity(echo(identity)))?;
+    validate_participant_name(name)?;
+    validate_host(host)?;
+    Ok(())
 }
 
 /// A name of the given kind: lowercase letters, digits and hyphens; no hyphen
@@ -1858,14 +2051,20 @@ fn echo(value: &str) -> String {
     format!("{head}...")
 }
 
-type ChannelRow = (String, Option<String>, String, String);
+type ChannelRow = (String, Option<String>, String, String, Option<String>);
 
 fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelRow> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
 }
 
 fn build_channel(row: ChannelRow) -> Result<Channel, StoreError> {
-    let (name, purpose, state, created_at) = row;
+    let (name, purpose, state, created_at, closed_at) = row;
     Ok(Channel {
         name,
         purpose,
@@ -1873,6 +2072,7 @@ fn build_channel(row: ChannelRow) -> Result<Channel, StoreError> {
             .parse()
             .map_err(|_| StoreError::UnknownChannelState(state.clone()))?,
         created_at,
+        closed_at,
     })
 }
 
@@ -2089,6 +2289,125 @@ mod tests {
     }
 
     #[test]
+    fn remove_channel_takes_the_whole_channel_and_says_what_went() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("saneha.db")).expect("open");
+        store
+            .create_channel(Some("quiet-heron"), None)
+            .expect("create");
+        store
+            .create_channel(Some("brisk-otter"), None)
+            .expect("the one left alone");
+
+        let pending = store.new_attachment("quiet-heron").expect("mint an id");
+        std::fs::write(&pending.path, b"bytes\n").expect("write the file");
+        store
+            .record_attachment(&pending, "notes.md", 6, "text/markdown")
+            .expect("record");
+
+        let (channel_id, removed) = store.remove_channel("quiet-heron").expect("remove");
+        assert_eq!(removed.channel, "quiet-heron");
+        assert_eq!(removed.counts.attachments, 1);
+        assert_eq!(removed.counts.attachment_bytes, 6);
+
+        // The rows go with the row that owned them; the files are the caller's
+        // next step, and until it takes it they are still there.
+        let left: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM attachments", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(left, 0);
+        assert!(pending.path.exists(), "the file went without being asked");
+
+        store
+            .remove_channel_files(channel_id)
+            .expect("remove the files");
+        assert!(!pending.path.exists(), "the file stayed after being asked");
+
+        // One channel, and no more than one.
+        assert!(store.channel("brisk-otter").expect("lookup").is_some());
+        assert!(matches!(
+            store.remove_channel("quiet-heron"),
+            Err(StoreError::NoSuchChannel(_))
+        ));
+    }
+
+    #[test]
+    fn a_close_names_who_closed_it_in_the_body_and_nobody_in_the_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("saneha.db")).expect("open");
+        store
+            .create_channel(Some("quiet-heron"), None)
+            .expect("create");
+
+        let closed = store.close("quiet-heron", "surdy@web").expect("close");
+        assert!(closed.closed);
+        assert_eq!(closed.channel.state, ChannelState::Closed);
+
+        // The schema's CHECK holds a close to naming neither participant
+        // column, so the identity that closed it lives in the body. A row that
+        // said otherwise would not have been written at all.
+        let (kind, from, about, body): (String, Option<i64>, Option<i64>, String) = store
+            .conn()
+            .query_row(
+                "SELECT kind, from_participant, about_participant, body FROM messages",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("the close message");
+        assert_eq!(kind, "close");
+        assert_eq!(from, None);
+        assert_eq!(about, None);
+        assert_eq!(body, "surdy@web closed the channel");
+
+        // Closing it again writes nothing and is not an error.
+        let again = store
+            .close("quiet-heron", "surdy@web")
+            .expect("close again");
+        assert!(!again.closed);
+        let messages: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(messages, 1);
+
+        // And the closed_at it recorded is the one thing a second close must
+        // not move.
+        let closed_at: Option<String> = store
+            .conn()
+            .query_row("SELECT closed_at FROM channels", [], |row| row.get(0))
+            .expect("the closed channel");
+        assert!(closed_at.is_some(), "a close recorded no time it happened");
+    }
+
+    #[test]
+    fn a_close_by_something_that_is_not_an_identity_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("saneha.db")).expect("open");
+        store
+            .create_channel(Some("quiet-heron"), None)
+            .expect("create");
+
+        for by in ["", "surdy", "@web", "surdy@", "Surdy@web", "surdy@web@x"] {
+            assert!(
+                matches!(
+                    store.close("quiet-heron", by),
+                    Err(StoreError::InvalidIdentity(_) | StoreError::InvalidSlug { .. })
+                ),
+                "{by:?} was taken for an identity"
+            );
+        }
+        assert_eq!(
+            store
+                .channel("quiet-heron")
+                .expect("lookup")
+                .expect("it is there")
+                .state,
+            ChannelState::Open
+        );
+    }
+
+    #[test]
     fn an_attachment_id_is_128_random_bits_of_hex() {
         let first = mint_attachment_id();
         assert_eq!(first.len(), 32);
@@ -2140,6 +2459,7 @@ mod tests {
             None,
             "paused".to_string(),
             "2026-09-04T09:00:00Z".to_string(),
+            None,
         );
         let err = build_channel(row).expect_err("unknown state");
         assert!(
@@ -2152,6 +2472,7 @@ mod tests {
             None,
             "closed".to_string(),
             "2026-09-04T09:00:00Z".to_string(),
+            Some("2026-09-04T10:00:00Z".to_string()),
         );
         assert_eq!(
             build_channel(known).expect("closed is understood").state,

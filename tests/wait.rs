@@ -96,18 +96,12 @@ fn read_cursor(remote: &Remote, channel: &str, identity: &str) -> i64 {
         .read_cursor
 }
 
-/// Closes a channel by hand.
-///
-/// There is no `saneha close` yet (it is its own ticket), and this is the
-/// state that verb will leave behind: `wait` is written against the state
-/// rather than against the verb, so it can be tested before the verb exists.
-fn close(server: &TestServer, channel: &str) {
-    server
-        .database()
-        .execute(
-            "UPDATE channels SET state = 'closed' WHERE name = ?1",
-            [channel],
-        )
+/// Closes a channel, as a person would from the viewer. The close is what
+/// wakes the waiters, so these tests use the verb rather than the state it
+/// leaves behind.
+fn close(remote: &Remote, channel: &str) {
+    remote
+        .close_channel(channel, "surdy@web")
         .expect("close the channel");
 }
 
@@ -237,8 +231,10 @@ fn a_send_wakes_a_waiting_participant() {
     catch_up(&remote, "brisk-otter", &bob);
 
     let mut waiter = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
-    // Far enough in that the wait is holding rather than still starting.
-    std::thread::sleep(SETTLE);
+    // Holding, rather than still starting: a waiter whose first request has
+    // not gone out yet would be answered by that first look, and the wake this
+    // test is about would never be exercised.
+    server.wait_until_holding(1);
     assert!(
         waiter.still_waiting(),
         "the wait ended before anything came"
@@ -277,7 +273,7 @@ fn mentions_sleeps_through_what_is_addressed_to_somebody_else() {
         &server,
         &["wait", "brisk-otter", "--as", "bob", "--mentions"],
     );
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
 
     send(&remote, "brisk-otter", &alice, "@carol only for you");
     std::thread::sleep(SETTLE);
@@ -381,7 +377,7 @@ fn mentions_wakes_on_a_broadcast() {
         &server,
         &["wait", "brisk-otter", "--as", "bob", "--mentions"],
     );
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
     assert!(
         waiter.still_waiting(),
         "the wait ended before anything came"
@@ -432,7 +428,7 @@ fn waiting_never_moves_the_read_cursor() {
     let before = read_cursor(&remote, "brisk-otter", &bob);
 
     let waiter = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
     let message = send(&remote, "brisk-otter", &alice, "still unread after this");
     waiter.finish().exited(0);
 
@@ -498,13 +494,20 @@ fn a_closed_channel_ends_the_wait_with_four() {
     let bob = join(&remote, "brisk-otter", "bob");
     let last = send(&remote, "brisk-otter", &alice, "one last thing");
     catch_up(&remote, "brisk-otter", &bob);
-    close(&server, "brisk-otter");
+    close(&remote, "brisk-otter");
 
+    // Bob was caught up before the close, so the only thing left for him is
+    // the close itself, which is a system message like any other.
     let ended = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]).finish();
     ended.exited(4);
     assert!(
-        ended.printed.is_empty(),
-        "a wait on a closed channel with nothing unread printed {:?}",
+        ended.printed.contains("closed the channel"),
+        "a wait on a closed channel did not print the close: {:?}",
+        ended.printed
+    );
+    assert!(
+        !ended.printed.contains("one last thing"),
+        "a wait printed what this participant had already read: {:?}",
         ended.printed
     );
 
@@ -528,27 +531,22 @@ fn closing_a_channel_ends_a_wait_already_in_progress() {
     let bob = join(&remote, "brisk-otter", "bob");
     catch_up(&remote, "brisk-otter", &bob);
 
-    // A short hold, because there is no `saneha close` yet to wake the waiters
-    // with: the state changes underneath and the next re-issue sees it. When
-    // `close` lands it calls the notifier and this becomes immediate.
-    let mut waiter = Waiter::start(
-        &server,
-        &[
-            "wait",
-            "brisk-otter",
-            "--as",
-            "bob",
-            "--timeout",
-            "20",
-            "--hold",
-            "1",
-        ],
-    );
-    std::thread::sleep(SETTLE);
+    let mut waiter = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
+    server.wait_until_holding(1);
     assert!(waiter.still_waiting(), "the wait ended before the close");
 
-    close(&server, "brisk-otter");
-    waiter.finish().exited(4);
+    // The close wakes it: no re-issue, no waiting out the hold.
+    let closed = Instant::now();
+    close(&remote, "brisk-otter");
+    let ended = waiter.finish();
+    ended.exited(4);
+    // The hold is a minute, so a few seconds — which covers starting the
+    // process that closes it — is the notifier and not the hold running out.
+    assert!(
+        closed.elapsed() < Duration::from_secs(3),
+        "the wait took {:?} to notice a close",
+        closed.elapsed()
+    );
 }
 
 #[test]
@@ -577,4 +575,46 @@ fn waiting_on_a_channel_this_identity_has_not_joined_is_an_error() {
         "the error did not say how to join: {:?}",
         ended.said
     );
+}
+
+#[test]
+fn health_counts_the_waits_being_held() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+    let bob = join(&remote, "brisk-otter", "bob");
+    // The wake comes from somebody neither of them is: nobody is woken by
+    // their own message, so a sender who is also a waiter would wait for ever.
+    let carol = join(&remote, "brisk-otter", "carol");
+    catch_up(&remote, "brisk-otter", &alice);
+    catch_up(&remote, "brisk-otter", &bob);
+
+    // A server holding nothing says so, and a wait that never got as far as
+    // holding — this channel does not exist — is not counted either.
+    assert_eq!(server.held_waits(), 0);
+    Waiter::start(&server, &["wait", "keen-heron", "--as", "bob"])
+        .finish()
+        .exited(1);
+    assert_eq!(server.held_waits(), 0);
+
+    let first = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
+    server.wait_until_holding(1);
+    let second = Waiter::start(&server, &["wait", "brisk-otter", "--as", "alice"]);
+    server.wait_until_holding(2);
+
+    // And each one stops being counted when it ends, which is what makes the
+    // number something to wait on rather than a total of everything that has
+    // ever waited.
+    send(&remote, "brisk-otter", &carol, "for both of you");
+    first.finish().exited(0);
+    second.finish().exited(0);
+    let settled = Instant::now();
+    while server.held_waits() > 0 {
+        assert!(
+            settled.elapsed() < PATIENCE,
+            "the server was still counting a wait that had ended"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

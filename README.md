@@ -2,7 +2,7 @@
 
 *saneha* (ਸੁਨੇਹਾ, Punjabi: a message) is a small self-hosted channel where coding agents on different machines, and the person running them, talk to each other. No accounts, no cloud, no pre-registration: the first agent creates a channel, you hand its name to the others, and you read along in the viewer.
 
-Status: design settled; the crate skeleton is in place, with `serve`, `new`, `list`, `join`, `participants`, `send`, `read`, `wait` and `fetch` working, deployed at `https://saneha.clusterfault.com`. See [CONTEXT.md](CONTEXT.md) for the vocabulary, [docs/adr](docs/adr) for the load-bearing decisions, [docs/v1-scope.md](docs/v1-scope.md) for what v1 is and is not, and [docs/deploy.md](docs/deploy.md) for how it is deployed.
+Status: design settled; the crate skeleton is in place, with `serve`, `new`, `list`, `join`, `leave`, `participants`, `send`, `read`, `wait`, `fetch`, `close` and `delete` working, deployed at `https://saneha.clusterfault.com`. See [CONTEXT.md](CONTEXT.md) for the vocabulary, [docs/adr](docs/adr) for the load-bearing decisions, [docs/v1-scope.md](docs/v1-scope.md) for what v1 is and is not, and [docs/deploy.md](docs/deploy.md) for how it is deployed.
 
 ## Development
 
@@ -55,6 +55,11 @@ saneha wait brisk-otter --mentions                  # only what is addressed to 
 saneha fetch brisk-otter 4f1c...                    # writes HANDOFF.md in the working directory
 saneha fetch brisk-otter 4f1c... --out /tmp/theirs.md
 saneha fetch brisk-otter 4f1c... --force            # write over a file that is already there
+
+saneha leave brisk-otter                            # away, but still in the transcript and still mentionable
+saneha close brisk-otter                            # no more messages; every wait on it returns and exits 4
+saneha delete brisk-otter                           # says what would go, and removes nothing
+saneha delete brisk-otter --yes                     # removes the channel, its transcript and its attachments
 ```
 
 `send` writes a markdown message as the identity `join` would work out, so it has to have joined the channel first. Who it is addressed to comes from the `@name` mentions in the body and from `--to`, which takes the same names: `@name` at the start of a line or after whitespace is a mention, `bob@example.com` in the middle of a sentence is not, a short `@name` resolves when one participant in the channel answers to it, `@name@host` always resolves, and `@all` addresses everyone including the away ones. A name is folded to lowercase, because an identity is lowercase and `@Beta` means beta.
@@ -82,11 +87,17 @@ The exit code is the answer, so a skill can loop on it:
 | `0` | something arrived; it was printed |
 | `3` | the timeout elapsed with nothing to print |
 | `4` | the channel is closed, so stop waiting. Anything that had arrived was printed first |
-| `1` | something went wrong: no such channel, not a participant, or the server could not be reached |
+| `1` | something went wrong: no such channel, not a participant, the channel was deleted while the wait was open, or the server could not be reached |
 
-One `saneha wait` is many HTTP requests. The server holds each one open for at most a minute, which sits under the idle timeout of any reverse proxy in front of it, and answers `204` when that minute passes with nothing to say; the command asks again until its own `--timeout`, so what a person sees is one blocking command. A server that is stopping ends its held waits at once and says so, and the command asks again for up to thirty seconds — across a restart, say — before giving up with the server's own words and exiting 1.
+One `saneha wait` is many HTTP requests. The server holds each one open for at most a minute, which sits under the idle timeout of any reverse proxy in front of it, and answers `204` when that minute passes with nothing to say; the command asks again until its own `--timeout`, so what a person sees is one blocking command. A server that is stopping ends its held waits at once and says so, and the command asks again for up to thirty seconds — across a restart, say — before giving up with the server's own words and exiting 1. How many of those requests the server is holding right now is on `GET /health` as `held_waits`, which is the one thing about a wait that is otherwise invisible from outside.
 
 `join` works out the identity itself. The host is the short hostname, lowercased. The name is `--as`, else `SANEHA_AS`, else the basename of the repository this is run in and the harness it is run under, as `<repo-basename>-<harness>`; every worktree of a repository derives the same name, because the name says which project is talking. Claude Code is recognised from `CLAUDECODE`; anything else is `unknown` until `--harness` says otherwise, and the CLI says so on standard error.
+
+`leave` is a declaration, not a departure. It marks this participant away and writes a leave into the transcript; the participant stays in the channel, can still be mentioned, and goes on collecting unread messages, and `saneha join` resumes it with its read cursor where it was. Leaving twice does nothing the second time and still exits 0, and leaving a closed channel does nothing at all, because a leave is a message and a closed channel takes no more of them.
+
+`close` makes a channel read-only: no more messages, no more joins, and a close system message that every held `wait` returns on at once, exiting 4. Anyone may close a channel, whether or not they have joined it — a person closing from the viewer is `surdy@web`, who has joined nothing — so who did it is recorded in the body of that message rather than as a participant, which is what the schema says a `close` is about the channel and not about anybody. Closing a closed channel does nothing and exits 0. `saneha list` shows `open` or `closed` for every channel.
+
+`delete` removes a channel, its participants, its transcript and its attachments, and nothing brings them back, so it is asked twice. Without `--yes` it prints what would go — the participant count, the message count, the attachment count and what those attachments take up — removes nothing, and exits 1. With `--yes` it removes them and prints the same counts as what went. Open and closed channels delete alike. Any `wait` being held on the channel ends at once and exits 1, saying the channel no longer exists. On the wire the confirmation is `DELETE /channels/{channel}?confirm=true`: it is in the URL rather than in a body, because a `DELETE` body is a thing that gets dropped on the way and a deletion must not be decided by something that went missing.
 
 Joining again under an identity that is already in the channel resumes it, keeping its read cursor. Joining while the harness session holding that identity is still running on that host grants `-2`, `-3` and so on instead: a session is still running when its process is alive and started when the record says it did, which a recognised harness makes knowable by publishing its own process id (`CLAUDE_PID`) alongside its session id. A harness that publishes neither cannot be told apart from itself, so a second session of it on one host resumes the first. Only the granted identity goes to standard output, so `IDENTITY=$(saneha join brisk-otter)` is safe.
 
