@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -24,8 +25,8 @@ use tokio::sync::{watch, Notify};
 
 use crate::api::{
     ApiError, Attachment, Channel, ChannelDetail, ChannelList, ChannelState, CloseRequest, Closed,
-    CursorUpdate, DeleteQuery, JoinRequest, Joined, Left, Message, MessageList, MessageQuery,
-    NewChannel, NewMessage, Participant, ParticipantList, Removed, WaitQuery, Waited,
+    CursorUpdate, DeleteQuery, Deleted, JoinRequest, Joined, Left, Message, MessageList,
+    MessageQuery, NewChannel, NewMessage, Participant, ParticipantList, WaitQuery, Waited,
     DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT, MAX_BODY,
     MAX_HOLD,
 };
@@ -126,11 +127,37 @@ impl Serving {
 #[derive(Default)]
 struct Waiters {
     channels: Mutex<HashMap<String, Arc<Notify>>>,
+    /// How many wait requests are being held open right now, across every
+    /// channel. Reported by `GET /health` as `held_waits`.
+    held: AtomicUsize,
 }
 
 impl Waiters {
     fn on(&self, channel: &str) -> Arc<Notify> {
         Arc::clone(self.channels().entry(channel.to_string()).or_default())
+    }
+
+    /// Registers this request as one of the waits being held, and answers with
+    /// the notifier to sleep on and a guard that counts it.
+    ///
+    /// The count comes back down when the guard is dropped, which is every way
+    /// out of a wait — including the one that is not a return at all: a caller
+    /// that hangs up drops the whole future, and a decrement written into each
+    /// return path would miss exactly that.
+    fn hold(&self, channel: &str) -> Held<'_> {
+        let notify = self.on(channel);
+        self.held.fetch_add(1, Ordering::Relaxed);
+        Held {
+            waiters: self,
+            notify,
+        }
+    }
+
+    /// How many waits are being held open. It is a number for a person and for
+    /// a test — "is the waiter really waiting yet" is otherwise something only
+    /// a sleep can guess at — so it is read without ordering ceremony.
+    fn held(&self) -> usize {
+        self.held.load(Ordering::Relaxed)
     }
 
     /// Wakes everyone waiting on `channel`. Called after a write has
@@ -160,6 +187,19 @@ impl Waiters {
         self.channels
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// One held wait, counted for as long as it is held.
+struct Held<'a> {
+    waiters: &'a Waiters,
+    /// The notifier for the channel this wait is on.
+    notify: Arc<Notify>,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.waiters.held.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -430,8 +470,14 @@ async fn root() -> &'static str {
     "saneha is running. Point SANEHA_URL at this address.\n"
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok", "service": "saneha" }))
+/// Whether the server is up, and the one number about it that is not visible
+/// from anywhere else: how many wait requests it is holding open right now.
+async fn health(State(serving): State<Arc<Serving>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "service": "saneha",
+        "held_waits": serving.waiters.held(),
+    }))
 }
 
 async fn create_channel(
@@ -492,7 +538,7 @@ async fn delete_channel(
     State(serving): State<Arc<Serving>>,
     Path(channel): Path<String>,
     ApiQuery(query): ApiQuery<DeleteQuery>,
-) -> Result<Json<Removed>, Failure> {
+) -> Result<Json<Deleted>, Failure> {
     if !query.confirm {
         return Err(Failure::unconfirmed(&channel));
     }
@@ -849,7 +895,10 @@ async fn wait(
     if let Some(answer) = look(&serving, &channel, &identity, query.mentions)? {
         return Ok(answer);
     }
-    let notify = serving.waiters.on(&channel);
+    // Registered, and counted for as long as this request is held: `/health`
+    // reports the count, which is what makes "the wait is holding now"
+    // something a caller can see rather than something a sleep guesses at.
+    let held = serving.waiters.hold(&channel);
 
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -861,7 +910,7 @@ async fn wait(
         // `notify_waiters` after the moment it was created, not after the
         // moment it is first polled, so a message written between this look
         // and the sleep below is a wake this request already holds.
-        let woken = notify.notified();
+        let woken = held.notify.notified();
         tokio::pin!(woken);
 
         if *stopping.borrow_and_update() {

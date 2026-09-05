@@ -19,8 +19,10 @@ use support::{stdout_of, TestServer};
 /// How long a test waits for a wait that should already have ended.
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// Long enough for a wake to have happened if one was going to. A wait still
-/// waiting after this is one that decided not to be woken.
+/// Long enough for a wake to have reached a wait that is already holding. A
+/// wait still waiting after this is one that decided not to be woken, rather
+/// than one that had not started listening yet — that part is not guessed at,
+/// it is asked of the server with `wait_until_holding`.
 const SETTLE: Duration = Duration::from_millis(600);
 
 /// What "promptly" means for a waiter that was woken by a verb rather than by
@@ -103,19 +105,6 @@ fn participant(remote: &Remote, channel: &str, identity: &str) -> saneha::api::P
         .participant(channel, identity)
         .expect("look up the participant")
         .expect("the participant is there")
-}
-
-/// Pays the cost of starting a `saneha` process once, so that the next one is
-/// quick.
-///
-/// The first child a test binary spawns takes the better part of a second to
-/// reach its first request — the loader looking at an executable it has not
-/// seen before — and every one after it takes about twenty milliseconds. A
-/// test that has to know a `wait` is really holding before it closes or
-/// deletes the channel under it pays that cost here, on a command that answers
-/// at once, rather than inside [`SETTLE`].
-fn warm(server: &TestServer) {
-    server.run(&["list"]);
 }
 
 /// A subcommand running as its own process.
@@ -333,9 +322,8 @@ fn a_leave_wakes_a_waiter() {
     let bob = join(&remote, "brisk-otter", "bob");
     catch_up(&remote, "brisk-otter", &bob);
 
-    warm(&server);
     let mut waiter = Running::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
     assert!(waiter.still_waiting(), "the wait ended before the leave");
 
     let left = Instant::now();
@@ -364,12 +352,11 @@ fn a_leave_does_not_wake_a_mentions_waiter() {
     let bob = join(&remote, "brisk-otter", "bob");
     catch_up(&remote, "brisk-otter", &bob);
 
-    warm(&server);
     let mut waiter = Running::start(
         &server,
         &["wait", "brisk-otter", "--as", "bob", "--mentions"],
     );
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
 
     server.run(&["leave", "brisk-otter", "--as", "alice"]);
     std::thread::sleep(SETTLE);
@@ -532,9 +519,8 @@ fn a_close_ends_a_held_wait_with_the_closed_code() {
     let bob = join(&remote, "brisk-otter", "bob");
     catch_up(&remote, "brisk-otter", &bob);
 
-    warm(&server);
     let mut waiter = Running::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
     assert!(waiter.still_waiting(), "the wait ended before the close");
 
     let closed = Instant::now();
@@ -558,12 +544,11 @@ fn a_mentions_wait_is_woken_by_a_close() {
     let bob = join(&remote, "brisk-otter", "bob");
     catch_up(&remote, "brisk-otter", &bob);
 
-    warm(&server);
     let mut waiter = Running::start(
         &server,
         &["wait", "brisk-otter", "--as", "bob", "--mentions"],
     );
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
     assert!(waiter.still_waiting(), "the wait ended before the close");
 
     server.run(&["close", "brisk-otter", "--as", "alice"]);
@@ -723,9 +708,8 @@ fn a_delete_ends_a_held_wait() {
     let bob = join(&remote, "brisk-otter", "bob");
     catch_up(&remote, "brisk-otter", &bob);
 
-    warm(&server);
     let mut waiter = Running::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
     assert!(waiter.still_waiting(), "the wait ended before the delete");
 
     let deleted = Instant::now();

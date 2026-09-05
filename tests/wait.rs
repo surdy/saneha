@@ -231,8 +231,10 @@ fn a_send_wakes_a_waiting_participant() {
     catch_up(&remote, "brisk-otter", &bob);
 
     let mut waiter = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
-    // Far enough in that the wait is holding rather than still starting.
-    std::thread::sleep(SETTLE);
+    // Holding, rather than still starting: a waiter whose first request has
+    // not gone out yet would be answered by that first look, and the wake this
+    // test is about would never be exercised.
+    server.wait_until_holding(1);
     assert!(
         waiter.still_waiting(),
         "the wait ended before anything came"
@@ -271,7 +273,7 @@ fn mentions_sleeps_through_what_is_addressed_to_somebody_else() {
         &server,
         &["wait", "brisk-otter", "--as", "bob", "--mentions"],
     );
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
 
     send(&remote, "brisk-otter", &alice, "@carol only for you");
     std::thread::sleep(SETTLE);
@@ -375,7 +377,7 @@ fn mentions_wakes_on_a_broadcast() {
         &server,
         &["wait", "brisk-otter", "--as", "bob", "--mentions"],
     );
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
     assert!(
         waiter.still_waiting(),
         "the wait ended before anything came"
@@ -426,7 +428,7 @@ fn waiting_never_moves_the_read_cursor() {
     let before = read_cursor(&remote, "brisk-otter", &bob);
 
     let waiter = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
     let message = send(&remote, "brisk-otter", &alice, "still unread after this");
     waiter.finish().exited(0);
 
@@ -529,12 +531,8 @@ fn closing_a_channel_ends_a_wait_already_in_progress() {
     let bob = join(&remote, "brisk-otter", "bob");
     catch_up(&remote, "brisk-otter", &bob);
 
-    // The first process a test starts is slow to reach its first request, and
-    // this one has to be holding before the close lands, so that cost is paid
-    // here rather than inside SETTLE.
-    server.run(&["list"]);
     let mut waiter = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
-    std::thread::sleep(SETTLE);
+    server.wait_until_holding(1);
     assert!(waiter.still_waiting(), "the wait ended before the close");
 
     // The close wakes it: no re-issue, no waiting out the hold.
@@ -577,4 +575,46 @@ fn waiting_on_a_channel_this_identity_has_not_joined_is_an_error() {
         "the error did not say how to join: {:?}",
         ended.said
     );
+}
+
+#[test]
+fn health_counts_the_waits_being_held() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+    let bob = join(&remote, "brisk-otter", "bob");
+    // The wake comes from somebody neither of them is: nobody is woken by
+    // their own message, so a sender who is also a waiter would wait for ever.
+    let carol = join(&remote, "brisk-otter", "carol");
+    catch_up(&remote, "brisk-otter", &alice);
+    catch_up(&remote, "brisk-otter", &bob);
+
+    // A server holding nothing says so, and a wait that never got as far as
+    // holding — this channel does not exist — is not counted either.
+    assert_eq!(server.held_waits(), 0);
+    Waiter::start(&server, &["wait", "keen-heron", "--as", "bob"])
+        .finish()
+        .exited(1);
+    assert_eq!(server.held_waits(), 0);
+
+    let first = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
+    server.wait_until_holding(1);
+    let second = Waiter::start(&server, &["wait", "brisk-otter", "--as", "alice"]);
+    server.wait_until_holding(2);
+
+    // And each one stops being counted when it ends, which is what makes the
+    // number something to wait on rather than a total of everything that has
+    // ever waited.
+    send(&remote, "brisk-otter", &carol, "for both of you");
+    first.finish().exited(0);
+    second.finish().exited(0);
+    let settled = Instant::now();
+    while server.held_waits() > 0 {
+        assert!(
+            settled.elapsed() < PATIENCE,
+            "the server was still counting a wait that had ended"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

@@ -1372,6 +1372,7 @@ mod tests {
             purpose: purpose.map(str::to_string),
             state: ChannelState::Open,
             created_at: "2026-09-04T09:00:00Z".to_string(),
+            closed_at: None,
         }
     }
 

@@ -88,6 +88,44 @@ impl TestServer {
         Store::open(&self.database_path()).expect("open the store directly")
     }
 
+    /// Blocks until the server is holding at least `waits` wait requests open.
+    ///
+    /// A test that starts a `saneha wait` as its own process and then does
+    /// something to wake it has to know that the wait is really holding first,
+    /// or it is not testing the wake at all: a waiter whose first request has
+    /// not gone out yet is answered by that first look instead, and one whose
+    /// channel was deleted in the meantime fails with the wrong sentence. A
+    /// sleep only guesses at this; the server counts it, so this asks.
+    ///
+    /// Panics rather than returning, because a wait that never arrives is the
+    /// test's premise failing and not one of its outcomes.
+    pub fn wait_until_holding(&self, waits: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if self.held_waits() >= waits {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the server was still holding {} wait(s) rather than {waits} after 10s",
+                self.held_waits()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// How many wait requests the server is holding open, as `/health` reports
+    /// it.
+    pub fn held_waits(&self) -> usize {
+        let (status, body) = self.raw("GET", "/health", b"");
+        assert_eq!(status, 200, "health said {status}: {body}");
+        serde_json::from_str::<serde_json::Value>(&body)
+            .expect("health is JSON")
+            .get("held_waits")
+            .and_then(serde_json::Value::as_u64)
+            .expect("health reports held_waits") as usize
+    }
+
     /// One raw HTTP/1.1 request, for the shapes no subcommand can make: a
     /// query the server cannot parse, a body larger than it will read. Answers
     /// with the status and the response body.

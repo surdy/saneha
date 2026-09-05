@@ -44,6 +44,11 @@ pub struct Channel {
     pub state: ChannelState,
     /// RFC 3339, UTC.
     pub created_at: String,
+    /// RFC 3339, UTC: when it was closed, if it has been. The viewer renders
+    /// "closed at T" from this rather than scanning the transcript for the
+    /// close system message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
 }
 
 /// The body of `POST /channels`. A missing name asks the server to mint one.
@@ -574,9 +579,10 @@ pub struct ChannelDetail {
 }
 
 /// The body of a `DELETE /channels/{name}?confirm=true` that went through:
-/// what is no longer there.
+/// what is no longer there. Deleted is the word CONTEXT.md uses for a channel
+/// whose transcript has been removed, as distinct from closed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Removed {
+pub struct Deleted {
     pub channel: String,
     pub counts: ChannelCounts,
 }

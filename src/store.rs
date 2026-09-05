@@ -16,8 +16,8 @@ use rand::RngExt;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::api::{
-    Attachment, Channel, ChannelCounts, ChannelDetail, ChannelState, Closed, JoinRequest, Joined,
-    Left, Message, MessageKind, Participant, Removed, MAX_BODY, MAX_MESSAGE_LIMIT,
+    Attachment, Channel, ChannelCounts, ChannelDetail, ChannelState, Closed, Deleted, JoinRequest,
+    Joined, Left, Message, MessageKind, Participant, MAX_BODY, MAX_MESSAGE_LIMIT,
 };
 use crate::mention::{self, Candidate, Unresolved};
 use crate::slug;
@@ -507,6 +507,7 @@ impl Store {
                 purpose: purpose.map(str::to_string),
                 state: ChannelState::Open,
                 created_at,
+                closed_at: None,
             }),
             Err(err) if is_unique_violation(&err) => {
                 Err(StoreError::ChannelExists(name.to_string()))
@@ -519,7 +520,7 @@ impl Store {
     pub fn list_channels(&self) -> Result<Vec<Channel>, StoreError> {
         let conn = self.conn();
         let mut statement = conn.prepare(
-            "SELECT name, purpose, state, created_at FROM channels ORDER BY created_at, id",
+            "SELECT name, purpose, state, created_at, closed_at FROM channels ORDER BY created_at, id",
         )?;
         let rows = statement.query_map([], read_row)?;
         rows.collect::<Result<Vec<_>, _>>()?
@@ -533,7 +534,7 @@ impl Store {
         let conn = self.conn();
         let row = conn
             .query_row(
-                "SELECT name, purpose, state, created_at FROM channels WHERE name = ?1",
+                "SELECT name, purpose, state, created_at, closed_at FROM channels WHERE name = ?1",
                 [name],
                 read_row,
             )
@@ -757,7 +758,7 @@ impl Store {
             )?;
         }
         let row = tx.query_row(
-            "SELECT name, purpose, state, created_at FROM channels WHERE id = ?1",
+            "SELECT name, purpose, state, created_at, closed_at FROM channels WHERE id = ?1",
             [channel_id],
             read_row,
         )?;
@@ -775,7 +776,7 @@ impl Store {
         let conn = self.conn();
         let channel_id = channel_id(&conn, channel)?;
         let row = conn.query_row(
-            "SELECT name, purpose, state, created_at FROM channels WHERE id = ?1",
+            "SELECT name, purpose, state, created_at, closed_at FROM channels WHERE id = ?1",
             [channel_id],
             read_row,
         )?;
@@ -797,7 +798,7 @@ impl Store {
     /// directory nobody can reach, which the hourly sweep takes within the
     /// hour. Open or closed makes no difference here: delete is for when you
     /// want one gone.
-    pub fn remove_channel(&self, channel: &str) -> Result<(i64, Removed), StoreError> {
+    pub fn remove_channel(&self, channel: &str) -> Result<(i64, Deleted), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let channel_id = channel_id(&tx, channel)?;
@@ -807,7 +808,7 @@ impl Store {
 
         Ok((
             channel_id,
-            Removed {
+            Deleted {
                 channel: channel.to_string(),
                 counts,
             },
@@ -1883,16 +1884,20 @@ fn next_message_id(conn: &Connection, channel_id: i64) -> Result<i64, StoreError
 
 /// What a channel holds, counted rather than listed: the numbers a delete is
 /// confirmed against.
+///
+/// One statement rather than four, because these numbers are read together and
+/// are only ever shown together. The unbound uploads are counted too: they are
+/// files this channel is holding, and a delete takes them with the rest.
 fn channel_counts(conn: &Connection, channel_id: i64) -> Result<ChannelCounts, StoreError> {
-    let one = |sql: &str| -> Result<i64, StoreError> {
-        Ok(conn.query_row(sql, [channel_id], |row| row.get(0))?)
-    };
-    let participants = one("SELECT COUNT(*) FROM participants WHERE channel_id = ?1")?;
-    let messages = one("SELECT COUNT(*) FROM messages WHERE channel_id = ?1")?;
-    // The unbound uploads count too: they are files this channel is holding,
-    // and a delete takes them with everything else.
-    let attachments = one("SELECT COUNT(*) FROM attachments WHERE channel_id = ?1")?;
-    let bytes = one("SELECT COALESCE(SUM(size), 0) FROM attachments WHERE channel_id = ?1")?;
+    let (participants, messages, attachments, bytes): (i64, i64, i64, i64) = conn.query_row(
+        "SELECT
+             (SELECT COUNT(*) FROM participants WHERE channel_id = ?1),
+             (SELECT COUNT(*) FROM messages WHERE channel_id = ?1),
+             (SELECT COUNT(*) FROM attachments WHERE channel_id = ?1),
+             (SELECT COALESCE(SUM(size), 0) FROM attachments WHERE channel_id = ?1)",
+        [channel_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
 
     Ok(ChannelCounts {
         participants: participants.max(0) as usize,
@@ -2046,14 +2051,20 @@ fn echo(value: &str) -> String {
     format!("{head}...")
 }
 
-type ChannelRow = (String, Option<String>, String, String);
+type ChannelRow = (String, Option<String>, String, String, Option<String>);
 
 fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelRow> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
 }
 
 fn build_channel(row: ChannelRow) -> Result<Channel, StoreError> {
-    let (name, purpose, state, created_at) = row;
+    let (name, purpose, state, created_at, closed_at) = row;
     Ok(Channel {
         name,
         purpose,
@@ -2061,6 +2072,7 @@ fn build_channel(row: ChannelRow) -> Result<Channel, StoreError> {
             .parse()
             .map_err(|_| StoreError::UnknownChannelState(state.clone()))?,
         created_at,
+        closed_at,
     })
 }
 
@@ -2447,6 +2459,7 @@ mod tests {
             None,
             "paused".to_string(),
             "2026-09-04T09:00:00Z".to_string(),
+            None,
         );
         let err = build_channel(row).expect_err("unknown state");
         assert!(
@@ -2459,6 +2472,7 @@ mod tests {
             None,
             "closed".to_string(),
             "2026-09-04T09:00:00Z".to_string(),
+            Some("2026-09-04T10:00:00Z".to_string()),
         );
         assert_eq!(
             build_channel(known).expect("closed is understood").state,

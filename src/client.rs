@@ -15,9 +15,9 @@ use ureq::{Agent, Body, SendBody};
 use crate::api::{
     attachment_filename, attachment_is_empty, attachment_too_large, decode_filename,
     encode_filename, ApiError, Attachment, Channel, ChannelDetail, ChannelList, ChannelState,
-    CloseRequest, Closed, CursorUpdate, JoinRequest, Joined, Left, Message, MessageList,
-    NewMessage, Participant, ParticipantList, Removed, Waited, DEFAULT_CONTENT_TYPE,
-    DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT,
+    CloseRequest, Closed, CursorUpdate, Deleted, JoinRequest, Joined, Left, Message, MessageList,
+    NewMessage, Participant, ParticipantList, Waited, DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT,
+    FILENAME_HEADER, MAX_ATTACHMENT,
 };
 
 /// The environment variable that points every subcommand at the server.
@@ -172,7 +172,7 @@ impl Remote {
     /// Removes a channel and everything in it. The confirmation is in the URL
     /// because a `DELETE` body is a thing that gets dropped on the way, and a
     /// deletion must not be decided by something that went missing.
-    pub fn delete_channel(&self, channel: &str) -> Result<Removed> {
+    pub fn delete_channel(&self, channel: &str) -> Result<Deleted> {
         let response = self.check(
             self.agent
                 .delete(self.url(&format!("/channels/{channel}?confirm=true")))
