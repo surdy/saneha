@@ -497,8 +497,14 @@ fn disposition_of(filename: &str) -> String {
         .collect();
     // The name was made safe on the way in, so it holds no quote to end this
     // value early.
+    //
+    // `filename*` comes first, and is the only one of the two whose value can
+    // hold a `;` at all: a filename is allowed to contain one, and a reader
+    // scanning for `filename*=` without minding quotes would otherwise find
+    // one written inside the quoted `filename`. Such a reader is wrong, and
+    // this order means it is not wrong here.
     format!(
-        "attachment; filename=\"{ascii}\"; filename*=UTF-8''{}",
+        "attachment; filename*=UTF-8''{}; filename=\"{ascii}\"",
         crate::api::encode_filename(filename)
     )
 }

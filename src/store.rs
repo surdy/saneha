@@ -1006,7 +1006,12 @@ impl Store {
             let mut left = 0;
             for file in read_directory(&directory)? {
                 let file = file?;
-                if !older_than(&file, cutoff) || self.is_recorded(&file)? {
+                // Only files are attachments. Anything else under here was put
+                // there by a person, and a sweep that walked into it, or
+                // failed on it, would be a sweep that stopped doing its job
+                // over something that is not its business.
+                let is_file = std::fs::metadata(&file).is_ok_and(|about| about.is_file());
+                if !is_file || !older_than(&file, cutoff) || self.is_recorded(&file)? {
                     left += 1;
                     continue;
                 }

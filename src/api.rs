@@ -393,10 +393,15 @@ pub fn decode_filename(raw: &str) -> String {
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
-        let pair = (index + 2 < bytes.len())
-            .then(|| std::str::from_utf8(&bytes[index + 1..index + 3]).ok())
-            .flatten()
-            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        // Both halves have to be hex digits and nothing else: parsing a pair
+        // as a number would take `+A` as ten, and `%+A` is three characters of
+        // a filename rather than a newline.
+        let pair = (index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit())
+        .then(|| std::str::from_utf8(&bytes[index + 1..index + 3]).ok())
+        .flatten()
+        .and_then(|hex| u8::from_str_radix(hex, 16).ok());
         match (byte, pair) {
             (b'%', Some(decoded_byte)) => {
                 decoded.push(decoded_byte);
@@ -518,6 +523,10 @@ mod tests {
         assert_eq!(decode_filename("100% done.md"), "100% done.md");
         assert_eq!(decode_filename("ends-in-%"), "ends-in-%");
         assert_eq!(decode_filename("%zz.md"), "%zz.md");
+        // Only hex digits are a pair: a number parser would read `+A` as ten
+        // and turn three characters of a name into a newline.
+        assert_eq!(decode_filename("a%+Ab.md"), "a%+Ab.md");
+        assert_eq!(decode_filename("a% Ab.md"), "a% Ab.md");
         // Bytes that are not UTF-8 are replaced rather than refused, and what
         // comes out still goes through `attachment_filename`.
         assert!(!decode_filename("%FF%FE.md").is_empty());

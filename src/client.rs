@@ -355,9 +355,9 @@ impl Fetched {
 fn filename_from(headers: &ureq::http::HeaderMap) -> Option<String> {
     let disposition =
         String::from_utf8_lossy(headers.get("content-disposition")?.as_bytes()).into_owned();
+    let parameters = parameters_of(&disposition);
 
-    if let Some((_, rest)) = disposition.split_once("filename*=") {
-        let value = rest.split(';').next().unwrap_or_default().trim();
+    if let Some(value) = parameter(&parameters, "filename*") {
         // `UTF-8''name`: the charset, the language that is always empty here,
         // and then the name.
         let encoded = value.rsplit('\'').next().unwrap_or_default();
@@ -367,13 +367,48 @@ fn filename_from(headers: &ureq::http::HeaderMap) -> Option<String> {
         }
     }
 
-    let (_, rest) = disposition.split_once("filename=")?;
-    let rest = rest.trim();
-    let name = match rest.strip_prefix('"') {
-        Some(quoted) => quoted.split('"').next().unwrap_or_default(),
-        None => rest.split(';').next().unwrap_or_default().trim(),
+    let value = parameter(&parameters, "filename")?;
+    let name = match value.strip_prefix('"') {
+        Some(quoted) => quoted.strip_suffix('"').unwrap_or(quoted),
+        None => value,
     };
     Some(name.to_string())
+}
+
+/// A header value split on the semicolons that separate its parameters, and
+/// not on the ones written inside a quoted value.
+///
+/// A filename may contain a semicolon, and a name such as
+/// `a; filename*=UTF-8''elsewhere.sh` is a name and not a second parameter.
+/// Anything that scans a `Content-Disposition` without minding quotes can be
+/// made to read a filename out of a filename.
+fn parameters_of(disposition: &str) -> Vec<&str> {
+    let mut parameters = Vec::new();
+    let mut quoted = false;
+    let mut start = 0;
+    for (at, character) in disposition.char_indices() {
+        match character {
+            '"' => quoted = !quoted,
+            ';' if !quoted => {
+                parameters.push(disposition[start..at].trim());
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parameters.push(disposition[start..].trim());
+    parameters
+}
+
+/// The value of one parameter, by name, case-insensitively as a header
+/// parameter is written.
+fn parameter<'a>(parameters: &[&'a str], name: &str) -> Option<&'a str> {
+    parameters.iter().find_map(|parameter| {
+        let (key, value) = parameter.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then_some(value.trim())
+    })
 }
 
 /// What a file is, as far as its name says. A short table rather than a
@@ -478,6 +513,29 @@ mod tests {
 
         // Nothing to take a name from at all.
         assert_eq!(filename_from(&ureq::http::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn a_name_cannot_write_a_second_name_inside_itself() {
+        // A filename may hold a semicolon, so a name written to look like the
+        // rest of the header is still one name. Scanning for `filename*=`
+        // without minding the quotes would take the file somewhere else
+        // entirely.
+        let smuggled = disposition(
+            "attachment; filename*=UTF-8''a%3B%20filename%2A%3DUTF-8%27%27elsewhere.sh; \
+             filename=\"a; filename*=UTF-8''elsewhere.sh\"",
+        );
+        assert_eq!(
+            filename_from(&smuggled).as_deref(),
+            Some("a; filename*=UTF-8''elsewhere.sh")
+        );
+
+        // And the same when only the old form is there to read.
+        let plain = disposition("attachment; filename=\"a; filename*=UTF-8''elsewhere.sh\"");
+        assert_eq!(
+            filename_from(&plain).as_deref(),
+            Some("a; filename*=UTF-8''elsewhere.sh")
+        );
     }
 
     #[test]

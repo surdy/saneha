@@ -598,73 +598,89 @@ fn read(args: ReadArgs) -> Result<()> {
 /// a handoff document fetched twice must not quietly replace the copy that was
 /// already worked on.
 ///
-/// The bytes land in a temporary file beside the destination and are renamed
-/// onto it once they have all arrived, so the path asked for holds either the
-/// file that was there before or the whole attachment, and never half of
-/// either. `--force` destroying a copy before the transfer that replaces it
-/// has finished is exactly the accident this is here to prevent.
+/// Every byte lands in a file beside the destination, and the destination
+/// itself is not touched until they have all arrived. So whatever stops a
+/// fetch — the server, the network, or a Ctrl-C in this terminal — the path
+/// asked for holds either the file that was there before or the whole
+/// attachment, never half of either and never an empty file standing in for
+/// one.
+///
+/// The last step is what says whether the name was free. Without `--force` it
+/// is a hard link, which fails if anything is there and is the refusal itself;
+/// with `--force` it is a rename, which replaces whatever is there in one step
+/// and only once there is something to replace it with.
 fn fetch(args: FetchArgs) -> Result<()> {
     let remote = Remote::from_env()?;
+    // The answer carries the name the file was attached under and leaves the
+    // body unread, so the destination is known, and can be refused, before any
+    // of the 25 MiB is pulled down.
     let fetched = remote.fetch_attachment(&args.channel, &args.id)?;
 
-    let destination = match args.out {
-        Some(out) => out,
+    let destination = match &args.out {
+        Some(out) => out.clone(),
         None => PathBuf::from(&fetched.filename),
     };
     let shown = destination.display().to_string();
-
-    // Claimed before anything is downloaded, and claimed by making it:
-    // asking whether the file is there and then writing it would be two
-    // answers with a gap between them. `--force` claims nothing, because
-    // there is something there to keep until the last moment.
-    let claimed = if args.force {
-        None
-    } else {
-        Some(claim(&destination, &shown)?)
-    };
+    // Not the answer, only the early one: the link below is what actually
+    // decides, so two fetches racing for one name cannot both win.
+    if !args.force && destination.exists() {
+        return Err(anyhow!(taken(&shown)));
+    }
 
     let landing = beside(&destination);
     let written = write_beside(fetched, &landing).and_then(|size| {
-        std::fs::rename(&landing, &destination)
-            .with_context(|| format!("could not put the attachment in place as {shown}"))?;
+        put(&landing, &destination, args.force)?;
         Ok(size)
     });
 
     let size = match written {
         Ok(size) => size,
         Err(err) => {
-            // Nothing arrived, so nothing is left behind: not the part that
-            // did arrive, and not the empty file that claimed the name.
+            // What did arrive goes with the failure: nothing is left behind
+            // for a person to wonder about, and the next attempt starts clean.
             let _ = std::fs::remove_file(&landing);
-            if let Some(claimed) = claimed {
-                let _ = std::fs::remove_file(&claimed);
-            }
             return Err(err);
         }
     };
     say(&format!("{shown}  {}", human_size(size)))
 }
 
-/// Makes an empty file at `destination`, and refuses if something is already
-/// there.
-fn claim(destination: &std::path::Path, shown: &str) -> Result<PathBuf> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)
-        .map_err(|err| match err.kind() {
-            std::io::ErrorKind::AlreadyExists => anyhow!(
-                "{shown} is already there; write it somewhere else with --out, \
-                 or replace it with --force"
-            ),
-            _ => anyhow::Error::new(err).context(format!("could not write {shown}")),
-        })?;
-    Ok(destination.to_path_buf())
+/// Puts the downloaded file in place.
+///
+/// A hard link is how a name is taken and refused in one step: it fails with
+/// `AlreadyExists` if anything holds the name, so nothing has to be created
+/// first to reserve it and there is no window for two fetches to both think
+/// the name is theirs. `--force` renames instead, which replaces what is there
+/// in one step, and only once there is a whole file to replace it with. Both
+/// paths are in the same directory, so both are within one filesystem.
+fn put(landing: &std::path::Path, destination: &std::path::Path, force: bool) -> Result<()> {
+    let shown = destination.display().to_string();
+    if force {
+        return std::fs::rename(landing, destination)
+            .with_context(|| format!("could not put the attachment in place as {shown}"));
+    }
+
+    std::fs::hard_link(landing, destination).map_err(|err| match err.kind() {
+        std::io::ErrorKind::AlreadyExists => anyhow!(taken(&shown)),
+        _ => anyhow::Error::new(err).context(format!("could not write {shown}")),
+    })?;
+    // The destination and the landing file are one file under two names now,
+    // so removing the second leaves the first whole.
+    let _ = std::fs::remove_file(landing);
+    Ok(())
 }
 
-/// Where the bytes land before they are renamed onto the destination: a hidden
-/// name in the same directory, so the rename is within one filesystem and
-/// therefore the one step it has to be.
+/// What a fetch says when the name it would write is taken.
+fn taken(shown: &str) -> String {
+    format!(
+        "{shown} is already there; write it somewhere else with --out, \
+         or replace it with --force"
+    )
+}
+
+/// Where the bytes land before they are put in place: a hidden name in the
+/// same directory, so the link or the rename that follows is within one
+/// filesystem and therefore the one step it has to be.
 fn beside(destination: &std::path::Path) -> PathBuf {
     use rand::RngExt;
 

@@ -671,6 +671,12 @@ fn a_file_no_row_names_is_swept_up_once_it_is_old_enough() {
     let in_flight = directory.join("eeeeeeeeffffffff0000000011111111");
     std::fs::write(&in_flight, b"still arriving").expect("write the fresh one");
 
+    // Something a person left here, which is not an attachment and is not the
+    // sweep's business. It must not stop the sweep doing its own.
+    let theirs = directory.join("looked-at-this");
+    std::fs::create_dir(&theirs).expect("make the directory");
+    backdate(&theirs, UNBOUND_ATTACHMENT_TTL + 60);
+
     let swept = server
         .store()
         .sweep_unbound_attachments(UNBOUND_ATTACHMENT_TTL)
@@ -680,6 +686,7 @@ fn a_file_no_row_names_is_swept_up_once_it_is_old_enough() {
 
     assert!(!killed.exists(), "the orphan stayed");
     assert!(in_flight.exists(), "an upload in flight was swept up");
+    assert!(theirs.exists(), "something that is not an attachment went");
     assert!(
         stored(&server, id, &carried).exists(),
         "a file a message carries went"
@@ -908,6 +915,109 @@ fn an_attachment_whose_file_is_gone_says_so_without_naming_a_path() {
     assert!(!said.contains("attachments/"), "{said}");
     // And nothing was left in the directory the fetch was run from.
     assert_eq!(std::fs::read_dir(landing.path()).expect("read").count(), 0);
+}
+
+#[test]
+fn a_fetch_that_fails_leaves_the_name_free_for_the_next_one() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    let workspace = tempfile::tempdir().expect("a directory to attach from");
+    let landing = tempfile::tempdir().expect("a directory to fetch into");
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+
+    let path = file(workspace.path(), "handoff.md", b"the handoff\n");
+    let attachment = remote
+        .upload_attachment("brisk-otter", &path)
+        .expect("upload");
+    send_with(
+        &remote,
+        "brisk-otter",
+        &alice,
+        "here it is",
+        std::slice::from_ref(&attachment.id),
+    )
+    .expect("send");
+
+    // A fetch into an empty directory that cannot finish: nothing is written
+    // where the file was going, so nothing has to be cleaned up by hand and
+    // the next attempt is not refused as "already there".
+    let stored_file = stored(&server, channel_id(&server, "brisk-otter"), &attachment);
+    let bytes = std::fs::read(&stored_file).expect("the stored file");
+    std::fs::remove_file(&stored_file).expect("remove the file");
+
+    let failed = server.run_in(
+        landing.path(),
+        &["fetch", "brisk-otter", &attachment.id],
+        &[],
+    );
+    assert!(!failed.status.success());
+    assert_eq!(
+        std::fs::read_dir(landing.path()).expect("read").count(),
+        0,
+        "a failed fetch left something behind"
+    );
+
+    // And when it can finish, it does, into the same name.
+    std::fs::write(&stored_file, &bytes).expect("put the file back");
+    let output = server.run_in(
+        landing.path(),
+        &["fetch", "brisk-otter", &attachment.id],
+        &[],
+    );
+    stdout_of("fetch", &output);
+    assert_eq!(
+        std::fs::read(landing.path().join("handoff.md")).expect("the fetched file"),
+        b"the handoff\n"
+    );
+    assert_eq!(std::fs::read_dir(landing.path()).expect("read").count(), 1);
+}
+
+#[test]
+fn a_filename_cannot_write_a_second_filename_into_the_download() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    let landing = tempfile::tempdir().expect("a directory to fetch into");
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+
+    // A name written to look like the rest of a Content-Disposition. It is a
+    // filename, semicolons and all, and the download must come back under it
+    // rather than under the one written inside it.
+    let name = "a; filename*=UTF-8''elsewhere.sh";
+    let (status, body) = server.raw_with(
+        "POST",
+        "/channels/brisk-otter/attachments",
+        &[(FILENAME_HEADER, "a;%20filename*=UTF-8''elsewhere.sh")],
+        b"nothing to run\n",
+    );
+    assert_eq!(status, 201, "{body}");
+    let attachment: Attachment = serde_json::from_str(&body).expect("the attachment as JSON");
+    assert_eq!(attachment.filename, name);
+
+    send_with(
+        &remote,
+        "brisk-otter",
+        &alice,
+        "a name that is a sentence",
+        std::slice::from_ref(&attachment.id),
+    )
+    .expect("send");
+
+    let output = server.run_in(
+        landing.path(),
+        &["fetch", "brisk-otter", &attachment.id],
+        &[],
+    );
+    stdout_of("fetch", &output);
+    assert!(
+        !landing.path().join("elsewhere.sh").exists(),
+        "the name inside the name was used"
+    );
+    assert_eq!(
+        std::fs::read(landing.path().join(name)).expect("the fetched file"),
+        b"nothing to run\n"
+    );
 }
 
 #[test]
