@@ -513,6 +513,92 @@ pub struct CursorUpdate {
     pub read_cursor: i64,
 }
 
+/// The answer to `POST /channels/{name}/participants/{identity}/leave`.
+///
+/// A leave is idempotent, so the interesting field is `left`: it says whether
+/// this was the call that marked the participant away and wrote the system
+/// message, or whether there was nothing left to do. Either way the request
+/// succeeded, because asking twice for something that has already happened is
+/// not an error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Left {
+    pub channel: String,
+    pub identity: String,
+    /// True when this call marked the participant away and wrote the leave
+    /// into the transcript.
+    pub left: bool,
+    /// The state of the channel the leave was asked of. A closed channel takes
+    /// no more messages, so a leave in one changes nothing.
+    pub channel_state: ChannelState,
+    pub participant: Participant,
+}
+
+/// The body of `POST /channels/{name}/close`: who is closing it.
+///
+/// The scope says any participant or a person may close a channel, so `by` is
+/// an identity rather than a participant: `surdy@web` closing from the viewer
+/// has never joined anything. It is recorded in the body of the close system
+/// message, because the schema says a `close` is about the channel and not
+/// about a participant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloseRequest {
+    pub by: String,
+}
+
+/// The answer to a close, idempotent in the same way a leave is: `closed` says
+/// whether this call was the one that closed it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Closed {
+    pub channel: Channel,
+    pub closed: bool,
+}
+
+/// How much a channel holds. It is what a delete asks for before it is
+/// confirmed, so that what is about to go is said in numbers rather than in
+/// the word "everything".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelCounts {
+    pub participants: usize,
+    /// The whole transcript, system messages included.
+    pub messages: usize,
+    pub attachments: usize,
+    /// What those attachments take up on the server, in bytes.
+    pub attachment_bytes: u64,
+}
+
+/// The body of `GET /channels/{name}`: one channel and what it holds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelDetail {
+    pub channel: Channel,
+    pub counts: ChannelCounts,
+}
+
+/// The body of a `DELETE /channels/{name}?confirm=true` that went through:
+/// what is no longer there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Removed {
+    pub channel: String,
+    pub counts: ChannelCounts,
+}
+
+/// The query of `DELETE /channels/{name}`. The confirmation is in the URL
+/// rather than in a body, because a `DELETE` with a body is a request some
+/// proxies and clients drop the body from, and a deletion must never be
+/// decided by something that got lost on the way.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeleteQuery {
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+/// Why an unconfirmed delete was refused, in the one wording both sides use.
+pub fn delete_needs_confirmation(channel: &str) -> String {
+    format!(
+        "deleting {channel:?} removes its transcript, its participants and its attachments, \
+         and nothing brings them back; say so with: saneha delete {channel} --yes"
+    )
+}
+
 /// Every failing response carries this, so the subcommands can print the
 /// server's own words rather than guessing from a status code.
 #[derive(Debug, Clone, Serialize, Deserialize)]

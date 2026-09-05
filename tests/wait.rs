@@ -96,18 +96,12 @@ fn read_cursor(remote: &Remote, channel: &str, identity: &str) -> i64 {
         .read_cursor
 }
 
-/// Closes a channel by hand.
-///
-/// There is no `saneha close` yet (it is its own ticket), and this is the
-/// state that verb will leave behind: `wait` is written against the state
-/// rather than against the verb, so it can be tested before the verb exists.
-fn close(server: &TestServer, channel: &str) {
-    server
-        .database()
-        .execute(
-            "UPDATE channels SET state = 'closed' WHERE name = ?1",
-            [channel],
-        )
+/// Closes a channel, as a person would from the viewer. The close is what
+/// wakes the waiters, so these tests use the verb rather than the state it
+/// leaves behind.
+fn close(remote: &Remote, channel: &str) {
+    remote
+        .close_channel(channel, "surdy@web")
         .expect("close the channel");
 }
 
@@ -498,13 +492,20 @@ fn a_closed_channel_ends_the_wait_with_four() {
     let bob = join(&remote, "brisk-otter", "bob");
     let last = send(&remote, "brisk-otter", &alice, "one last thing");
     catch_up(&remote, "brisk-otter", &bob);
-    close(&server, "brisk-otter");
+    close(&remote, "brisk-otter");
 
+    // Bob was caught up before the close, so the only thing left for him is
+    // the close itself, which is a system message like any other.
     let ended = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]).finish();
     ended.exited(4);
     assert!(
-        ended.printed.is_empty(),
-        "a wait on a closed channel with nothing unread printed {:?}",
+        ended.printed.contains("closed the channel"),
+        "a wait on a closed channel did not print the close: {:?}",
+        ended.printed
+    );
+    assert!(
+        !ended.printed.contains("one last thing"),
+        "a wait printed what this participant had already read: {:?}",
         ended.printed
     );
 
@@ -528,27 +529,24 @@ fn closing_a_channel_ends_a_wait_already_in_progress() {
     let bob = join(&remote, "brisk-otter", "bob");
     catch_up(&remote, "brisk-otter", &bob);
 
-    // A short hold, because there is no `saneha close` yet to wake the waiters
-    // with: the state changes underneath and the next re-issue sees it. When
-    // `close` lands it calls the notifier and this becomes immediate.
-    let mut waiter = Waiter::start(
-        &server,
-        &[
-            "wait",
-            "brisk-otter",
-            "--as",
-            "bob",
-            "--timeout",
-            "20",
-            "--hold",
-            "1",
-        ],
-    );
+    // The first process a test starts is slow to reach its first request, and
+    // this one has to be holding before the close lands, so that cost is paid
+    // here rather than inside SETTLE.
+    server.run(&["list"]);
+    let mut waiter = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]);
     std::thread::sleep(SETTLE);
     assert!(waiter.still_waiting(), "the wait ended before the close");
 
-    close(&server, "brisk-otter");
-    waiter.finish().exited(4);
+    // The close wakes it: no re-issue, no waiting out the hold.
+    let closed = Instant::now();
+    close(&remote, "brisk-otter");
+    let ended = waiter.finish();
+    ended.exited(4);
+    assert!(
+        closed.elapsed() < Duration::from_secs(1),
+        "the wait took {:?} to notice a close",
+        closed.elapsed()
+    );
 }
 
 #[test]

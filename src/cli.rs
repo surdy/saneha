@@ -10,8 +10,8 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::api::{
-    Channel, ChannelState, JoinRequest, Message, NewMessage, Participant, ParticipantList,
-    DEFAULT_WAIT_TIMEOUT, MAX_HOLD,
+    Channel, ChannelCounts, ChannelState, JoinRequest, Message, NewMessage, Participant,
+    ParticipantList, DEFAULT_WAIT_TIMEOUT, MAX_HOLD,
 };
 use crate::client::{JoinAnswer, Remote, Waiting, URL_ENV};
 use crate::identity;
@@ -54,6 +54,13 @@ pub enum Command {
     Wait(WaitArgs),
     /// Download an attachment by id
     Fetch(FetchArgs),
+    /// Declare this participant away; it stays in the transcript and can still
+    /// be mentioned
+    Leave(LeaveArgs),
+    /// Close a channel: no more messages, still readable
+    Close(CloseArgs),
+    /// Delete a channel and everything in it
+    Delete(DeleteArgs),
 }
 
 #[derive(Debug, Args)]
@@ -277,6 +284,77 @@ pub struct FetchArgs {
     pub force: bool,
 }
 
+#[derive(Debug, Args)]
+#[command(
+    after_help = "Leaving is a declaration, not a departure. The participant stays in the \
+                  channel and in its transcript, can still be mentioned, and goes on collecting \
+                  unread messages; `saneha join` resumes it with its read cursor where it was. \
+                  Leaving twice does nothing the second time and still exits 0."
+)]
+pub struct LeaveArgs {
+    /// The channel to leave; this identity must already have joined it
+    #[arg(value_name = "CHANNEL")]
+    pub channel: String,
+
+    /// The name half of this identity, as `saneha join` works it out
+    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
+    pub as_name: Option<String>,
+
+    /// The harness to derive the name from, overriding what the environment says
+    #[arg(long, value_name = "ID")]
+    pub harness: Option<String>,
+
+    /// Print the answer as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = "A closed channel takes no more messages and no more joins, and can still be \
+                  read to the end. Every wait being held on it returns at once and exits 4. \
+                  Anyone may close a channel, whether or not they have joined it; who did it is \
+                  recorded in the transcript. Closing a closed channel does nothing and exits 0."
+)]
+pub struct CloseArgs {
+    /// The channel to close
+    #[arg(value_name = "CHANNEL")]
+    pub channel: String,
+
+    /// The name half of the identity closing it, as `saneha join` works it out
+    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
+    pub as_name: Option<String>,
+
+    /// The harness to derive the name from, overriding what the environment says
+    #[arg(long, value_name = "ID")]
+    pub harness: Option<String>,
+
+    /// Print the answer as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = "Without --yes this prints what would go and removes nothing, exiting 1. With \
+                  it, the channel, its participants, its transcript and its attachments are \
+                  removed, and nothing brings them back. A wait being held on the channel ends \
+                  at once and exits 1. Closed channels and open ones delete alike."
+)]
+pub struct DeleteArgs {
+    /// The channel to delete
+    #[arg(value_name = "CHANNEL")]
+    pub channel: String,
+
+    /// Go ahead and delete it. Without this, nothing is removed
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Print the answer as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Parses the command line and runs it.
 pub fn run() -> Result<ExitCode> {
     execute(Cli::parse())
@@ -301,6 +379,9 @@ pub fn execute(cli: Cli) -> Result<ExitCode> {
         Command::Read(args) => done(read(args)),
         Command::Wait(args) => wait(args),
         Command::Fetch(args) => done(fetch(args)),
+        Command::Leave(args) => done(leave(args)),
+        Command::Close(args) => done(close(args)),
+        Command::Delete(args) => done(delete(args)),
     }
 }
 
@@ -760,6 +841,15 @@ fn wait(args: WaitArgs) -> Result<ExitCode> {
                 trouble = None;
                 backoff = FIRST_BACKOFF;
             }
+            // The channel was deleted while this was held open. There is
+            // nothing to wait for and nothing to read, so it ends now rather
+            // than asking again until the timeout.
+            Waiting::Gone => {
+                return Err(anyhow!(
+                    "the channel {} no longer exists; it was deleted while this wait was open",
+                    args.channel
+                ))
+            }
             Waiting::Later(message) => {
                 let since = trouble
                     .as_ref()
@@ -895,6 +985,122 @@ fn write_beside(fetched: crate::client::Fetched, landing: &std::path::Path) -> R
     file.sync_all()
         .with_context(|| format!("could not write {shown}"))?;
     Ok(size)
+}
+
+/// Declares this participant away.
+///
+/// The server does the deciding: it refuses a caller that has not joined, and
+/// it answers the same way whether this leave was the one that landed or the
+/// second of two. What is printed says which, because a skill running this in
+/// a cleanup step should be able to tell "I have just left" from "I had
+/// already left" without parsing a transcript.
+fn leave(args: LeaveArgs) -> Result<()> {
+    let remote = Remote::from_env()?;
+    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let left = remote.leave(&args.channel, &caller.identity())?;
+
+    if args.json {
+        return say(&serde_json::to_string_pretty(&left)?);
+    }
+    let channel = &left.channel;
+    say(&match (left.left, left.channel_state) {
+        (true, _) => format!("{} left {channel}", left.identity),
+        // A closed channel takes no more messages, and a leave is one, so
+        // there was nothing to write and nothing to change.
+        (false, ChannelState::Closed) => {
+            format!("{channel} is closed, so there is nothing to leave")
+        }
+        (false, ChannelState::Open) => {
+            format!("{} was already away in {channel}", left.identity)
+        }
+    })
+}
+
+/// Closes a channel.
+///
+/// The identity is worked out the way every other verb works it out, but it is
+/// not looked up: the scope says any participant or a person may close, so a
+/// caller that never joined closes just the same and is recorded in the
+/// transcript by name.
+fn close(args: CloseArgs) -> Result<()> {
+    let remote = Remote::from_env()?;
+    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let closed = remote.close_channel(&args.channel, &caller.identity())?;
+
+    if args.json {
+        return say(&serde_json::to_string_pretty(&closed)?);
+    }
+    let channel = &closed.channel.name;
+    if closed.closed {
+        say(&format!("{channel} is now closed"))
+    } else {
+        say(&format!("{channel} was already closed"))
+    }
+}
+
+/// Deletes a channel, once it has been said twice.
+///
+/// Without `--yes` this asks the server what is there, prints it, and removes
+/// nothing: "everything" is not a number, and a person about to lose a
+/// transcript should see how much of one it is. The exit code is 1, because
+/// the command was asked to delete a channel and did not.
+fn delete(args: DeleteArgs) -> Result<()> {
+    let remote = Remote::from_env()?;
+
+    if !args.yes {
+        let detail = remote.channel_detail(&args.channel)?;
+        if args.json {
+            say(&serde_json::to_string_pretty(&detail)?)?;
+        } else {
+            say(&format!(
+                "{}  {}\n{}",
+                detail.channel.name,
+                detail.channel.state.as_str(),
+                counts_line(&detail.counts)
+            ))?;
+        }
+        return Err(anyhow!(crate::api::delete_needs_confirmation(
+            &args.channel
+        )));
+    }
+
+    let removed = remote.delete_channel(&args.channel)?;
+    if args.json {
+        return say(&serde_json::to_string_pretty(&removed)?);
+    }
+    say(&format!(
+        "deleted {}: {}",
+        removed.channel,
+        counts_line(&removed.counts)
+    ))
+}
+
+/// What a channel holds, in one line: the same sentence before a delete and
+/// after it, so what was promised and what went are read side by side.
+fn counts_line(counts: &ChannelCounts) -> String {
+    let attachments = if counts.attachments == 0 {
+        "no attachments".to_string()
+    } else {
+        format!(
+            "{} ({})",
+            plural(counts.attachments, "attachment"),
+            human_size(counts.attachment_bytes)
+        )
+    };
+    format!(
+        "{}, {}, {attachments}",
+        plural(counts.participants, "participant"),
+        plural(counts.messages, "message"),
+    )
+}
+
+/// A count and the word for it, singular when there is one of them.
+fn plural(count: usize, word: &str) -> String {
+    if count == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{count} {word}s")
+    }
 }
 
 /// An argument or environment variable that is there and says something.

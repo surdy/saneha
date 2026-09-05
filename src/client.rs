@@ -14,9 +14,10 @@ use ureq::{Agent, Body, SendBody};
 
 use crate::api::{
     attachment_filename, attachment_is_empty, attachment_too_large, decode_filename,
-    encode_filename, ApiError, Attachment, Channel, ChannelList, ChannelState, CursorUpdate,
-    JoinRequest, Joined, Message, MessageList, NewMessage, Participant, ParticipantList, Waited,
-    DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT,
+    encode_filename, ApiError, Attachment, Channel, ChannelDetail, ChannelList, ChannelState,
+    CloseRequest, Closed, CursorUpdate, JoinRequest, Joined, Left, Message, MessageList,
+    NewMessage, Participant, ParticipantList, Removed, Waited, DEFAULT_CONTENT_TYPE,
+    DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT,
 };
 
 /// The environment variable that points every subcommand at the server.
@@ -55,6 +56,11 @@ pub enum Waiting {
     },
     /// The hold elapsed with nothing to say. Ask again.
     Nothing,
+    /// The channel, or this participant in it, is not there any more. The wait
+    /// began by checking both, so this is a `saneha delete` that landed while
+    /// the request was held open: there is nothing left to wait on and nothing
+    /// to be gained by asking again.
+    Gone,
     /// Nothing is wrong with the request, but the server could not answer it
     /// now: it is stopping, or it is not there. Ask again shortly, in these
     /// words if it never comes back.
@@ -137,6 +143,57 @@ impl Remote {
         )?;
         let list: ChannelList = read_json(response, "channel list")?;
         Ok(list.channels)
+    }
+
+    /// One channel and what it holds: the counts `delete` prints before it is
+    /// told to go ahead.
+    pub fn channel_detail(&self, channel: &str) -> Result<ChannelDetail> {
+        let response = self.check(
+            self.agent
+                .get(self.url(&format!("/channels/{channel}")))
+                .call()
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "channel")
+    }
+
+    /// Closes a channel, as `by`. Closing a closed channel is not an error;
+    /// what comes back says whether this was the call that closed it.
+    pub fn close_channel(&self, channel: &str, by: &str) -> Result<Closed> {
+        let response = self.check(
+            self.agent
+                .post(self.url(&format!("/channels/{channel}/close")))
+                .send_json(&CloseRequest { by: by.to_string() })
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "close")
+    }
+
+    /// Removes a channel and everything in it. The confirmation is in the URL
+    /// because a `DELETE` body is a thing that gets dropped on the way, and a
+    /// deletion must not be decided by something that went missing.
+    pub fn delete_channel(&self, channel: &str) -> Result<Removed> {
+        let response = self.check(
+            self.agent
+                .delete(self.url(&format!("/channels/{channel}?confirm=true")))
+                .call()
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "deletion")
+    }
+
+    /// Marks a participant away. Leaving twice is not an error; what comes
+    /// back says whether this was the call that did it.
+    pub fn leave(&self, channel: &str, identity: &str) -> Result<Left> {
+        let response = self.check(
+            self.agent
+                .post(self.url(&format!(
+                    "/channels/{channel}/participants/{identity}/leave"
+                )))
+                .send_empty()
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "leave")
     }
 
     /// Joins a channel and returns the identity the server granted, or
@@ -275,6 +332,11 @@ impl Remote {
 
         if response.status() == 204 {
             return Ok(Waiting::Nothing);
+        }
+        // The channel and this participant were both there when the wait
+        // started, so a 404 now is a delete that landed under it.
+        if response.status() == 404 {
+            return Ok(Waiting::Gone);
         }
         if response.status().is_success() {
             return Ok(match read_json::<Waited>(response, "wait") {

@@ -23,10 +23,11 @@ use tokio::net::TcpListener;
 use tokio::sync::{watch, Notify};
 
 use crate::api::{
-    ApiError, Attachment, Channel, ChannelList, ChannelState, CursorUpdate, JoinRequest, Joined,
-    Message, MessageList, MessageQuery, NewChannel, NewMessage, Participant, ParticipantList,
-    WaitQuery, Waited, DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER,
-    MAX_ATTACHMENT, MAX_BODY, MAX_HOLD,
+    ApiError, Attachment, Channel, ChannelDetail, ChannelList, ChannelState, CloseRequest, Closed,
+    CursorUpdate, DeleteQuery, JoinRequest, Joined, Left, Message, MessageList, MessageQuery,
+    NewChannel, NewMessage, Participant, ParticipantList, Removed, WaitQuery, Waited,
+    DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT, MAX_BODY,
+    MAX_HOLD,
 };
 use crate::store::{PendingAttachment, Store, StoreError, UNBOUND_ATTACHMENT_TTL};
 
@@ -143,12 +144,12 @@ impl Waiters {
 
     /// Forgets a channel, because the channel itself is gone.
     ///
-    /// Nothing calls this yet: `saneha delete` is the one verb that makes an
-    /// entry here permanently pointless, and it is its own ticket (#6). That
-    /// ticket must call this after the delete commits, and wake first, so the
-    /// waiters find the channel gone and say so rather than being left holding
-    /// a notifier nothing will ever ring.
-    #[allow(dead_code)]
+    /// [`delete_channel`] is the only caller, and it wakes before it forgets:
+    /// the wake is what sends every held wait back to look, find the channel
+    /// gone and say so, and the forget is what stops the map growing an entry
+    /// per channel that has ever been deleted. The other way round would leave
+    /// waiters holding a notifier nothing will ever ring, asleep until their
+    /// hold elapsed.
     fn forget(&self, channel: &str) {
         self.channels().remove(channel);
     }
@@ -173,9 +174,26 @@ fn routes() -> Router<Arc<Serving>> {
         .route("/", get(root))
         .route("/health", get(health))
         .route("/channels", post(create_channel).get(list_channels))
+        // One channel, and the counts a delete is confirmed against; and the
+        // delete itself, which needs `?confirm=true` before it will do
+        // anything.
+        .route(
+            "/channels/{channel}",
+            get(channel_detail).delete(delete_channel),
+        )
+        // Closing is not an edit of the channel resource: it writes a system
+        // message and wakes every waiter, so it is a verb of its own, with the
+        // identity closing it in the body.
+        .route("/channels/{channel}/close", post(close_channel))
         .route(
             "/channels/{channel}/participants",
             post(join).get(list_participants),
+        )
+        // A leave belongs to the participant leaving, which is why it hangs
+        // off that participant's own path rather than the channel's.
+        .route(
+            "/channels/{channel}/participants/{identity}/leave",
+            post(leave),
         )
         .route(
             "/channels/{channel}/participants/{identity}",
@@ -432,6 +450,85 @@ async fn create_channel(
 async fn list_channels(State(serving): State<Arc<Serving>>) -> Result<Json<ChannelList>, Failure> {
     let channels = serving.store.list_channels()?;
     Ok(Json(ChannelList { channels }))
+}
+
+/// One channel, with what it holds counted: the numbers `saneha delete` prints
+/// before it is told to go ahead.
+async fn channel_detail(
+    State(serving): State<Arc<Serving>>,
+    Path(channel): Path<String>,
+) -> Result<Json<ChannelDetail>, Failure> {
+    Ok(Json(serving.store.channel_detail(&channel)?))
+}
+
+/// Closes a channel: no more messages, no more joins, still readable.
+///
+/// The wake is the point of it. Every held wait is looking for two things, and
+/// the channel ending is the second; a close that did not wake would leave
+/// every waiter asleep until its hold elapsed, reading a channel that was over
+/// before it started waiting.
+async fn close_channel(
+    State(serving): State<Arc<Serving>>,
+    Path(channel): Path<String>,
+    ApiJson(body): ApiJson<CloseRequest>,
+) -> Result<Json<Closed>, Failure> {
+    let closed = serving.store.close(&channel, &body.by)?;
+    if closed.closed {
+        // After the write has committed, so every waiter it sends back to look
+        // sees the channel it is being told about.
+        serving.waiters.wake(&channel);
+    }
+    Ok(Json(closed))
+}
+
+/// Removes a channel, its transcript, its participants and its attachments.
+///
+/// Four steps, in this order and no other. The row goes first, which cascades
+/// away everything keyed to it; then the files that row id named, because
+/// afterwards there is nothing left to name them by, and a failure there
+/// leaves a directory nobody can reach for the sweep rather than a live
+/// channel whose attachments have gone. Then the wake, which sends every held
+/// wait back to look and find the channel gone, and only then the forget,
+/// which drops the notifier: forgetting first would leave those waits holding
+/// a notifier nothing would ever ring.
+async fn delete_channel(
+    State(serving): State<Arc<Serving>>,
+    Path(channel): Path<String>,
+    ApiQuery(query): ApiQuery<DeleteQuery>,
+) -> Result<Json<Removed>, Failure> {
+    if !query.confirm {
+        return Err(Failure::unconfirmed(&channel));
+    }
+
+    let (channel_id, removed) = serving.store.remove_channel(&channel)?;
+    if let Err(err) = serving.store.remove_channel_files(channel_id) {
+        // The rows are gone and the request succeeded; what is left is an
+        // unreachable directory, which the hourly sweep removes. Worth a line
+        // on the server's own output and nothing more.
+        say(&format!(
+            "could not remove the files of the deleted channel {channel:?}: {err}"
+        ));
+    }
+    serving.waiters.wake(&channel);
+    serving.waiters.forget(&channel);
+    Ok(Json(removed))
+}
+
+/// Marks a participant away and writes the leave into the transcript.
+///
+/// A leave wakes, because it is a transcript event and a plain `wait` is
+/// woken by anything it has not read. A `--mentions` wait is not woken by it,
+/// and that is decided by [`crate::api::Message::wakes`] rather than here: the
+/// wake goes out and the waiter that does not care goes back to sleep.
+async fn leave(
+    State(serving): State<Arc<Serving>>,
+    Path((channel, identity)): Path<(String, String)>,
+) -> Result<Json<Left>, Failure> {
+    let left = serving.store.leave(&channel, &identity)?;
+    if left.left {
+        serving.waiters.wake(&channel);
+    }
+    Ok(Json(left))
 }
 
 /// A join, or a resume, or the grant of a suffixed identity: which one it was
@@ -879,6 +976,17 @@ impl Failure {
         }
     }
 
+    /// A delete that did not say it meant it. Nothing has been touched, and
+    /// the words are the ones the subcommand prints, so a caller that reached
+    /// the route by hand is told the same thing `saneha delete` would say.
+    fn unconfirmed(channel: &str) -> Failure {
+        Failure {
+            status: StatusCode::BAD_REQUEST,
+            message: crate::api::delete_needs_confirmation(channel),
+            retry: false,
+        }
+    }
+
     /// A wait that was ended by the server stopping rather than by anything
     /// about the request. `retry` says so, and the caller waits again.
     fn stopping() -> Failure {
@@ -914,6 +1022,7 @@ impl From<StoreError> for Failure {
             | StoreError::NoSuchRecipient { .. }
             | StoreError::EmptyAttachment { .. }
             | StoreError::InvalidFilename { .. }
+            | StoreError::InvalidIdentity(_)
             | StoreError::AmbiguousRecipient { .. } => StatusCode::BAD_REQUEST,
             StoreError::NoSuchChannel(_)
             | StoreError::NoSuchParticipant { .. }
