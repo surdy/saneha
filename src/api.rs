@@ -306,6 +306,22 @@ pub struct NewMessage {
     /// the whole send.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<String>,
+    /// The send key: the value the sender puts on a send so that making the
+    /// same request again yields the same message rather than a second one.
+    /// [`mint_id`]'s shape, fresh for each message somebody means to write.
+    ///
+    /// It is what makes a send safe to make again. The server keeps one
+    /// message per key per channel, so a request that is made twice — because
+    /// a signal landed on the answer to the first one, and the sender cannot
+    /// tell an answer that was lost from a message that was never written —
+    /// writes one message and answers with it both times. A key is per
+    /// channel: the same key sent to another channel is another message.
+    ///
+    /// Optional, because it always was: a send without one is written
+    /// unconditionally, which is what an older client sends and what the
+    /// server did for every send before this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// The body of `GET /channels/{name}/messages`.
@@ -400,6 +416,44 @@ pub const DEFAULT_MESSAGE_LIMIT: usize = 500;
 /// The most one fetch will return, however large a limit is asked for. A
 /// caller with a longer backlog than this asks again from the last id it got.
 pub const MAX_MESSAGE_LIMIT: usize = 1000;
+
+/// A fresh id: 128 random bits as 32 lowercase hex characters.
+///
+/// Two things are named this way, and neither can be arrived at by counting:
+/// the id of an attachment, which the server mints because that id is the
+/// whole of what a fetch presents, and the send key, which the sender mints
+/// because only the sender knows that two requests are one message.
+pub fn mint_id() -> String {
+    use rand::RngExt;
+
+    let bytes: [u8; 16] = rand::rng().random();
+    let mut id = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        // Writing to a String cannot fail.
+        let _ = write!(id, "{byte:02x}");
+    }
+    id
+}
+
+/// Whether a value has [`mint_id`]'s shape. What is minted there is looked up
+/// by name later — an attachment id becomes a path segment, a send key becomes
+/// a value in a unique index — so the shape is checked before that happens
+/// rather than after.
+pub fn is_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+}
+
+/// Why a send key was refused, in the one wording both sides use.
+pub fn invalid_key(key: &str) -> String {
+    format!(
+        "a send key is 32 lowercase hex characters minted by the sender, and {key:?} \
+         is not one; leave it out to send without one"
+    )
+}
 
 /// The longest a message body may be, in bytes. Anything longer is an
 /// attachment rather than a message (v1 scope). Both sides hold callers to it:

@@ -68,6 +68,7 @@ fn send_to(
             body: body.to_string(),
             to: to.iter().map(|value| (*value).to_string()).collect(),
             attachments: Vec::new(),
+            key: None,
         },
     )
 }
@@ -792,4 +793,337 @@ fn reading_a_channel_this_identity_has_not_joined_says_to_join_it() {
     assert!(!missing.status.success());
     let stderr = String::from_utf8_lossy(&missing.stderr);
     assert!(stderr.contains("there is no channel named"), "{stderr}");
+}
+
+/// A message from `from` under the key its sender minted, which is what a
+/// `saneha send` carries and what makes the request behind it safe to make
+/// again.
+fn send_with_key(
+    remote: &Remote,
+    channel: &str,
+    from: &str,
+    body: &str,
+    key: &str,
+) -> anyhow::Result<Message> {
+    remote.send_message(
+        channel,
+        &NewMessage {
+            from: from.to_string(),
+            body: body.to_string(),
+            to: Vec::new(),
+            attachments: Vec::new(),
+            key: Some(key.to_string()),
+        },
+    )
+}
+
+/// How many messages participants have written in a channel, counted in the
+/// database rather than read back, so a second row would be seen even if
+/// nothing that reads the transcript showed it.
+fn rows_written(server: &TestServer, channel: &str) -> i64 {
+    server
+        .database()
+        .query_row(
+            "SELECT COUNT(*)
+               FROM messages m JOIN channels c ON c.id = m.channel_id
+              WHERE c.name = ?1 AND m.kind = 'message'",
+            [channel],
+            |row| row.get(0),
+        )
+        .expect("count the messages")
+}
+
+#[test]
+fn a_send_made_again_under_the_same_key_is_one_message() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+    let bob = join(&remote, "brisk-otter", "bob");
+
+    // The send, and then the same request again: what `retrying` makes when a
+    // signal lands on the answer to the first one, which is the interruption
+    // that made a send unretryable before (issue #38).
+    let key = saneha::api::mint_id();
+    let first = send_with_key(
+        &remote,
+        "brisk-otter",
+        &alice,
+        "@bob the build is green",
+        &key,
+    )
+    .expect("send");
+    let again = send_with_key(
+        &remote,
+        "brisk-otter",
+        &alice,
+        "@bob the build is green",
+        &key,
+    )
+    .expect("the send made again");
+
+    // The same message, whole: the same id, written at the same moment, and
+    // addressed to the same participant.
+    assert_eq!(again.id, first.id, "the repeat wrote a second message");
+    assert_eq!(again.created_at, first.created_at);
+    assert_eq!(again.body, first.body);
+    assert_eq!(again.recipients, vec![bob]);
+    assert_eq!(again.from, first.from);
+
+    // And one row stands behind both answers.
+    assert_eq!(rows_written(&server, "brisk-otter"), 1);
+    let transcript = remote.messages("brisk-otter", 0, 10).expect("read");
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|message| message.id == first.id)
+            .count(),
+        1,
+        "{transcript:?}"
+    );
+
+    // The write says so and the repeat says the message was already there, so
+    // a caller that reads the status can tell them apart.
+    let key = saneha::api::mint_id();
+    let post = format!("{{\"from\":\"{alice}\",\"body\":\"again\",\"key\":\"{key}\"}}");
+    let (written, _) = server.raw("POST", "/channels/brisk-otter/messages", post.as_bytes());
+    assert_eq!(written, 201);
+    let (repeated, body) = server.raw("POST", "/channels/brisk-otter/messages", post.as_bytes());
+    assert_eq!(repeated, 200);
+    let message: Message = serde_json::from_str(&body).expect("the message shape");
+    assert_eq!(message.body, "again");
+    assert_eq!(rows_written(&server, "brisk-otter"), 2);
+}
+
+#[test]
+fn a_key_used_for_a_different_message_is_refused() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+    let bob = join(&remote, "brisk-otter", "bob");
+
+    let key = saneha::api::mint_id();
+    let first = send_with_key(&remote, "brisk-otter", &alice, "the build is green", &key)
+        .expect("the first send");
+
+    // A key is 128 random bits minted per send, so a second send under it that
+    // says something else is not a retry whose answer went missing: it is a
+    // sender reusing a key, and being handed a message it did not write would
+    // be worse than being told.
+    let other_body = send_with_key(&remote, "brisk-otter", &alice, "something else", &key)
+        .expect_err("a different body under the same key to be refused");
+    let said = other_body.to_string();
+    assert!(said.contains("already used in \"brisk-otter\""), "{said}");
+    assert!(said.contains(&format!("#{}", first.id)), "{said}");
+    assert!(said.contains("mint a new key"), "{said}");
+
+    // Nor is it the same send when somebody else is sending it, which is what
+    // stands in for the participant check the key look-up now comes before: a
+    // repeat claiming to be from an identity that never joined fails here.
+    send_with_key(&remote, "brisk-otter", &bob, "the build is green", &key)
+        .expect_err("a different sender under the same key to be refused");
+    send_with_key(
+        &remote,
+        "brisk-otter",
+        "nobody@nowhere",
+        "the build is green",
+        &key,
+    )
+    .expect_err("a sender that never joined to be refused");
+
+    // And the refusal is a conflict, not a bad request: the send is well
+    // formed, it is the key that is spent.
+    let post = format!("{{\"from\":\"{alice}\",\"body\":\"different\",\"key\":\"{key}\"}}");
+    let (status, _) = server.raw("POST", "/channels/brisk-otter/messages", post.as_bytes());
+    assert_eq!(status, 409);
+
+    // Nothing of it was written: the one message is the one that was sent.
+    assert_eq!(rows_written(&server, "brisk-otter"), 1);
+    let transcript = remote.messages("brisk-otter", 0, 10).expect("read");
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|message| message.body == "something else")
+            .count(),
+        0,
+        "{transcript:?}"
+    );
+}
+
+#[test]
+fn a_send_made_again_after_the_channel_closed_is_still_answered() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+
+    let key = saneha::api::mint_id();
+    let sent = send_with_key(&remote, "brisk-otter", &alice, "the last word", &key).expect("send");
+    remote
+        .close_channel("brisk-otter", &alice)
+        .expect("close the channel");
+
+    // This is what the key being looked up before the open check is for: the
+    // close landed between the send and the attempt that followed it, and the
+    // message it is asking after is already in the transcript. Answering it
+    // with "the channel is closed" would report a message that exists as one
+    // that was never written.
+    let again = send_with_key(&remote, "brisk-otter", &alice, "the last word", &key)
+        .expect("the send made again after the close");
+    assert_eq!(again.id, sent.id);
+    assert_eq!(again.body, "the last word");
+
+    // A new key is a new message, and a closed channel takes none of those.
+    let refused = send_with_key(
+        &remote,
+        "brisk-otter",
+        &alice,
+        "one more",
+        &saneha::api::mint_id(),
+    )
+    .expect_err("a closed channel to take no new message");
+    assert!(refused.to_string().contains("is closed"), "{refused}");
+    assert_eq!(rows_written(&server, "brisk-otter"), 1);
+}
+
+#[test]
+fn two_keys_are_two_messages() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+
+    // The same words twice is somebody saying the same thing twice, and the
+    // keys are what say so: two sends, two messages.
+    let first = send_with_key(
+        &remote,
+        "brisk-otter",
+        &alice,
+        "ping",
+        &saneha::api::mint_id(),
+    )
+    .expect("the first send");
+    let second = send_with_key(
+        &remote,
+        "brisk-otter",
+        &alice,
+        "ping",
+        &saneha::api::mint_id(),
+    )
+    .expect("the second send");
+
+    assert_ne!(first.id, second.id);
+    assert_eq!(rows_written(&server, "brisk-otter"), 2);
+}
+
+#[test]
+fn a_key_belongs_to_the_channel_it_was_sent_to() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    channel(&remote, "quiet-heron");
+    let here = join(&remote, "brisk-otter", "alice");
+    let there = join(&remote, "quiet-heron", "alice");
+
+    // One key, two channels. Nothing was made twice: these are two messages,
+    // and the second is not the first coming back.
+    let key = saneha::api::mint_id();
+    let first = send_with_key(&remote, "brisk-otter", &here, "over here", &key).expect("send here");
+    let second =
+        send_with_key(&remote, "quiet-heron", &there, "over there", &key).expect("send there");
+
+    assert_eq!(second.body, "over there");
+    assert_eq!(rows_written(&server, "brisk-otter"), 1);
+    assert_eq!(rows_written(&server, "quiet-heron"), 1);
+    assert_eq!(first.channel, "brisk-otter");
+    assert_eq!(second.channel, "quiet-heron");
+}
+
+#[test]
+fn a_send_with_no_key_is_written_every_time() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+
+    // What an older client sends, and what every message written before the
+    // key existed was sent as: no key, and so nothing to deduplicate on.
+    let first = send(&remote, "brisk-otter", &alice, "the same words");
+    let second = send(&remote, "brisk-otter", &alice, "the same words");
+
+    assert_ne!(first.id, second.id);
+    assert_eq!(rows_written(&server, "brisk-otter"), 2);
+}
+
+#[test]
+fn a_key_that_is_not_one_is_refused_and_writes_nothing() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+
+    // A key is looked up and then indexed, so it is held to the shape it is
+    // minted in rather than stored as whatever arrived.
+    let refused = send_with_key(&remote, "brisk-otter", &alice, "hello", "not-a-key")
+        .expect_err("a key that is not one to be refused");
+    let said = refused.to_string();
+    assert!(said.contains("32 lowercase hex characters"), "{said}");
+    assert!(said.contains("\"not-a-key\""), "{said}");
+
+    // Upper case is not the shape either: what is minted is lowercase, and one
+    // shape is what keeps the same key from being two keys.
+    let shouted = saneha::api::mint_id().to_uppercase();
+    send_with_key(&remote, "brisk-otter", &alice, "hello", &shouted)
+        .expect_err("an upper case key to be refused");
+
+    assert_eq!(rows_written(&server, "brisk-otter"), 0);
+}
+
+#[test]
+fn a_field_this_server_has_never_heard_of_is_ignored() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+
+    // What a saneha that predates the key does with the key a newer client
+    // sends it: nothing. Nothing here says `deny_unknown_fields`, so a client
+    // rolled out ahead of the server it talks to loses the deduplication and
+    // keeps the send, which is what makes the two safe to deploy in either
+    // order. A field named here is one this build does not know either.
+    let post = format!("{{\"from\":\"{alice}\",\"body\":\"hello\",\"nonsense\":[1,2,3]}}");
+    let (status, body) = server.raw("POST", "/channels/brisk-otter/messages", post.as_bytes());
+    assert_eq!(status, 201, "{body}");
+    let message: Message = serde_json::from_str(&body).expect("the message shape");
+    assert_eq!(message.body, "hello");
+}
+
+#[test]
+fn the_binary_mints_a_key_for_every_send() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    join(&remote, "brisk-otter", "alice");
+
+    server.run(&["send", "brisk-otter", "first", "--as", "alice"]);
+    server.run(&["send", "brisk-otter", "second", "--as", "alice"]);
+
+    // Every `saneha send` says which message it is, so the request behind it
+    // can be made again; the keys are fresh each time, so two sends are two
+    // messages however alike they are.
+    let database = server.database();
+    let mut statement = database
+        .prepare("SELECT send_key FROM messages WHERE kind = 'message' ORDER BY id")
+        .expect("prepare");
+    let keys: Vec<String> = statement
+        .query_map([], |row| row.get::<_, Option<String>>(0))
+        .expect("read the keys")
+        .map(|key| key.expect("a row").expect("a key on every send"))
+        .collect();
+    assert_eq!(keys.len(), 2);
+    assert_ne!(keys[0], keys[1]);
+    for key in &keys {
+        assert!(saneha::api::is_id(key), "{key} is not a minted key");
+    }
 }

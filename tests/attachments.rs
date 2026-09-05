@@ -66,6 +66,7 @@ fn send_with(
             body: body.to_string(),
             to: Vec::new(),
             attachments: attachments.to_vec(),
+            key: None,
         },
     )
 }
@@ -524,6 +525,79 @@ fn an_attachment_id_that_names_nothing_or_something_else_fails_the_send() {
     assert!(
         failed.to_string().contains("already carried by message #2"),
         "{failed}"
+    );
+}
+
+#[test]
+fn a_send_made_again_under_its_key_still_carries_what_it_bound() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    let workspace = tempfile::tempdir().expect("a directory to attach from");
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+    let path = file(workspace.path(), "handoff.md", b"the handoff\n");
+    let attachment = remote
+        .upload_attachment("brisk-otter", &path)
+        .expect("upload");
+
+    // An attachment belongs to the one message that carries it, so naming it
+    // twice is refused — but a send made again under its own key is not a
+    // second message naming it, it is the first one being asked for again. It
+    // comes back carrying what it bound rather than refused for having bound
+    // it (issue #38).
+    let carrying = NewMessage {
+        from: alice.clone(),
+        body: "the handoff".to_string(),
+        to: Vec::new(),
+        attachments: vec![attachment.id.clone()],
+        key: Some(saneha::api::mint_id()),
+    };
+    let first = remote
+        .send_message("brisk-otter", &carrying)
+        .expect("the send");
+    let again = remote
+        .send_message("brisk-otter", &carrying)
+        .expect("the send made again");
+
+    assert_eq!(again.id, first.id);
+    assert_eq!(again.attachments, first.attachments);
+    assert_eq!(again.attachments.len(), 1);
+    assert_eq!(again.attachments[0].id, attachment.id);
+    assert_eq!(again.attachments[0].filename, "handoff.md");
+
+    // The same file named twice is one attachment on the way in, so a repeat
+    // that says it twice is still the same send.
+    let twice = NewMessage {
+        attachments: vec![attachment.id.clone(), attachment.id.clone()],
+        ..carrying.clone()
+    };
+    let again = remote
+        .send_message("brisk-otter", &twice)
+        .expect("the same attachment named twice is the same send");
+    assert_eq!(again.id, first.id);
+
+    // A repeat that leaves the attachment out is not the same send: it is a
+    // key being reused for a message that carries something else, and being
+    // answered with a message carrying a file it never named would be the
+    // quiet mis-carry that a bound attachment is refused to prevent.
+    let without = NewMessage {
+        attachments: Vec::new(),
+        ..carrying.clone()
+    };
+    let refused = remote
+        .send_message("brisk-otter", &without)
+        .expect_err("a repeat carrying something else to be refused");
+    assert!(refused.to_string().contains("already used in"), "{refused}");
+
+    // One message, and one file under it.
+    let transcript = remote.messages_after("brisk-otter", 0).expect("read");
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|message| !message.attachments.is_empty())
+            .count(),
+        1,
+        "{transcript:?}"
     );
 }
 

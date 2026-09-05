@@ -65,6 +65,7 @@ fn send(remote: &Remote, channel: &str, from: &str, body: &str) -> Message {
                 body: body.to_string(),
                 to: Vec::new(),
                 attachments: Vec::new(),
+                key: None,
             },
         )
         .expect("send")

@@ -735,6 +735,12 @@ fn send(args: SendArgs, me: &IdentityArgs) -> Result<()> {
             body,
             to: args.to,
             attachments,
+            // One key per `saneha send`, so the request behind it can be
+            // made again: a signal landing on the answer costs a round trip
+            // rather than putting the message in the transcript twice (issue
+            // #38). It is minted here rather than inside `Remote`, because
+            // which requests are one message is this invocation's to say.
+            key: Some(crate::api::mint_id()),
         },
     )?;
 

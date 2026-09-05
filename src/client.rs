@@ -259,18 +259,38 @@ impl Remote {
     /// Writes one message. The server works out who it is addressed to and
     /// refuses the whole thing if a mention names nobody, so what comes back
     /// is the message as the transcript now holds it.
+    ///
+    /// This goes through `retrying` because of the send key the message
+    /// carries: a signal can land on the read of the answer to a send the
+    /// server has already written down, and the attempt that follows says
+    /// which message it is, so the server answers with that one rather than
+    /// writing a second. A `NewMessage` with no `key` is written every time it
+    /// arrives, so an interruption on one of those is a message in the
+    /// transcript twice — which is why the CLI mints one for every send
+    /// (issue #38).
+    ///
+    /// The answer is read inside the retry too, and not after it. The read of
+    /// the body is where the interruption that started all this actually
+    /// lands: the request is out, the server has written the message, and the
+    /// signal arrives on the way back. Reading it outside would leave exactly
+    /// that case failing, and a person rerunning `saneha send` after it would
+    /// mint a new key and write the message twice.
     pub fn send_message(&self, channel: &str, message: &NewMessage) -> Result<Message> {
-        // Made once, and not through `retrying`: a signal can land on the
-        // read of the answer to a send the server has already written down,
-        // and making that one again puts the message in the transcript twice
-        // under two ids. An interruption here is reported, as it always was.
-        let response = self.check(
-            self.agent
+        let (status, body) = retrying(|| {
+            let mut response = self
+                .agent
                 .post(self.url(&format!("/channels/{channel}/messages")))
-                .send_json(message)
-                .map_err(|err| self.unreachable(&err))?,
-        )?;
-        read_json(response, "message")
+                .send_json(message)?;
+            let status = response.status();
+            let body = response.body_mut().read_to_vec()?;
+            Ok((status, body))
+        })
+        .map_err(|err| self.unreachable(&err))?;
+
+        if !status.is_success() {
+            return Err(anyhow!(refusal(status, &String::from_utf8_lossy(&body)).0));
+        }
+        parse_json(&body, "message")
     }
 
     /// One page of a transcript: at most `limit` messages after `after`.
@@ -622,12 +642,26 @@ fn read_json<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// The same, for a caller holding the bytes rather than the response: a send
+/// reads its answer inside the retry, so by the time anything is parsed the
+/// response is long since finished with.
+fn parse_json<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Result<T> {
+    serde_json::from_slice(body).map_err(|err| {
+        anyhow!("the saneha server sent a {what} this version does not understand ({err})")
+    })
+}
+
 /// The server's own words when it sends them, a readable fallback when it does
 /// not, and whether the server said the request is worth making again.
 fn server_message(mut response: Response<Body>) -> (String, bool) {
     let status = response.status();
     let body = response.body_mut().read_to_string().unwrap_or_default();
-    if let Ok(api_error) = serde_json::from_str::<ApiError>(&body) {
+    refusal(status, &body)
+}
+
+/// The same, for a caller that has already read the body.
+fn refusal(status: ureq::http::StatusCode, body: &str) -> (String, bool) {
+    if let Ok(api_error) = serde_json::from_str::<ApiError>(body) {
         return (api_error.error, api_error.retry);
     }
     let body = body.trim();
@@ -664,8 +698,11 @@ fn server_message(mut response: Response<Body>) -> (String, bool) {
 /// this is for the reads, and for the writes that land in the same place
 /// however many times they are made — a join, a leave, a close, a cursor that
 /// only moves forward, a delete whose second answer the caller already reads
-/// as gone. The two verbs that create something, `send_message` and
-/// `upload_attachment`, are made once and say so at their call sites.
+/// as gone. A send is one of those now: it carries a key the sender minted, so
+/// a repeat of it is the same message and the server answers with the one it
+/// already wrote. An upload is not: it has no such key, so a second one leaves
+/// a second, unbound attachment behind, and `upload_attachment` is made once
+/// and says so at its call site.
 ///
 /// Nothing but an interruption is retried: every other error is the server's
 /// answer or a real failure to reach it, and is reported in the same words as
@@ -844,25 +881,78 @@ mod tests {
     fn what_cannot_be_repeated_safely_is_made_once() {
         // An interruption is not proof that nothing reached the server: it can
         // land on the read of the answer to a POST the server has already
-        // carried out. Making that one again writes a second message, or
-        // leaves a second attachment, so the two verbs that create something
-        // do not go through `retrying`. The exclusion is the absence of a
+        // carried out. An upload has nothing on it that says which upload it
+        // is, so making that one again leaves a second attachment behind and
+        // it does not go through `retrying`. The exclusion is the absence of a
         // call, which is why this is asserted over the source.
-        for creating in ["pub fn send_message", "pub fn upload_attachment"] {
-            assert!(
-                !body_of(creating).contains("retrying("),
-                "{creating} must not be made again: a second one is a second thing"
-            );
-        }
+        assert!(
+            !body_of("pub fn upload_attachment").contains("retrying("),
+            "an upload must not be made again: a second one is a second file"
+        );
 
         // And the rule says nothing unless the helper is used where repeating
-        // a request only asks the same question twice.
-        for repeatable in ["pub fn messages", "pub fn join", "pub fn set_read_cursor"] {
+        // a request only asks the same question twice. A send is in that list
+        // now: it carries the key its sender minted, so the server answers a
+        // repeat with the message it already wrote (issue #38).
+        for repeatable in [
+            "pub fn messages",
+            "pub fn join",
+            "pub fn set_read_cursor",
+            "pub fn send_message",
+        ] {
             assert!(
                 body_of(repeatable).contains("retrying("),
                 "{repeatable} is safe to make again and should be"
             );
         }
+    }
+
+    #[test]
+    fn a_send_reads_its_answer_inside_the_retry() {
+        // The interruption #38 is about lands on the read of the answer to a
+        // send the server has already carried out, so the read has to be
+        // inside the closure: a body read after `retrying` has returned is one
+        // more place an `EINTR` ends the send, and the rerun that follows
+        // mints another key and writes the message twice. `read_json` takes
+        // the response, so it can only be called outside; the shape that is
+        // wanted reads the body to bytes in the closure and parses after.
+        let send = body_of("pub fn send_message");
+        let retry = send.find("retrying(").expect("a send is retried");
+        let read = send
+            .find("read_to_vec()")
+            .expect("a send reads its own answer");
+        assert!(
+            read > retry,
+            "the answer to a send must be read inside the retry"
+        );
+        assert!(
+            !send.contains("read_json("),
+            "read_json takes the response, so it reads the answer outside the retry"
+        );
+    }
+
+    #[test]
+    fn a_send_a_signal_lands_on_is_made_again_and_is_one_message() {
+        // What `send_message` does when a signal arrives mid-request: the same
+        // body goes again, key and all, and what comes back is the one message
+        // — the id the server answered the attempt that reached it with, not a
+        // second message written by the attempt that followed.
+        let mut attempts = 0;
+        let id = retrying(|| -> Result<i64, ureq::Error> {
+            attempts += 1;
+            if attempts == 1 {
+                return Err(ureq::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "Interrupted system call (os error 4)",
+                )));
+            }
+            // The server deduplicates on the key, so every attempt after the
+            // first answers with the message the first one wrote.
+            Ok(7)
+        })
+        .expect("the send to be made again");
+        assert_eq!(attempts, 2);
+        assert_eq!(id, 7, "a repeat must answer with the message already there");
     }
 
     #[test]

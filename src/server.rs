@@ -636,21 +636,35 @@ async fn participant(
 
 /// One message from a participant, with everyone it is addressed to worked out
 /// from its mentions and from `to`.
+///
+/// A send key makes this safe to ask for twice (issue #38): the second request
+/// writes nothing and answers with the message the first one wrote, under
+/// `200` rather than the `201` that says a message was written just now. It
+/// has to be the same send — the same sender, the same body, the same
+/// attachments — or it is a key being reused for another message, which is a
+/// `409`. A send without a key is written unconditionally, as every send was
+/// before.
 async fn send_message(
     State(serving): State<Arc<Serving>>,
     Path(channel): Path<String>,
     ApiJson(body): ApiJson<NewMessage>,
 ) -> Result<(StatusCode, Json<Message>), Failure> {
-    let message = serving.store.send(
+    let sent = serving.store.send(
         &channel,
         &body.from,
         &body.body,
         &body.to,
         &body.attachments,
+        body.key.as_deref(),
     )?;
+    if !sent.created {
+        // Nothing landed in the transcript, so nobody is waiting on anything
+        // new: the send that did write it woke them.
+        return Ok((StatusCode::OK, Json(sent.message)));
+    }
     // After the write has committed, so everyone woken by it can see it.
     serving.waiters.wake(&channel);
-    Ok((StatusCode::CREATED, Json(message)))
+    Ok((StatusCode::CREATED, Json(sent.message)))
 }
 
 /// One file, uploaded before the message that will carry it.
@@ -1188,6 +1202,7 @@ impl From<StoreError> for Failure {
             | StoreError::InvalidPurpose { .. }
             | StoreError::InvalidRecorded { .. }
             | StoreError::EmptyBody
+            | StoreError::InvalidKey { .. }
             | StoreError::BodyTooLarge { .. }
             | StoreError::NoSuchRecipient { .. }
             | StoreError::EmptyAttachment { .. }
@@ -1203,6 +1218,7 @@ impl From<StoreError> for Failure {
             StoreError::AttachmentGone { .. } => StatusCode::GONE,
             StoreError::ChannelExists(_)
             | StoreError::ChannelClosed { .. }
+            | StoreError::KeyReused { .. }
             | StoreError::ParticipantChanged { .. }
             | StoreError::AttachmentBound { .. }
             | StoreError::SuffixExhausted { .. } => StatusCode::CONFLICT,

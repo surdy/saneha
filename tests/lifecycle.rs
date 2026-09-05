@@ -73,6 +73,7 @@ fn send(remote: &Remote, channel: &str, from: &str, body: &str) -> Message {
                 body: body.to_string(),
                 to: Vec::new(),
                 attachments: Vec::new(),
+                key: None,
             },
         )
         .expect("send")
@@ -600,6 +601,7 @@ fn a_delete_without_yes_says_what_would_go_and_removes_nothing() {
                 body: "the handoff".to_string(),
                 to: Vec::new(),
                 attachments: vec![attachment.id.clone()],
+                key: None,
             },
         )
         .expect("send with an attachment");
@@ -647,6 +649,7 @@ fn a_delete_removes_the_rows_and_the_files() {
                 body: "the handoff".to_string(),
                 to: Vec::new(),
                 attachments: vec![attachment.id.clone()],
+                key: None,
             },
         )
         .expect("send with an attachment");
