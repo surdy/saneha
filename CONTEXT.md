@@ -84,6 +84,10 @@ A message with no recipients, meaning it is for everyone in the channel.
 A file carried with a message and stored by the server.
 _Avoid_: upload, file, blob
 
+**Send key**:
+A value the sender puts on a send so that making the same request again yields the same message, not a second one.
+_Avoid_: idempotency key, nonce, request id
+
 ### Reading and waiting
 
 **Read cursor**:
