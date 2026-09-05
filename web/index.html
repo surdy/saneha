@@ -552,7 +552,10 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   /// what it can match against them rather than guessing at its own rules;
   /// `@all` is expanded by the server, so it is recognised by name.
   function mentions(escaped, mentionable) {
-    return escaped.replace(/(^|\s)@([a-z0-9-]+(?:@[a-z0-9-]+)?)(?![\w./-])/gi, (whole, before, who) => {
+    // A mention runs to the end of a name, so a full stop after one is a full
+    // stop; a slash after one is a package scope, and `@types/node` in prose
+    // is not somebody being addressed.
+    return escaped.replace(/(^|\s)@([a-z0-9-]+(?:@[a-z0-9-]+)?)(?![\w/-])/gi, (whole, before, who) => {
       if (!mentionable.has(who.toLowerCase())) return whole;
       return before + '<span class="mention">@' + who + "</span>";
     });
@@ -673,6 +676,13 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     )).join("");
   }
 
+  /// Everything about the channel being read, drawn from what is in hand.
+  function draw() {
+    renderChannelHead();
+    renderPeople();
+    renderTranscript();
+  }
+
   function renderChannelHead() {
     const closed = state.detail && state.detail.state === "closed";
     ui.channelName.textContent = state.current || "no channel";
@@ -734,14 +744,20 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   /// it appears in a CLI `wait`.
   async function follow(channel, generation) {
     let backoff = 1000;
+    // Whether this run has caught up and drawn once. Every run does, before it
+    // holds anything open: a follower started by a close, by a tab coming back
+    // or by a failed poll would otherwise show what was true a minute ago
+    // until its own poll came back.
+    let caughtUp = false;
     const stale = () => generation !== state.generation || channel !== state.current;
 
     while (!stale()) {
       try {
         if (document.hidden) { ui.status.textContent = "Paused while this tab is in the background."; return; }
 
-        // History first, a page at a time, until the end of the transcript.
-        if (state.lastId === 0) {
+        if (!caughtUp) {
+          // History, a page at a time, until the end of the transcript — and
+          // nothing at all when this run is picking up where another left off.
           for (;;) {
             const data = await api("/channels/" + enc(channel) + "/messages?after=" + state.lastId + "&limit=" + PAGE);
             if (stale()) return;
@@ -751,9 +767,8 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
           }
           await refreshSide(channel);
           if (stale()) return;
-          renderChannelHead();
-          renderPeople();
-          renderTranscript();
+          draw();
+          caughtUp = true;
         }
         backoff = 1000;
 
@@ -771,9 +786,7 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
         // one — so the panel is refreshed on the same beat as the poll.
         await refreshSide(channel);
         if (stale()) return;
-        renderChannelHead();
-        renderPeople();
-        renderTranscript();
+        draw();
         if (data) renderChannels();
       } catch (failure) {
         if (stale()) return;
