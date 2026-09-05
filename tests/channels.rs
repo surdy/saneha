@@ -4,9 +4,12 @@
 
 use std::process::{Command, Stdio};
 
+use saneha::api::{Channel, JoinRequest, NewMessage};
+use saneha::client::{JoinAnswer, Remote};
+
 mod support;
 
-use support::TestServer;
+use support::{stdout_of, TestServer};
 
 #[test]
 fn creates_channels_with_minted_and_given_names() {
@@ -90,7 +93,7 @@ fn a_purpose_that_is_not_one_line_fails_clearly() {
     }
 
     // Nothing was written on the way to any of those errors.
-    assert!(remote.list_channels().expect("list").is_empty());
+    assert!(remote.list_channels(None).expect("list").is_empty());
 
     let rejected = server.run(&["new", "brisk-otter", "--purpose", "line one\nline two"]);
     assert!(!rejected.status.success());
@@ -143,7 +146,7 @@ fn lists_channels_with_state_and_purpose() {
     let server = TestServer::start();
     let remote = server.remote();
 
-    assert!(remote.list_channels().expect("list").is_empty());
+    assert!(remote.list_channels(None).expect("list").is_empty());
 
     remote
         .create_channel(Some("brisk-otter"), Some("coordinating the refactor"))
@@ -152,7 +155,7 @@ fn lists_channels_with_state_and_purpose() {
         .create_channel(Some("quiet-heron"), None)
         .expect("create");
 
-    let channels = remote.list_channels().expect("list");
+    let channels = remote.list_channels(None).expect("list");
     assert_eq!(channels.len(), 2);
 
     let otter = channels
@@ -268,4 +271,191 @@ fn subcommands_report_an_unreachable_server() {
         stderr.starts_with("saneha: cannot reach the saneha server at http://127.0.0.1:1"),
         "{stderr}"
     );
+}
+
+/// Joins `name` on this host and returns the identity granted.
+fn join(remote: &Remote, channel: &str, name: &str) -> String {
+    let request = JoinRequest {
+        name: name.to_string(),
+        host: saneha::identity::host(saneha::store::HOST.max),
+        harness: "claude".to_string(),
+        session_id: None,
+        pid: None,
+        pid_started_at: None,
+        cwd: Some("/repos/saneha".to_string()),
+        madari_pane: None,
+        same_host_session_live: false,
+        held_session_id: None,
+    };
+    match remote.join(channel, &request).expect("join") {
+        JoinAnswer::Granted(joined) => joined.identity,
+        JoinAnswer::Stale(message) => panic!("{message}"),
+    }
+}
+
+fn send(remote: &Remote, channel: &str, from: &str, body: &str) {
+    remote
+        .send_message(
+            channel,
+            &NewMessage {
+                from: from.to_string(),
+                body: body.to_string(),
+                to: Vec::new(),
+                attachments: Vec::new(),
+                key: None,
+            },
+        )
+        .expect("send");
+}
+
+fn named<'a>(channels: &'a [Channel], name: &str) -> &'a Channel {
+    channels
+        .iter()
+        .find(|c| c.name == name)
+        .expect("the channel is listed")
+}
+
+/// The newest id of one channel, as a listing reports it.
+fn newest(remote: &Remote, name: &str) -> i64 {
+    named(&remote.list_channels(None).expect("list"), name).newest_id
+}
+
+#[test]
+fn a_channel_carries_the_newest_message_id() {
+    let server = TestServer::start();
+    let remote = server.remote();
+
+    let created = remote
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    assert_eq!(created.newest_id, 0, "an empty transcript has no newest id");
+    assert_eq!(newest(&remote, "brisk-otter"), 0);
+
+    // A join is a system message, so it is message 1: a wait returns on it and
+    // a read advances over it, so the newest id has to count it.
+    let alice = join(&remote, "brisk-otter", "alice");
+    assert_eq!(newest(&remote, "brisk-otter"), 1);
+
+    send(&remote, "brisk-otter", &alice, "the tests pass");
+    send(&remote, "brisk-otter", &alice, "and again");
+    assert_eq!(newest(&remote, "brisk-otter"), 3);
+
+    // Every shape a channel is serialised in says the same thing.
+    assert_eq!(
+        remote
+            .channel_detail("brisk-otter")
+            .expect("detail")
+            .channel
+            .newest_id,
+        3
+    );
+
+    // A leave is a system message too, and so is the close.
+    remote.leave("brisk-otter", &alice).expect("leave");
+    assert_eq!(newest(&remote, "brisk-otter"), 4);
+
+    let closed = remote
+        .close_channel("brisk-otter", "surdy@web")
+        .expect("close");
+    assert_eq!(closed.channel.newest_id, 5);
+    assert_eq!(newest(&remote, "brisk-otter"), 5);
+}
+
+#[test]
+fn asking_as_somebody_carries_their_read_cursor() {
+    let server = TestServer::start();
+    let remote = server.remote();
+
+    remote
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    remote
+        .create_channel(Some("quiet-heron"), None)
+        .expect("create");
+
+    let alice = join(&remote, "brisk-otter", "alice");
+    send(&remote, "brisk-otter", &alice, "the tests pass");
+    send(&remote, "brisk-otter", &alice, "and again");
+    remote
+        .set_read_cursor("brisk-otter", &alice, 2)
+        .expect("advance the cursor");
+
+    // Without `as` a channel carries no cursor at all.
+    for channel in remote.list_channels(None).expect("list") {
+        assert!(channel.read_cursor.is_none(), "{}", channel.name);
+    }
+
+    let listed = remote.list_channels(Some(&alice)).expect("list as alice");
+    let otter = named(&listed, "brisk-otter");
+    assert_eq!(otter.read_cursor, Some(2));
+    assert_eq!(otter.newest_id, 3, "one join and two messages");
+
+    // A channel alice has not joined carries no cursor of hers, and that is
+    // not an error: it is what the viewer draws as unjoined.
+    assert_eq!(named(&listed, "quiet-heron").read_cursor, None);
+
+    // An identity that is a participant nowhere lists every channel all the
+    // same.
+    let stranger = format!("nobody@{}", saneha::identity::host(saneha::store::HOST.max));
+    let listed = remote
+        .list_channels(Some(&stranger))
+        .expect("list as a stranger");
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().all(|c| c.read_cursor.is_none()));
+
+    // Asking moved nothing: only a read does that (ADR-0004).
+    assert_eq!(
+        remote
+            .participant("brisk-otter", &alice)
+            .expect("look up the participant")
+            .expect("the participant is there")
+            .read_cursor,
+        2
+    );
+}
+
+#[test]
+fn an_as_that_is_not_an_identity_fails_clearly() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    remote
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+
+    for as_identity in ["alice", "alice%40", "alice@", "@laptop", ""] {
+        let (status, body) = server.raw("GET", &format!("/channels?as={as_identity}"), b"");
+        assert_eq!(status, 400, "{as_identity:?} answered {status}: {body}");
+        assert_eq!(body.lines().count(), 1, "{body}");
+        assert!(
+            body.contains("identity") || body.contains("lowercase letters"),
+            "unhelpful message for {as_identity:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn the_binary_lists_the_newest_id_and_the_unread_count() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    remote
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+
+    let alice = join(&remote, "brisk-otter", "alice");
+    send(&remote, "brisk-otter", &alice, "the tests pass");
+
+    let plain = stdout_of("list", &server.run(&["list"]));
+    let header = plain.lines().next().expect("a header");
+    assert!(header.contains("NEWEST"), "{plain}");
+    assert!(!header.contains("UNREAD"), "{plain}");
+
+    let asked = stdout_of("list --as alice", &server.run(&["list", "--as", "alice"]));
+    let lines: Vec<&str> = asked.lines().collect();
+    assert!(
+        lines[0].contains("NEWEST") && lines[0].contains("UNREAD"),
+        "{asked}"
+    );
+    // The join and the message are both unread, out of a newest id of 2.
+    let cells: Vec<&str> = lines[1].split_whitespace().collect();
+    assert_eq!(cells, vec!["brisk-otter", "open", "2", "2", "-"], "{asked}");
 }

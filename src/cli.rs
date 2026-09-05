@@ -374,7 +374,7 @@ pub fn execute(cli: Cli) -> Result<ExitCode> {
     match command {
         Command::Serve(args) => done(serve(args)),
         Command::New(args) => done(new(args)),
-        Command::List(args) => done(list(args)),
+        Command::List(args) => done(list(args, &identity)),
         Command::Join(args) => done(join(args, &identity)),
         Command::Participants(args) => done(participants(args)),
         Command::Send(args) => done(send(args, &identity)),
@@ -513,15 +513,35 @@ fn new(args: NewArgs) -> Result<()> {
     }
 }
 
-fn list(args: ListArgs) -> Result<()> {
+/// Every channel, with the newest message id in each, and — when `--as` or
+/// `SANEHA_AS` names somebody — how much of each that identity has not read.
+///
+/// `list` has no participant behind it: it does not join, and asking as
+/// somebody who has joined nothing is a listing with no unread column filled
+/// in rather than an error. So the identity is only taken when it was given,
+/// never derived from the project and the harness.
+fn list(args: ListArgs, me: &IdentityArgs) -> Result<()> {
     let remote = Remote::from_env()?;
-    let channels = remote.list_channels()?;
+    let identity = given_identity(me)?;
+    let channels = remote.list_channels(identity.as_deref())?;
     if args.json {
         return say(&serde_json::to_string_pretty(&crate::api::ChannelList {
             channels,
         })?);
     }
-    write_out(&channel_table(&channels))
+    write_out(&channel_table(&channels, identity.is_some()))
+}
+
+/// The identity `--as` or `SANEHA_AS` names on this host, and `None` when
+/// neither did.
+fn given_identity(me: &IdentityArgs) -> Result<Option<String>> {
+    let Some(name) = trimmed(me.as_name.as_deref()) else {
+        return Ok(None);
+    };
+    store::validate_participant_name(&name)?;
+    let host = identity::host(store::HOST.max);
+    store::validate_host(&host)?;
+    Ok(Some(store::identity_of(&name, &host)))
 }
 
 /// Who this command is: the identity a join would claim, worked out the same
@@ -1262,36 +1282,52 @@ fn warn(line: &str) {
 }
 
 /// The `list` output: aligned columns, purpose last so it can run long.
-fn channel_table(channels: &[Channel]) -> String {
+/// The `saneha list` table. `unread` adds a column of what the identity that
+/// was asked about has not read — the newest message id less its read cursor,
+/// and `-` where it has not joined that channel at all.
+fn channel_table(channels: &[Channel], unread: bool) -> String {
     if channels.is_empty() {
         return "No channels yet. Create one with: saneha new\n".to_string();
     }
 
-    let name_width = channels
-        .iter()
-        .map(|c| c.name.chars().count())
-        .chain(std::iter::once("NAME".len()))
-        .max()
-        .unwrap_or(4);
-    let state_width = channels
-        .iter()
-        .map(|c| c.state.as_str().len())
-        .chain(std::iter::once("STATE".len()))
-        .max()
-        .unwrap_or(5);
+    let unread_of = |channel: &Channel| match channel.read_cursor {
+        Some(cursor) => (channel.newest_id - cursor).max(0).to_string(),
+        None => "-".to_string(),
+    };
+    let width = |header: &str, cell: &dyn Fn(&Channel) -> String| {
+        channels
+            .iter()
+            .map(|c| cell(c).chars().count())
+            .chain(std::iter::once(header.chars().count()))
+            .max()
+            .unwrap_or(header.len())
+    };
+    let name_width = width("NAME", &|c: &Channel| c.name.clone());
+    let state_width = width("STATE", &|c: &Channel| c.state.as_str().to_string());
+    let newest_width = width("NEWEST", &|c: &Channel| c.newest_id.to_string());
+    let unread_width = width("UNREAD", &unread_of);
 
-    let mut out = format!(
-        "{:name_width$}  {:state_width$}  {}\n",
-        "NAME", "STATE", "PURPOSE"
-    );
-    for channel in channels {
-        let purpose = channel.purpose.as_deref().unwrap_or("-");
+    let mut out = String::new();
+    let mut row = |name: &str, state: &str, newest: &str, unread_cell: &str, purpose: &str| {
         out.push_str(&format!(
-            "{:name_width$}  {:state_width$}  {}\n",
-            channel.name,
-            channel.state.as_str(),
-            purpose
+            "{name:name_width$}  {state:state_width$}  {newest:newest_width$}  "
         ));
+        if unread {
+            out.push_str(&format!("{unread_cell:unread_width$}  "));
+        }
+        out.push_str(purpose);
+        out.push('\n');
+    };
+
+    row("NAME", "STATE", "NEWEST", "UNREAD", "PURPOSE");
+    for channel in channels {
+        row(
+            &channel.name,
+            channel.state.as_str(),
+            &channel.newest_id.to_string(),
+            &unread_of(channel),
+            channel.purpose.as_deref().unwrap_or("-"),
+        );
     }
     out
 }
@@ -1471,6 +1507,8 @@ mod tests {
             state: ChannelState::Open,
             created_at: "2026-09-04T09:00:00Z".to_string(),
             closed_at: None,
+            newest_id: 0,
+            read_cursor: None,
         }
     }
 
@@ -1483,17 +1521,20 @@ mod tests {
     #[test]
     fn empty_listing_says_so() {
         assert_eq!(
-            channel_table(&[]),
+            channel_table(&[], false),
             "No channels yet. Create one with: saneha new\n"
         );
     }
 
     #[test]
     fn listing_aligns_on_the_longest_name() {
-        let table = channel_table(&[
-            channel("brisk-otter", Some("the refactor")),
-            channel("a-much-longer-channel", None),
-        ]);
+        let table = channel_table(
+            &[
+                channel("brisk-otter", Some("the refactor")),
+                channel("a-much-longer-channel", None),
+            ],
+            false,
+        );
         let lines: Vec<&str> = table.lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].starts_with("NAME "), "{:?}", lines[0]);

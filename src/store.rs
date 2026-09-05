@@ -576,6 +576,8 @@ impl Store {
                 state: ChannelState::Open,
                 created_at,
                 closed_at: None,
+                newest_id: 0,
+                read_cursor: None,
             }),
             Err(err) if is_unique_violation(&err) => {
                 Err(StoreError::ChannelExists(name.to_string()))
@@ -585,15 +587,47 @@ impl Store {
     }
 
     /// Every channel, oldest first.
-    pub fn list_channels(&self) -> Result<Vec<Channel>, StoreError> {
+    ///
+    /// `as_identity` asks for one thing more: the read cursor that identity's
+    /// participant holds in each channel, so a viewer can draw an unread badge
+    /// per channel from one request. It is a read and only a read — ADR-0004
+    /// says only `read` moves a cursor — and an identity that is a participant
+    /// nowhere is not an error, it is a listing with no cursor on any channel.
+    ///
+    /// The cursor comes from a correlated subquery rather than a join, so a
+    /// channel is still one row whether or not that identity is in it.
+    pub fn list_channels(&self, as_identity: Option<&str>) -> Result<Vec<Channel>, StoreError> {
         let conn = self.conn();
-        let mut statement = conn.prepare(
-            "SELECT name, purpose, state, created_at, closed_at FROM channels ORDER BY created_at, id",
-        )?;
-        let rows = statement.query_map([], read_row)?;
+        let Some(identity) = as_identity else {
+            let mut statement = conn.prepare(&format!(
+                "SELECT {CHANNEL_COLUMNS} FROM channels ORDER BY created_at, id"
+            ))?;
+            let rows = statement.query_map([], read_row)?;
+            return rows
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(build_channel)
+                .collect();
+        };
+
+        validate_identity(identity)?;
+        let mut statement = conn.prepare(&format!(
+            "SELECT {CHANNEL_COLUMNS},
+                    (SELECT read_cursor FROM participants
+                      WHERE participants.channel_id = channels.id
+                        AND participants.identity = ?1)
+               FROM channels ORDER BY created_at, id"
+        ))?;
+        let rows = statement.query_map([identity], |row| {
+            Ok((read_row(row)?, row.get::<_, Option<i64>>(6)?))
+        })?;
         rows.collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .map(build_channel)
+            .map(|(row, read_cursor)| {
+                let mut channel = build_channel(row)?;
+                channel.read_cursor = read_cursor;
+                Ok(channel)
+            })
             .collect()
     }
 
@@ -602,7 +636,7 @@ impl Store {
         let conn = self.conn();
         let row = conn
             .query_row(
-                "SELECT name, purpose, state, created_at, closed_at FROM channels WHERE name = ?1",
+                &format!("SELECT {CHANNEL_COLUMNS} FROM channels WHERE name = ?1"),
                 [name],
                 read_row,
             )
@@ -826,7 +860,7 @@ impl Store {
             )?;
         }
         let row = tx.query_row(
-            "SELECT name, purpose, state, created_at, closed_at FROM channels WHERE id = ?1",
+            &format!("SELECT {CHANNEL_COLUMNS} FROM channels WHERE id = ?1"),
             [channel_id],
             read_row,
         )?;
@@ -844,7 +878,7 @@ impl Store {
         let conn = self.conn();
         let channel_id = channel_id(&conn, channel)?;
         let row = conn.query_row(
-            "SELECT name, purpose, state, created_at, closed_at FROM channels WHERE id = ?1",
+            &format!("SELECT {CHANNEL_COLUMNS} FROM channels WHERE id = ?1"),
             [channel_id],
             read_row,
         )?;
@@ -2264,7 +2298,13 @@ fn echo(value: &str) -> String {
     format!("{head}...")
 }
 
-type ChannelRow = (String, Option<String>, String, String, Option<String>);
+/// Every column a [`Channel`] is built from, in the order [`read_row`] reads
+/// them. `last_message_id` is the allocator the schema already keeps, and is
+/// the channel's newest message id read straight off the row rather than
+/// counted out of the transcript.
+const CHANNEL_COLUMNS: &str = "name, purpose, state, created_at, closed_at, last_message_id";
+
+type ChannelRow = (String, Option<String>, String, String, Option<String>, i64);
 
 fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelRow> {
     Ok((
@@ -2273,11 +2313,12 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelRow> {
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
+        row.get(5)?,
     ))
 }
 
 fn build_channel(row: ChannelRow) -> Result<Channel, StoreError> {
-    let (name, purpose, state, created_at, closed_at) = row;
+    let (name, purpose, state, created_at, closed_at, newest_id) = row;
     Ok(Channel {
         name,
         purpose,
@@ -2286,6 +2327,8 @@ fn build_channel(row: ChannelRow) -> Result<Channel, StoreError> {
             .map_err(|_| StoreError::UnknownChannelState(state.clone()))?,
         created_at,
         closed_at,
+        newest_id,
+        read_cursor: None,
     })
 }
 
@@ -2396,7 +2439,7 @@ mod tests {
             .create_channel(Some("brisk-otter"), Some("line one\nline two"))
             .expect_err("multi-line purpose");
         assert!(matches!(err, StoreError::InvalidPurpose { .. }), "{err}");
-        assert!(store.list_channels().expect("list").is_empty());
+        assert!(store.list_channels(None).expect("list").is_empty());
     }
 
     #[test]
@@ -2422,7 +2465,7 @@ mod tests {
             .expect_err("duplicate");
         assert!(matches!(err, StoreError::ChannelExists(_)), "{err}");
 
-        let channels = store.list_channels().expect("list");
+        let channels = store.list_channels(None).expect("list");
         assert_eq!(channels.len(), 2);
         assert!(channels.iter().any(|c| c.name == "brisk-otter"));
     }
@@ -2439,7 +2482,7 @@ mod tests {
         drop(store);
 
         let store = Store::open(&path).expect("second open");
-        assert_eq!(store.list_channels().expect("list").len(), 1);
+        assert_eq!(store.list_channels(None).expect("list").len(), 1);
         assert!(store.channel("quiet-heron").expect("lookup").is_some());
         assert!(store.channel("nobody-here").expect("lookup").is_none());
     }
@@ -2834,6 +2877,7 @@ mod tests {
             "paused".to_string(),
             "2026-09-04T09:00:00Z".to_string(),
             None,
+            0,
         );
         let err = build_channel(row).expect_err("unknown state");
         assert!(
@@ -2847,6 +2891,7 @@ mod tests {
             "closed".to_string(),
             "2026-09-04T09:00:00Z".to_string(),
             Some("2026-09-04T10:00:00Z".to_string()),
+            7,
         );
         assert_eq!(
             build_channel(known).expect("closed is understood").state,

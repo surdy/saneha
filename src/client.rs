@@ -136,10 +136,20 @@ impl Remote {
     }
 
     /// Every channel the server knows about.
-    pub fn list_channels(&self) -> Result<Vec<Channel>> {
+    /// Every channel. `as_identity` asks for each channel to carry that
+    /// identity's read cursor as well, which is what an unread count is worked
+    /// out from; it moves nothing.
+    pub fn list_channels(&self, as_identity: Option<&str>) -> Result<Vec<Channel>> {
         let response = self.check(
-            retrying(|| self.agent.get(self.url("/channels")).call())
-                .map_err(|err| self.unreachable(&err))?,
+            retrying(|| match as_identity {
+                Some(identity) => self
+                    .agent
+                    .get(self.url("/channels"))
+                    .query("as", identity)
+                    .call(),
+                None => self.agent.get(self.url("/channels")).call(),
+            })
+            .map_err(|err| self.unreachable(&err))?,
         )?;
         let list: ChannelList = read_json(response, "channel list")?;
         Ok(list.channels)
