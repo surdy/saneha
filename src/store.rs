@@ -592,7 +592,7 @@ impl Store {
     /// participant holds in each channel, so a viewer can draw an unread badge
     /// per channel from one request. It is a read and only a read — ADR-0004
     /// says only `read` moves a cursor — and an identity that is a participant
-    /// nowhere is not an error, it is a listing where every cursor is null.
+    /// nowhere is not an error, it is a listing with no cursor on any channel.
     ///
     /// The cursor comes from a correlated subquery rather than a join, so a
     /// channel is still one row whether or not that identity is in it.

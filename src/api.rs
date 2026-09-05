@@ -59,9 +59,15 @@ pub struct Channel {
     #[serde(default)]
     pub newest_id: i64,
     /// The read cursor of the identity `GET /channels?as=<identity>` asked
-    /// about, in this channel. Null when that identity has not joined this
-    /// one, and absent altogether when nobody was asked about: this is a read
-    /// of what ADR-0004 already stores and moves nothing.
+    /// about, in this channel: a read of what ADR-0004 already stores, which
+    /// moves nothing.
+    ///
+    /// Absent from the JSON in both of the cases where there is none — nobody
+    /// was asked about, and the identity that was asked about has not joined
+    /// this channel — because a field that is not there is the one shape a
+    /// reader has to handle anyway, and `null` beside it would be a second
+    /// spelling of the same absence. So a cursor is a number when there is one
+    /// and missing when there is not, and there is nothing else it can be.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_cursor: Option<i64>,
 }
