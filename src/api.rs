@@ -193,6 +193,29 @@ impl std::str::FromStr for MessageKind {
     }
 }
 
+/// A file carried with a message and stored by the server.
+///
+/// The id is 128 random bits as 32 hex characters, minted by the server on
+/// upload. It is random rather than the row id because the id is the whole of
+/// what a fetch needs: an id that could be guessed by counting would hand
+/// anyone who can reach the server the attachments of channels they were never
+/// given the name of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// 32 lowercase hex characters.
+    pub id: String,
+    /// The basename it was uploaded under, as [`attachment_filename`] leaves
+    /// it.
+    pub filename: String,
+    /// The size of the stored file, in bytes.
+    pub size: u64,
+    /// What the uploader said it is, or [`DEFAULT_CONTENT_TYPE`].
+    pub content_type: String,
+    /// RFC 3339, UTC: when it was uploaded, which is not when the message
+    /// carrying it was written.
+    pub created_at: String,
+}
+
 /// A message as the server describes it. Ids increase within a channel, so a
 /// read cursor is a number in this sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +234,12 @@ pub struct Message {
     pub recipients: Vec<String>,
     /// Markdown, as it was written.
     pub body: String,
+    /// The files carried with this message, in the order they were uploaded.
+    /// It arrived after the rest of a message did, so a server that does not
+    /// send it reads as a message carrying nothing rather than as a message
+    /// this build cannot understand.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
     /// RFC 3339, UTC.
     pub created_at: String,
 }
@@ -256,6 +285,12 @@ pub struct NewMessage {
     pub body: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to: Vec<String>,
+    /// The attachments this message carries, by the ids
+    /// `POST /channels/{name}/attachments` handed back. An id that names
+    /// nothing in this channel, or one another message already carries, fails
+    /// the whole send.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
 }
 
 /// The body of `GET /channels/{name}/messages`.
@@ -346,6 +381,120 @@ pub fn body_too_large(size: usize) -> String {
     )
 }
 
+/// The most an attachment may be, in bytes. Both sides hold callers to it: the
+/// subcommand from the file's own size, so nothing too large is uploaded at
+/// all, and the server as the bytes arrive, because it is the one that must be
+/// right.
+pub const MAX_ATTACHMENT: u64 = 25 * 1024 * 1024;
+
+/// Why an attachment was refused, in the one wording both sides use.
+pub fn attachment_too_large(size: u64) -> String {
+    format!(
+        "an attachment is at most {MAX_ATTACHMENT} bytes and this one is {size}; \
+         send a smaller file"
+    )
+}
+
+/// Why an empty file was refused, in the one wording both sides use.
+pub fn attachment_is_empty(filename: &str) -> String {
+    format!("{filename:?} is empty, and an empty file is not worth attaching")
+}
+
+/// The header an upload carries its filename in. The body of that request is
+/// the file itself, so the name it had travels alongside it rather than in it.
+///
+/// The value is percent-encoded by [`encode_filename`]. A header value is
+/// bytes and is read as ASCII by most of what handles one, and a filename is
+/// whatever language it was written in: `résumé.md` and `設計.md` are names,
+/// and they have to arrive as themselves.
+pub const FILENAME_HEADER: &str = "x-saneha-filename";
+
+/// What an attachment is stored as when the uploader does not say what it is.
+pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
+
+/// The longest filename saneha will store, or write out again.
+pub const MAX_FILENAME: usize = 128;
+
+/// A filename as saneha will store it and as a fetch will write it: the
+/// basename alone, with no path separators, no control characters, nothing
+/// that would end a quoted header value, and no longer than [`MAX_FILENAME`]
+/// characters. `None` when nothing usable is left of it.
+///
+/// Both sides run it, and the subcommand runs it twice. On the way out,
+/// because the name that crosses the wire should already be a name; on the
+/// server, because that name was chosen by somebody else; and on the way back,
+/// because a stored name becomes a path on this machine.
+pub fn attachment_filename(raw: &str) -> Option<String> {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or_default();
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '"' | '\\' | '/'))
+        .take(MAX_FILENAME)
+        .collect();
+    let cleaned = cleaned.trim();
+    // `.` and `..` name directories, wherever they are written; everything
+    // else that survives the filter is a filename.
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        return None;
+    }
+    Some(cleaned.to_string())
+}
+
+/// A filename as it travels in a header: percent-encoded, so a name in any
+/// language survives a hop that only carries bytes a header may hold.
+///
+/// Everything but the unreserved characters is encoded, `%` included, so
+/// encoding and decoding are exact inverses and a name with a `%` in it comes
+/// back as it went. This is the `value-chars` of RFC 8187, which is what
+/// `filename*=UTF-8''...` in a `Content-Disposition` is made of, so one
+/// encoder does both headers.
+pub fn encode_filename(name: &str) -> String {
+    let mut encoded = String::with_capacity(name.len());
+    for byte in name.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(*byte as char);
+        } else {
+            use std::fmt::Write;
+            // Writing to a String cannot fail.
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+/// The inverse, as forgiving as a reader has to be: a `%` that does not start
+/// a pair of hex digits is the character it is, and bytes that turn out not to
+/// be UTF-8 are replaced rather than refused. What comes out still goes
+/// through [`attachment_filename`] before it is used for anything.
+pub fn decode_filename(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        // Both halves have to be hex digits and nothing else: parsing a pair
+        // as a number would take `+A` as ten, and `%+A` is three characters of
+        // a filename rather than a newline.
+        let pair = (index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit())
+        .then(|| std::str::from_utf8(&bytes[index + 1..index + 3]).ok())
+        .flatten()
+        .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match (byte, pair) {
+            (b'%', Some(decoded_byte)) => {
+                decoded.push(decoded_byte);
+                index += 3;
+            }
+            _ => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
 /// The one sentence every verb uses when the caller is acting as somebody who
 /// has not joined the channel: the server when it refuses a send, the
 /// subcommand when it looks at the participants and does not find itself. It
@@ -389,6 +538,7 @@ mod tests {
             about: None,
             recipients: recipients.iter().map(|to| (*to).to_string()).collect(),
             body: "the tests pass".to_string(),
+            attachments: Vec::new(),
             created_at: "2026-09-04T09:00:00Z".to_string(),
         }
     }
@@ -420,5 +570,94 @@ mod tests {
         assert!(message(MessageKind::Close, &[]).wakes(ME));
         assert!(!message(MessageKind::Join, &[]).wakes(ME));
         assert!(!message(MessageKind::Leave, &[]).wakes(ME));
+    }
+
+    #[test]
+    fn a_filename_is_the_basename_and_nothing_else() {
+        assert_eq!(
+            attachment_filename("/etc/passwd").as_deref(),
+            Some("passwd")
+        );
+        assert_eq!(
+            attachment_filename("../../../etc/passwd").as_deref(),
+            Some("passwd")
+        );
+        assert_eq!(
+            attachment_filename("C:\\Windows\\notes.md").as_deref(),
+            Some("notes.md")
+        );
+        assert_eq!(
+            attachment_filename("handoff.md").as_deref(),
+            Some("handoff.md")
+        );
+        assert_eq!(
+            attachment_filename(".gitignore").as_deref(),
+            Some(".gitignore")
+        );
+    }
+
+    #[test]
+    fn a_filename_that_would_end_a_header_or_a_line_is_cleaned_of_it() {
+        assert_eq!(
+            attachment_filename("no\"quotes\".md").as_deref(),
+            Some("noquotes.md")
+        );
+        assert_eq!(
+            attachment_filename("one\nline\ronly.md").as_deref(),
+            Some("onelineonly.md")
+        );
+        assert_eq!(attachment_filename("nul\0byte").as_deref(), Some("nulbyte"));
+    }
+
+    #[test]
+    fn a_filename_that_is_not_one_is_refused() {
+        assert_eq!(attachment_filename(""), None);
+        assert_eq!(attachment_filename("   "), None);
+        assert_eq!(attachment_filename("."), None);
+        assert_eq!(attachment_filename(".."), None);
+        assert_eq!(attachment_filename("/"), None);
+        assert_eq!(attachment_filename("some/directory/"), None);
+    }
+
+    #[test]
+    fn a_filename_in_any_script_survives_a_header() {
+        for name in [
+            "handoff.md",
+            "résumé.md",
+            "設計メモ.md",
+            "100%-done.md",
+            "a b;c\"d.md",
+        ] {
+            let encoded = encode_filename(name);
+            assert!(
+                encoded.is_ascii() && !encoded.contains([' ', ';', '"']),
+                "{encoded}"
+            );
+            assert_eq!(decode_filename(&encoded), name);
+        }
+    }
+
+    #[test]
+    fn decoding_takes_what_it_is_given() {
+        // A name that was never encoded is the name it is.
+        assert_eq!(decode_filename("handoff.md"), "handoff.md");
+        // A stray `%` is a character, not the start of anything.
+        assert_eq!(decode_filename("100% done.md"), "100% done.md");
+        assert_eq!(decode_filename("ends-in-%"), "ends-in-%");
+        assert_eq!(decode_filename("%zz.md"), "%zz.md");
+        // Only hex digits are a pair: a number parser would read `+A` as ten
+        // and turn three characters of a name into a newline.
+        assert_eq!(decode_filename("a%+Ab.md"), "a%+Ab.md");
+        assert_eq!(decode_filename("a% Ab.md"), "a% Ab.md");
+        // Bytes that are not UTF-8 are replaced rather than refused, and what
+        // comes out still goes through `attachment_filename`.
+        assert!(!decode_filename("%FF%FE.md").is_empty());
+    }
+
+    #[test]
+    fn a_filename_is_no_longer_than_the_cap() {
+        let long = format!("{}.md", "a".repeat(500));
+        let cleaned = attachment_filename(&long).expect("a filename");
+        assert_eq!(cleaned.chars().count(), MAX_FILENAME);
     }
 }

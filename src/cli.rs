@@ -52,6 +52,8 @@ pub enum Command {
     Read(ReadArgs),
     /// Block until this participant has something unread, or the channel closes
     Wait(WaitArgs),
+    /// Download an attachment by id
+    Fetch(FetchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -151,6 +153,12 @@ pub struct SendArgs {
     #[arg(long = "to", value_name = "NAME")]
     pub to: Vec<String>,
 
+    /// Attach a file to the message, at most 25 MiB of it. Repeatable. Each
+    /// file is uploaded first and the message carries its id; `saneha fetch`
+    /// downloads one by that id
+    #[arg(long = "file", value_name = "PATH")]
+    pub file: Vec<PathBuf>,
+
     /// The name half of this identity, as `saneha join` works it out
     #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
     pub as_name: Option<String>,
@@ -249,6 +257,26 @@ pub struct WaitArgs {
     pub hold: Option<u64>,
 }
 
+#[derive(Debug, Args)]
+pub struct FetchArgs {
+    /// The channel the attachment was sent to
+    #[arg(value_name = "CHANNEL")]
+    pub channel: String,
+
+    /// The attachment id, as `saneha read` shows it
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// Where to write it [default: the name it was attached under, in the
+    /// working directory]
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+
+    /// Overwrite the file if it is already there
+    #[arg(long)]
+    pub force: bool,
+}
+
 /// Parses the command line and runs it.
 pub fn run() -> Result<ExitCode> {
     execute(Cli::parse())
@@ -272,6 +300,7 @@ pub fn execute(cli: Cli) -> Result<ExitCode> {
         Command::Send(args) => done(send(args)),
         Command::Read(args) => done(read(args)),
         Command::Wait(args) => wait(args),
+        Command::Fetch(args) => done(fetch(args)),
     }
 }
 
@@ -520,10 +549,21 @@ const BODY_FROM_STDIN: &str = "-";
 /// Writes one message. Who it is addressed to is the server's to work out: it
 /// holds the participants, and it refuses the whole send if a mention names
 /// nobody, so nothing here has to guess.
+///
+/// `--file` is uploaded first, in the order it was given, and the message
+/// carries the ids that came back. Upload before send, because a message
+/// naming an attachment that does not exist yet would be a message the server
+/// has to refuse; the other way round, a send that fails leaves files nothing
+/// carries, and the server sweeps those up within the hour.
 fn send(args: SendArgs) -> Result<()> {
     let remote = Remote::from_env()?;
     let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
     let body = message_body(&args.body)?;
+
+    let mut attachments = Vec::with_capacity(args.file.len());
+    for file in &args.file {
+        attachments.push(remote.upload_attachment(&args.channel, file)?.id);
+    }
 
     let message = remote.send_message(
         &args.channel,
@@ -531,6 +571,7 @@ fn send(args: SendArgs) -> Result<()> {
             from: caller.identity(),
             body,
             to: args.to,
+            attachments,
         },
     )?;
 
@@ -732,6 +773,128 @@ fn wait(args: WaitArgs) -> Result<ExitCode> {
             }
         }
     }
+}
+
+/// Downloads one attachment by id.
+///
+/// It goes to `--out`, or to the name it was attached under, in the working
+/// directory. An existing file is never written over unless `--force` says so:
+/// a handoff document fetched twice must not quietly replace the copy that was
+/// already worked on.
+///
+/// Every byte lands in a file beside the destination, and the destination
+/// itself is not touched until they have all arrived. So whatever stops a
+/// fetch — the server, the network, or a Ctrl-C in this terminal — the path
+/// asked for holds either the file that was there before or the whole
+/// attachment, never half of either and never an empty file standing in for
+/// one.
+///
+/// The last step is what says whether the name was free. Without `--force` it
+/// is a hard link, which fails if anything is there and is the refusal itself;
+/// with `--force` it is a rename, which replaces whatever is there in one step
+/// and only once there is something to replace it with.
+fn fetch(args: FetchArgs) -> Result<()> {
+    let remote = Remote::from_env()?;
+    // The answer carries the name the file was attached under and leaves the
+    // body unread, so the destination is known, and can be refused, before any
+    // of the 25 MiB is pulled down.
+    let fetched = remote.fetch_attachment(&args.channel, &args.id)?;
+
+    let destination = match &args.out {
+        Some(out) => out.clone(),
+        None => PathBuf::from(&fetched.filename),
+    };
+    let shown = destination.display().to_string();
+    // Not the answer, only the early one: the link below is what actually
+    // decides, so two fetches racing for one name cannot both win.
+    if !args.force && destination.exists() {
+        return Err(anyhow!(taken(&shown)));
+    }
+
+    let landing = beside(&destination);
+    let written = write_beside(fetched, &landing).and_then(|size| {
+        put(&landing, &destination, args.force)?;
+        Ok(size)
+    });
+
+    let size = match written {
+        Ok(size) => size,
+        Err(err) => {
+            // What did arrive goes with the failure: nothing is left behind
+            // for a person to wonder about, and the next attempt starts clean.
+            let _ = std::fs::remove_file(&landing);
+            return Err(err);
+        }
+    };
+    say(&format!("{shown}  {}", human_size(size)))
+}
+
+/// Puts the downloaded file in place.
+///
+/// A hard link is how a name is taken and refused in one step: it fails with
+/// `AlreadyExists` if anything holds the name, so nothing has to be created
+/// first to reserve it and there is no window for two fetches to both think
+/// the name is theirs. `--force` renames instead, which replaces what is there
+/// in one step, and only once there is a whole file to replace it with. Both
+/// paths are in the same directory, so both are within one filesystem.
+fn put(landing: &std::path::Path, destination: &std::path::Path, force: bool) -> Result<()> {
+    let shown = destination.display().to_string();
+    if force {
+        return std::fs::rename(landing, destination)
+            .with_context(|| format!("could not put the attachment in place as {shown}"));
+    }
+
+    std::fs::hard_link(landing, destination).map_err(|err| match err.kind() {
+        std::io::ErrorKind::AlreadyExists => anyhow!(taken(&shown)),
+        _ => anyhow::Error::new(err).context(format!("could not write {shown}")),
+    })?;
+    // The destination and the landing file are one file under two names now,
+    // so removing the second leaves the first whole.
+    let _ = std::fs::remove_file(landing);
+    Ok(())
+}
+
+/// What a fetch says when the name it would write is taken.
+fn taken(shown: &str) -> String {
+    format!(
+        "{shown} is already there; write it somewhere else with --out, \
+         or replace it with --force"
+    )
+}
+
+/// Where the bytes land before they are put in place: a hidden name in the
+/// same directory, so the link or the rename that follows is within one
+/// filesystem and therefore the one step it has to be.
+fn beside(destination: &std::path::Path) -> PathBuf {
+    use rand::RngExt;
+
+    let name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "attachment".to_string());
+    let tag: u32 = rand::rng().random();
+    let landing = format!(".{name}.{tag:08x}.part");
+    match destination.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(landing),
+        _ => PathBuf::from(landing),
+    }
+}
+
+/// Writes the attachment into `landing`, and answers with how much of it there
+/// was.
+fn write_beside(fetched: crate::client::Fetched, landing: &std::path::Path) -> Result<u64> {
+    let shown = landing.display().to_string();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(landing)
+        .with_context(|| format!("could not write {shown}"))?;
+    let size = fetched.write_to(&mut file)?;
+    // On the disk before it is put in place, so what the rename publishes is
+    // the whole file and not the promise of one.
+    file.sync_all()
+        .with_context(|| format!("could not write {shown}"))?;
+    Ok(size)
 }
 
 /// An argument or environment variable that is there and says something.
@@ -944,7 +1107,35 @@ fn entry(message: &Message, participants: &[Participant]) -> String {
             out.push_str(&format!("{INDENT}{line}\n"));
         }
     }
+    // What the message carries, under what it says, with the id first because
+    // the id is what `saneha fetch` is given.
+    for attachment in &message.attachments {
+        out.push_str(&format!(
+            "{INDENT}{ATTACHMENT_MARK}  {}  {}  {}\n",
+            attachment.id,
+            attachment.filename,
+            human_size(attachment.size)
+        ));
+    }
     out
+}
+
+/// What marks an attachment line, so a reader can tell one from a line of the
+/// body without reading it. A word rather than a glyph: most of what reads a
+/// transcript is a model, and a word is what a word means.
+const ATTACHMENT_MARK: &str = "attachment";
+
+/// A size as a person reads it. The exact number is in `--json`; this is for
+/// deciding whether to fetch the thing.
+fn human_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    match bytes {
+        bytes if bytes >= MIB => format!("{:.1} MiB", bytes as f64 / MIB as f64),
+        bytes if bytes >= KIB => format!("{:.1} KiB", bytes as f64 / KIB as f64),
+        1 => "1 byte".to_string(),
+        bytes => format!("{bytes} bytes"),
+    }
 }
 
 /// An identity as short as it can be said without becoming ambiguous: the name
@@ -1128,6 +1319,18 @@ mod tests {
             about: None,
             recipients: recipients.iter().map(|to| (*to).to_string()).collect(),
             body: body.to_string(),
+            attachments: Vec::new(),
+            created_at: "2026-09-04T09:00:00Z".to_string(),
+        }
+    }
+
+    /// One attachment, as a message carries it.
+    fn attachment(id: &str, filename: &str, size: u64) -> crate::api::Attachment {
+        crate::api::Attachment {
+            id: id.to_string(),
+            filename: filename.to_string(),
+            size,
+            content_type: "text/markdown".to_string(),
             created_at: "2026-09-04T09:00:00Z".to_string(),
         }
     }
@@ -1191,6 +1394,33 @@ mod tests {
              #3  2026-09-04T09:00:00Z  bob@quadhost  → everyone\n\
              \x20   and back\n"
         );
+    }
+
+    #[test]
+    fn what_a_message_carries_is_listed_under_it() {
+        let mut carrying = message(2, Some("alice@macbookpro"), &[], "the handoff");
+        carrying.attachments = vec![
+            attachment("0123456789abcdef0123456789abcdef", "handoff.md", 2048),
+            attachment("fedcba9876543210fedcba9876543210", "notes.txt", 1),
+        ];
+
+        let printed = entry(&carrying, &roster());
+        assert_eq!(
+            printed,
+            "#2  2026-09-04T09:00:00Z  alice@macbookpro  → everyone\n\
+             \x20   the handoff\n\
+             \x20   attachment  0123456789abcdef0123456789abcdef  handoff.md  2.0 KiB\n\
+             \x20   attachment  fedcba9876543210fedcba9876543210  notes.txt  1 byte\n"
+        );
+    }
+
+    #[test]
+    fn a_size_is_written_for_someone_deciding_whether_to_fetch_it() {
+        assert_eq!(human_size(0), "0 bytes");
+        assert_eq!(human_size(1), "1 byte");
+        assert_eq!(human_size(512), "512 bytes");
+        assert_eq!(human_size(1024), "1.0 KiB");
+        assert_eq!(human_size(25 * 1024 * 1024), "25.0 MiB");
     }
 
     #[test]

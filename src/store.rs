@@ -1,19 +1,23 @@
-//! The SQLite file the server owns.
+//! The SQLite file the server owns, and the attachment files beside it.
 //!
-//! One file holds everything: channels, participants and their read cursors,
-//! and the transcript; attachments follow in a later ticket. The schema is applied by the
-//! versioned migration list below, run at every start, so an older file is
+//! One file holds everything that is a row: channels, participants and their
+//! read cursors, the transcript, and what each attachment is. The bytes of an
+//! attachment are the one thing SQLite does not hold; they live in
+//! `attachments/<channel id>/<attachment id>` next to the database, so the
+//! volume that carries the database carries them too. The schema is applied by
+//! the versioned migration list below, run at every start, so an older file is
 //! brought forward without any separate step.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use rand::RngExt;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::api::{
-    Channel, ChannelState, JoinRequest, Joined, Message, MessageKind, Participant, MAX_BODY,
-    MAX_MESSAGE_LIMIT,
+    Attachment, Channel, ChannelState, JoinRequest, Joined, Message, MessageKind, Participant,
+    MAX_BODY, MAX_MESSAGE_LIMIT,
 };
 use crate::mention::{self, Candidate, Unresolved};
 use crate::slug;
@@ -86,8 +90,8 @@ const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 /// Never edit an entry that has shipped, only append.
 ///
 /// Migration 1 creates the channels table alone; it is deployed, so it is
-/// frozen. Migration 2 adds participants and the transcript. `attachments` is
-/// still to come. The forward-looking columns in migration 1 are the ones the
+/// frozen. Migration 2 adds participants and the transcript, and migration 3
+/// the attachments. The forward-looking columns in migration 1 are the ones the
 /// channels table itself needs: `closed_at` for `saneha close`, and
 /// `last_message_id` as the per-channel allocator that makes message ids
 /// monotonic within a transcript. `AUTOINCREMENT` keeps a deleted channel's id
@@ -182,7 +186,55 @@ CREATE TABLE recipients (
 -- the relay ask.
 CREATE INDEX recipients_participant ON recipients (participant_id, channel_id, message_id);
 "#,
+    // An attachment is uploaded before the message that carries it exists, so
+    // it arrives unbound: `message_id` is NULL until the send that names its id
+    // binds it. That is also why there is a sweep — an upload whose send never
+    // came would otherwise sit there for good.
+    //
+    // The id is 32 hex characters minted by the server rather than the row id,
+    // because it is a capability: it is the whole of what a fetch has to
+    // present, so it must not be guessable by counting.
+    //
+    // The bytes are not in here. They are in
+    // `attachments/<channel_id>/<id>` beside the database file, so the
+    // foreign key deletes the row when a channel or a message goes and
+    // `remove_channel_files` is what deletes the file.
+    //
+    // The composite foreign key needs `messages (channel_id, id)` to be
+    // unique, which it is: that pair is its primary key. A NULL `message_id`
+    // satisfies the constraint, which is what leaves an unbound attachment
+    // free to point at nothing.
+    r#"
+CREATE TABLE attachments (
+    id           TEXT    PRIMARY KEY,
+    channel_id   INTEGER NOT NULL REFERENCES channels (id) ON DELETE CASCADE,
+    message_id   INTEGER,
+    filename     TEXT    NOT NULL,
+    size         INTEGER NOT NULL,
+    content_type TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL,
+    FOREIGN KEY (channel_id, message_id)
+        REFERENCES messages (channel_id, id) ON DELETE CASCADE
+);
+
+-- "What does this message carry", which is what every read of a transcript
+-- asks, once per page.
+CREATE INDEX attachments_message ON attachments (channel_id, message_id);
+
+-- "What is still waiting to be bound", which is what the sweep asks.
+CREATE INDEX attachments_unbound ON attachments (created_at) WHERE message_id IS NULL;
+"#,
 ];
+
+/// How long an attachment nobody bound to a message is kept before the sweep
+/// removes it, in seconds. Long enough that a send delayed by a slow upload
+/// still finds its files, short enough that an abandoned upload is not stored
+/// for ever.
+pub const UNBOUND_ATTACHMENT_TTL: i64 = 60 * 60;
+
+/// The directory attachment files live in, under the directory holding the
+/// database file.
+const ATTACHMENTS_DIR: &str = "attachments";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -256,6 +308,56 @@ pub enum StoreError {
     UnknownMessageKind(String),
 
     #[error(
+        "there is no attachment {id:?} in the channel {channel:?}; \
+         the ids are the ones under the messages in: saneha read {channel} --all"
+    )]
+    NoSuchAttachment { channel: String, id: String },
+
+    /// The row is there and the bytes are not. Said without naming any path on
+    /// the server, because the person reading it is on another machine and the
+    /// path is nothing they can act on.
+    #[error(
+        "the attachment {id:?} in {channel:?} is recorded but its file is not on the server; \
+         it was lost rather than removed, so ask whoever attached it to send it again"
+    )]
+    AttachmentGone { channel: String, id: String },
+
+    /// An attachment belongs to the one message that carries it, so a second
+    /// send naming the same id is refused rather than quietly moving it.
+    #[error("the attachment {id:?} is already carried by message #{message_id} in {channel:?}")]
+    AttachmentBound {
+        channel: String,
+        id: String,
+        message_id: i64,
+    },
+
+    #[error("{}", crate::api::attachment_too_large(*size))]
+    AttachmentTooLarge { size: u64 },
+
+    #[error("{}", crate::api::attachment_is_empty(filename))]
+    EmptyAttachment { filename: String },
+
+    #[error(
+        "an attachment needs a filename in the {header} header, and \
+         {value:?} is not one",
+        header = crate::api::FILENAME_HEADER
+    )]
+    InvalidFilename { value: String },
+
+    #[error("could not {doing} the attachment file {path}")]
+    AttachmentFile {
+        doing: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A database with no file has no directory to keep attachments beside,
+    /// which is only ever a store opened in memory by a test.
+    #[error("this saneha server keeps its database in memory, so it stores no attachments")]
+    NoAttachmentStore,
+
+    #[error(
         "{identity:?} changed hands in {channel:?} while this join was being made; \
          look again and join again"
     )]
@@ -294,36 +396,44 @@ pub enum StoreError {
     },
 }
 
-/// The database, shared by every request the server handles.
+/// The database, and the attachment files beside it, shared by every request
+/// the server handles.
 pub struct Store {
     conn: Mutex<Connection>,
+    /// `<the database's directory>/attachments`, and `None` for a database
+    /// held in memory, which has no directory to put anything beside.
+    attachments: Option<PathBuf>,
 }
 
 impl Store {
     /// Opens the database at `path`, creating the file, its parent directories
-    /// and the schema if they are not there yet.
+    /// and the schema if they are not there yet. Attachments go in
+    /// `attachments/` beside it, made on the first upload.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|source| StoreError::Directory {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            }
-        }
+        let directory = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        std::fs::create_dir_all(&directory).map_err(|source| StoreError::Directory {
+            path: directory.clone(),
+            source,
+        })?;
         let conn = Connection::open(path).map_err(|source| StoreError::Open {
             path: path.to_path_buf(),
             source,
         })?;
-        Self::from_connection(conn)
+        Self::from_connection(conn, Some(directory.join(ATTACHMENTS_DIR)))
     }
 
-    /// A database held in memory, for tests.
+    /// A database held in memory, for tests. It stores no attachments.
     pub fn open_in_memory() -> Result<Self, StoreError> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, None)
     }
 
-    fn from_connection(mut conn: Connection) -> Result<Self, StoreError> {
+    fn from_connection(
+        mut conn: Connection,
+        attachments: Option<PathBuf>,
+    ) -> Result<Self, StoreError> {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -333,6 +443,7 @@ impl Store {
         migrate(&mut conn)?;
         Ok(Store {
             conn: Mutex::new(conn),
+            attachments,
         })
     }
 
@@ -565,12 +676,20 @@ impl Store {
     ///
     /// The id comes from the channel's own allocator, so a transcript reads 1,
     /// 2, 3 whatever else the server is doing at the time.
+    ///
+    /// `attachments` are ids already uploaded to this channel, bound to the
+    /// message inside the same transaction. An id that names nothing here, or
+    /// one another message already carries, fails the send: the same
+    /// discipline as a mention that names nobody, and for the same reason —
+    /// a message that quietly carried less than it was asked to would be worse
+    /// than no message at all.
     pub fn send(
         &self,
         channel: &str,
         from: &str,
         body: &str,
         to: &[String],
+        attachments: &[String],
     ) -> Result<Message, StoreError> {
         validate_body(body)?;
 
@@ -635,6 +754,15 @@ impl Store {
             rusqlite::params![from_id, message_id],
         )?;
 
+        // The same file named twice is one attachment, not a refusal: the
+        // second mention asks for nothing the first did not already do.
+        let mut bound: Vec<Attachment> = Vec::new();
+        for id in attachments {
+            if bound.iter().any(|attachment| &attachment.id == id) {
+                continue;
+            }
+            bound.push(bind_attachment(&tx, channel, channel_id, id, message_id)?);
+        }
         tx.commit()?;
 
         // Everything the message is made of was in hand before it was written,
@@ -651,6 +779,7 @@ impl Store {
                 .map(|candidate| candidate.identity.clone())
                 .collect(),
             body: body.to_string(),
+            attachments: bound,
             created_at,
         })
     }
@@ -774,6 +903,355 @@ impl Store {
             read_participant_row,
         )?)
     }
+
+    /// Mints an id for a file about to be uploaded to an open channel, and
+    /// makes the directory its bytes go in.
+    ///
+    /// Nothing is recorded here. The row is written by
+    /// [`Store::record_attachment`] once the bytes have landed, so an upload
+    /// that fails part-way through leaves a file nobody can name rather than a
+    /// row pointing at a file that is not all there. The sweep is what removes
+    /// the one it leaves behind, along with the uploads whose send never came.
+    pub fn new_attachment(&self, channel: &str) -> Result<PendingAttachment, StoreError> {
+        let channel_id = {
+            let conn = self.conn();
+            open_channel_id(&conn, channel, "nothing more can be attached to it")?
+        };
+        let directory = self.channel_attachments(channel_id)?;
+        std::fs::create_dir_all(&directory).map_err(|source| StoreError::AttachmentFile {
+            doing: "make the directory for",
+            path: directory.clone(),
+            source,
+        })?;
+        let id = mint_attachment_id();
+        Ok(PendingAttachment {
+            path: directory.join(&id),
+            id,
+            channel_id,
+        })
+    }
+
+    /// Records an attachment whose bytes have landed. It is unbound until the
+    /// send that names its id binds it.
+    pub fn record_attachment(
+        &self,
+        pending: &PendingAttachment,
+        filename: &str,
+        size: u64,
+        content_type: &str,
+    ) -> Result<Attachment, StoreError> {
+        let conn = self.conn();
+        let created_at: String = conn.query_row(
+            &format!(
+                "INSERT INTO attachments
+                     (id, channel_id, message_id, filename, size, content_type, created_at)
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?5, {NOW})
+                 RETURNING created_at"
+            ),
+            rusqlite::params![
+                pending.id,
+                pending.channel_id,
+                filename,
+                size as i64,
+                content_type
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(Attachment {
+            id: pending.id.clone(),
+            filename: filename.to_string(),
+            size,
+            content_type: content_type.to_string(),
+            created_at,
+        })
+    }
+
+    /// One attachment of a channel, and the file holding its bytes. A closed
+    /// channel still hands its attachments over: a channel that takes no more
+    /// messages can still be read, and so can what its messages carried.
+    pub fn attachment(&self, channel: &str, id: &str) -> Result<(Attachment, PathBuf), StoreError> {
+        let missing = || StoreError::NoSuchAttachment {
+            channel: channel.to_string(),
+            id: id.to_string(),
+        };
+        // An id is a path segment by the time this is done with it, so
+        // anything that is not one of the shapes this server mints is not
+        // looked up at all.
+        if !is_attachment_id(id) {
+            return Err(missing());
+        }
+
+        let conn = self.conn();
+        let channel_id = channel_id(&conn, channel)?;
+        let attachment = conn
+            .query_row(
+                &format!(
+                    "SELECT {ATTACHMENT_COLUMNS} FROM attachments
+                      WHERE id = ?1 AND channel_id = ?2"
+                ),
+                rusqlite::params![id, channel_id],
+                read_attachment_row,
+            )
+            .optional()?
+            .ok_or_else(missing)?;
+        drop(conn);
+
+        let path = self.channel_attachments(channel_id)?.join(&attachment.id);
+        Ok((attachment, path))
+    }
+
+    /// Removes what no message will ever carry, and answers with what went.
+    ///
+    /// Two things go, and they are not the same thing:
+    ///
+    /// - a row nothing bound to a message, older than `max_age_seconds`: an
+    ///   upload whose send failed, or never came;
+    /// - a file no row names, last written longer ago than that: an upload the
+    ///   server was killed in the middle of, which never got as far as its
+    ///   row, and the directory a deleted channel left behind.
+    ///
+    /// The second is why this walks the directories as well as the table.
+    /// Nothing in the database records a file that was being written when the
+    /// process died, so no row-driven pass can ever find it, and it would sit
+    /// on the volume for good. The age is what makes the walk safe: an upload
+    /// in flight has a file and no row too, and it is minutes old rather than
+    /// hours.
+    ///
+    /// The server runs this when it starts and every hour after that. The age
+    /// is a parameter so a test can sweep what it has just made.
+    pub fn sweep_unbound_attachments(&self, max_age_seconds: i64) -> Result<Swept, StoreError> {
+        let older_than = format!("-{max_age_seconds} seconds");
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT id, channel_id FROM attachments
+              WHERE message_id IS NULL
+                AND created_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
+        )?;
+        let stale = statement
+            .query_map([&older_than], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        for (id, channel_id) in &stale {
+            // The file goes first: a row with no file is something a fetch
+            // reports, and a file with no row is something the walk below
+            // finds.
+            if let Some(root) = self.attachments.as_deref() {
+                remove_file(&root.join(channel_id.to_string()).join(id))?;
+            }
+            conn.execute("DELETE FROM attachments WHERE id = ?1", [id])?;
+        }
+        drop(conn);
+
+        Ok(Swept {
+            unbound: stale.len(),
+            orphans: self.sweep_orphan_files(max_age_seconds)?,
+        })
+    }
+
+    /// The walk: every file under the attachments directory that no row names
+    /// and that was last written more than `max_age_seconds` ago, and then any
+    /// channel directory left empty by it.
+    fn sweep_orphan_files(&self, max_age_seconds: i64) -> Result<usize, StoreError> {
+        let Some(root) = self.attachments.as_deref() else {
+            return Ok(0);
+        };
+        let cutoff = match std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(max_age_seconds.max(0) as u64))
+        {
+            Some(cutoff) => cutoff,
+            // A machine whose clock is not far enough from the epoch for the
+            // subtraction to hold is a machine whose file times mean nothing;
+            // nothing is removed on the strength of them.
+            None => return Ok(0),
+        };
+
+        let mut removed = 0;
+        for directory in read_directory(root)? {
+            let directory = directory?;
+            // Read before anything is removed from it: taking a file out of a
+            // directory is a write to the directory, so afterwards every
+            // directory this touched looks new.
+            let untouched_since = older_than(&directory, cutoff);
+            let mut left = 0;
+            for file in read_directory(&directory)? {
+                let file = file?;
+                // Only files are attachments. Anything else under here was put
+                // there by a person, and a sweep that walked into it, or
+                // failed on it, would be a sweep that stopped doing its job
+                // over something that is not its business.
+                let is_file = std::fs::metadata(&file).is_ok_and(|about| about.is_file());
+                if !is_file || !older_than(&file, cutoff) || self.is_recorded(&file)? {
+                    left += 1;
+                    continue;
+                }
+                remove_file(&file)?;
+                removed += 1;
+            }
+            // An empty directory is a channel that has been deleted, or one
+            // whose uploads have all just gone. Either way the next upload
+            // makes it again, and a failure here is not worth a word.
+            if left == 0 && untouched_since {
+                let _ = std::fs::remove_dir(&directory);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Whether a file under the attachments directory is one the database
+    /// knows about. A name that is not an id cannot be.
+    fn is_recorded(&self, file: &Path) -> Result<bool, StoreError> {
+        let Some(id) = file.file_name().and_then(|name| name.to_str()) else {
+            return Ok(false);
+        };
+        if !is_attachment_id(id) {
+            return Ok(false);
+        }
+        Ok(self
+            .conn()
+            .query_row("SELECT 1 FROM attachments WHERE id = ?1", [id], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?
+            .is_some())
+    }
+
+    /// Removes the attachment files of the channel with this row id.
+    ///
+    /// The rows go by themselves: deleting a channel cascades to its
+    /// attachments. The bytes are outside SQLite, so nothing cascades to them,
+    /// and the delete verb ([issue #6]) has to remove them itself, in this
+    /// order: read the channel's row id, delete the channel row, then call
+    /// this with the id.
+    ///
+    /// That order and not the other one. Files first would mean that a delete
+    /// which then failed to remove the row left a channel that is still there,
+    /// whose transcript names attachments nothing can fetch. This way the
+    /// failure leaves a directory nobody can reach, which the sweep removes
+    /// within the hour.
+    ///
+    /// [issue #6]: https://github.com/surdy/saneha/issues/6
+    pub fn remove_channel_files(&self, channel_id: i64) -> Result<(), StoreError> {
+        let directory = self.channel_attachments(channel_id)?;
+        match std::fs::remove_dir_all(&directory) {
+            Ok(()) => Ok(()),
+            // A channel nothing was ever attached to has no directory, which
+            // is the same outcome by another route.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StoreError::AttachmentFile {
+                doing: "remove",
+                path: directory,
+                source,
+            }),
+        }
+    }
+
+    /// The row id of a channel, which is what names its directory of files.
+    /// The delete verb reads this before it deletes the row, because
+    /// afterwards there is nothing left to read it from.
+    pub fn channel_row_id(&self, channel: &str) -> Result<i64, StoreError> {
+        let conn = self.conn();
+        channel_id(&conn, channel)
+    }
+
+    /// Where a channel's attachment files live.
+    fn channel_attachments(&self, channel_id: i64) -> Result<PathBuf, StoreError> {
+        let root = self
+            .attachments
+            .as_deref()
+            .ok_or(StoreError::NoAttachmentStore)?;
+        Ok(root.join(channel_id.to_string()))
+    }
+}
+
+/// What one sweep removed: rows nothing bound, and files no row named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Swept {
+    /// Uploads whose send never came.
+    pub unbound: usize,
+    /// Files with no row: an upload the server was killed in the middle of, or
+    /// what a deleted channel left behind.
+    pub orphans: usize,
+}
+
+impl Swept {
+    /// Whether the sweep found anything at all to do.
+    pub fn is_empty(self) -> bool {
+        self.unbound == 0 && self.orphans == 0
+    }
+}
+
+impl std::fmt::Display for Swept {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            out,
+            "{} upload(s) no message carried and {} file(s) with no record",
+            self.unbound, self.orphans
+        )
+    }
+}
+
+/// Removes one file, and says nothing about one that is already gone.
+fn remove_file(path: &Path) -> Result<(), StoreError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(StoreError::AttachmentFile {
+            doing: "remove",
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// What is in a directory, as paths, and nothing at all when there is no such
+/// directory: nothing has been uploaded on this server yet.
+fn read_directory(
+    path: &Path,
+) -> Result<Box<dyn Iterator<Item = Result<PathBuf, StoreError>>>, StoreError> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Box::new(std::iter::empty()))
+        }
+        Err(source) => {
+            return Err(StoreError::AttachmentFile {
+                doing: "read",
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    let path = path.to_path_buf();
+    Ok(Box::new(entries.map(move |entry| {
+        entry
+            .map(|entry| entry.path())
+            .map_err(|source| StoreError::AttachmentFile {
+                doing: "read",
+                path: path.clone(),
+                source,
+            })
+    })))
+}
+
+/// Whether this was last written before `cutoff`. Something whose age cannot
+/// be read is treated as new, so the sweep never removes what it cannot date.
+fn older_than(path: &Path, cutoff: std::time::SystemTime) -> bool {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| modified < cutoff)
+}
+
+/// An attachment that has been given an id and a place to be written, and is
+/// not in the database yet.
+#[derive(Debug, Clone)]
+pub struct PendingAttachment {
+    pub id: String,
+    /// The file the bytes go in.
+    pub path: PathBuf,
+    channel_id: i64,
 }
 
 /// Everyone in a channel, as recipient resolution sees them: away participants
@@ -867,6 +1345,7 @@ fn read_messages(
         return Ok(Vec::new());
     };
     let mut recipients = read_recipients(conn, channel_id, after, last)?;
+    let mut attachments = read_attachments(conn, channel_id, after, last)?;
 
     rows.into_iter()
         .map(|(id, kind, from, about, body, created_at)| {
@@ -880,10 +1359,131 @@ fn read_messages(
                 about,
                 recipients: recipients.remove(&id).unwrap_or_default(),
                 body,
+                attachments: attachments.remove(&id).unwrap_or_default(),
                 created_at,
             })
         })
         .collect()
+}
+
+/// The columns of an attachment, in the order `read_attachment_row` reads.
+const ATTACHMENT_COLUMNS: &str = "id, filename, size, content_type, created_at";
+
+fn read_attachment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
+    read_attachment_at(row, 0)
+}
+
+/// The same columns wherever they start, because the queries that carry a
+/// message id in front of them read the rest exactly the same way.
+fn read_attachment_at(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Attachment> {
+    Ok(Attachment {
+        id: row.get(first)?,
+        filename: row.get(first + 1)?,
+        // Nothing writes a negative size, and a size that will not fit reads
+        // as nothing rather than as an error.
+        size: row.get::<_, i64>(first + 2)?.try_into().unwrap_or(0),
+        content_type: row.get(first + 3)?,
+        created_at: row.get(first + 4)?,
+    })
+}
+
+/// What each message in a range carries, in one query rather than one per
+/// message.
+///
+/// The order is the order the rows were written, which is the order the files
+/// were uploaded, which is the order `--file` was given in. `created_at` is
+/// only good to the second, and two files attached to one message are usually
+/// uploaded inside the same one, so the row order is what makes a read agree
+/// with what the send answered.
+fn read_attachments(
+    conn: &Connection,
+    channel_id: i64,
+    after: i64,
+    last: i64,
+) -> Result<HashMap<i64, Vec<Attachment>>, StoreError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT message_id, {ATTACHMENT_COLUMNS}
+           FROM attachments
+          WHERE channel_id = ?1 AND message_id > ?2 AND message_id <= ?3
+          ORDER BY message_id, rowid"
+    ))?;
+    let rows = statement.query_map(rusqlite::params![channel_id, after, last], |row| {
+        Ok((row.get::<_, i64>(0)?, read_attachment_at(row, 1)?))
+    })?;
+
+    let mut carried: HashMap<i64, Vec<Attachment>> = HashMap::new();
+    for row in rows {
+        let (message_id, attachment) = row?;
+        carried.entry(message_id).or_default().push(attachment);
+    }
+    Ok(carried)
+}
+
+/// Binds one uploaded attachment to the message that carries it. An id that
+/// names nothing in this channel, or one another message already carries,
+/// fails the send it is part of, and the transaction takes the message with
+/// it.
+fn bind_attachment(
+    conn: &Connection,
+    channel: &str,
+    channel_id: i64,
+    id: &str,
+    message_id: i64,
+) -> Result<Attachment, StoreError> {
+    let missing = || StoreError::NoSuchAttachment {
+        channel: channel.to_string(),
+        id: id.to_string(),
+    };
+    if !is_attachment_id(id) {
+        return Err(missing());
+    }
+
+    let row: Option<(Option<i64>, Attachment)> = conn
+        .query_row(
+            &format!(
+                "SELECT message_id, {ATTACHMENT_COLUMNS} FROM attachments
+                  WHERE id = ?1 AND channel_id = ?2"
+            ),
+            rusqlite::params![id, channel_id],
+            |row| Ok((row.get(0)?, read_attachment_at(row, 1)?)),
+        )
+        .optional()?;
+    let (bound_to, attachment) = row.ok_or_else(missing)?;
+    if let Some(bound_to) = bound_to {
+        return Err(StoreError::AttachmentBound {
+            channel: channel.to_string(),
+            id: id.to_string(),
+            message_id: bound_to,
+        });
+    }
+
+    conn.execute(
+        "UPDATE attachments SET message_id = ?3 WHERE id = ?1 AND channel_id = ?2",
+        rusqlite::params![id, channel_id, message_id],
+    )?;
+    Ok(attachment)
+}
+
+/// A fresh attachment id: 128 random bits as 32 lowercase hex characters.
+fn mint_attachment_id() -> String {
+    let bytes: [u8; 16] = rand::rng().random();
+    let mut id = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        // Writing to a String cannot fail.
+        let _ = write!(id, "{byte:02x}");
+    }
+    id
+}
+
+/// Whether this is the shape [`mint_attachment_id`] makes. An id becomes a
+/// path segment, so anything else is refused before it is looked up rather
+/// than after.
+fn is_attachment_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
 }
 
 /// Who each message in a range is addressed to, in one query rather than one
@@ -1428,6 +2028,83 @@ mod tests {
         assert_eq!(store.list_channels().expect("list").len(), 1);
         assert!(store.channel("quiet-heron").expect("lookup").is_some());
         assert!(store.channel("nobody-here").expect("lookup").is_none());
+    }
+
+    #[test]
+    fn a_database_from_before_the_attachments_is_brought_forward() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("saneha.db");
+
+        // A file as an earlier saneha left it: everything up to the
+        // transcript, and no attachments.
+        let conn = Connection::open(&path).expect("open directly");
+        for migration in &MIGRATIONS[..2] {
+            conn.execute_batch(migration).expect("apply a migration");
+        }
+        conn.execute_batch("PRAGMA user_version = 2")
+            .expect("record what was applied");
+        drop(conn);
+
+        let store = Store::open(&path).expect("open the older database");
+        store
+            .create_channel(Some("quiet-heron"), None)
+            .expect("create");
+        let attachment = store
+            .new_attachment("quiet-heron")
+            .expect("the attachments table is there now");
+        std::fs::write(&attachment.path, b"forward\n").expect("write the file");
+        let recorded = store
+            .record_attachment(&attachment, "notes.md", 8, "text/markdown")
+            .expect("record");
+        assert_eq!(recorded.filename, "notes.md");
+    }
+
+    #[test]
+    fn deleting_a_channel_takes_its_attachment_rows_with_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("saneha.db")).expect("open");
+        store
+            .create_channel(Some("quiet-heron"), None)
+            .expect("create");
+
+        let pending = store.new_attachment("quiet-heron").expect("mint an id");
+        std::fs::write(&pending.path, b"bytes\n").expect("write the file");
+        store
+            .record_attachment(&pending, "notes.md", 6, "text/markdown")
+            .expect("record");
+
+        // The rows go by cascade; the files are what `remove_channel_files`
+        // is for, and what the delete verb has to call.
+        store
+            .conn()
+            .execute("DELETE FROM channels WHERE name = ?1", ["quiet-heron"])
+            .expect("delete the channel");
+        let left: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM attachments", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(left, 0);
+        assert!(pending.path.exists(), "the file went without being asked");
+    }
+
+    #[test]
+    fn an_attachment_id_is_128_random_bits_of_hex() {
+        let first = mint_attachment_id();
+        assert_eq!(first.len(), 32);
+        assert!(is_attachment_id(&first), "{first}");
+        assert_ne!(first, mint_attachment_id());
+
+        // Anything that is not that shape is not looked up at all, because an
+        // id becomes a path segment.
+        for id in [
+            "",
+            "0123456789abcdef0123456789abcde",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "../../../../etc/passwd/0123456789",
+            "0123456789abcdef0123456789abcdeg",
+        ] {
+            assert!(!is_attachment_id(id), "{id}");
+        }
     }
 
     #[test]

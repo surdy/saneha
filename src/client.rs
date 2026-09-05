@@ -4,21 +4,30 @@
 //! `SANEHA_URL`, makes one request, and turns anything that goes wrong into a
 //! single line a person can act on.
 
+use std::io::{Read, Write};
+use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use ureq::http::Response;
-use ureq::{Agent, Body};
+use ureq::{Agent, Body, SendBody};
 
 use crate::api::{
-    ApiError, Channel, ChannelList, ChannelState, CursorUpdate, JoinRequest, Joined, Message,
-    MessageList, NewMessage, Participant, ParticipantList, Waited, DEFAULT_MESSAGE_LIMIT,
+    attachment_filename, attachment_is_empty, attachment_too_large, decode_filename,
+    encode_filename, ApiError, Attachment, Channel, ChannelList, ChannelState, CursorUpdate,
+    JoinRequest, Joined, Message, MessageList, NewMessage, Participant, ParticipantList, Waited,
+    DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT,
 };
 
 /// The environment variable that points every subcommand at the server.
 pub const URL_ENV: &str = "SANEHA_URL";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What an attachment gets instead. Thirty seconds is plenty for a message and
+/// nothing at all for 25 MiB over a home connection.
+const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 const MAX_ERROR_BODY: usize = 200;
 
 /// How much longer than the hold it asked for a wait request will sit there
@@ -308,6 +317,80 @@ impl Remote {
         read_json(response, "participant")
     }
 
+    /// Uploads one file to a channel, and answers with the attachment the
+    /// server minted. Nothing carries it until a send names its id; an upload
+    /// whose send never comes is swept up by the server within the hour.
+    ///
+    /// The file is streamed rather than read into memory, and its size is
+    /// checked here first: 25 MiB is not worth sending to be refused, and the
+    /// cap is the same number on both sides.
+    pub fn upload_attachment(&self, channel: &str, file: &Path) -> Result<Attachment> {
+        let shown = file.display();
+        let size = std::fs::metadata(file)
+            .with_context(|| format!("could not read {shown}"))?
+            .len();
+        let filename = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(attachment_filename)
+            .ok_or_else(|| anyhow!("{shown} has no filename saneha can attach it under"))?;
+        if size == 0 {
+            return Err(anyhow!(attachment_is_empty(&filename)));
+        }
+        if size > MAX_ATTACHMENT {
+            return Err(anyhow!("{shown}: {}", attachment_too_large(size)));
+        }
+
+        let mut reading =
+            std::fs::File::open(file).with_context(|| format!("could not open {shown}"))?;
+        let response = self.check(
+            self.agent
+                .post(self.url(&format!("/channels/{channel}/attachments")))
+                .config()
+                .timeout_global(Some(ATTACHMENT_TIMEOUT))
+                .build()
+                // Percent-encoded, because a header value carries ASCII and a
+                // filename is written in whatever language it was named in.
+                .header(FILENAME_HEADER, encode_filename(&filename))
+                .header("content-type", content_type_of(&filename))
+                // The size is known, so the request is length-delimited and
+                // the server can refuse an oversize one before reading it.
+                .header("content-length", size.to_string())
+                .send(SendBody::from_reader(&mut reading))
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "attachment")
+    }
+
+    /// Fetches one attachment by id. What comes back is the name it was stored
+    /// under and the bytes still to be read, so the caller can decide where
+    /// they go before any of them arrive.
+    pub fn fetch_attachment(&self, channel: &str, id: &str) -> Result<Fetched> {
+        let response = self.check(
+            self.agent
+                .get(self.url(&format!("/channels/{channel}/attachments/{id}")))
+                .config()
+                .timeout_global(Some(ATTACHMENT_TIMEOUT))
+                .build()
+                .call()
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+
+        // The server sanitises what it stores, and this sanitises what it
+        // writes: a name that arrived over the network becomes a path here.
+        let filename = filename_from(response.headers())
+            .and_then(|name| attachment_filename(&name))
+            .unwrap_or_else(|| id.to_string());
+        let body = response.into_body();
+        Ok(Fetched {
+            filename,
+            // One past the cap: the limit is what a body may not exceed, and
+            // an attachment of exactly 25 MiB is one the server stored and
+            // must therefore be able to hand back.
+            reader: Box::new(body.into_with_config().limit(MAX_ATTACHMENT + 1).reader()),
+        })
+    }
+
     fn check(&self, response: Response<Body>) -> Result<Response<Body>> {
         if response.status().is_success() {
             return Ok(response);
@@ -329,6 +412,116 @@ impl Remote {
                 describe(other)
             ),
         }
+    }
+}
+
+/// An attachment coming down the wire: the name it was stored under, and the
+/// bytes still to be read.
+pub struct Fetched {
+    /// The stored filename, made safe to use as a path on this machine.
+    pub filename: String,
+    reader: Box<dyn Read>,
+}
+
+impl Fetched {
+    /// Reads the attachment into `out`, and answers with how many bytes went.
+    pub fn write_to(mut self, out: &mut impl Write) -> Result<u64> {
+        let copied = std::io::copy(&mut self.reader, out)
+            .context("the attachment stopped part-way through")?;
+        out.flush().context("could not write the attachment")?;
+        Ok(copied)
+    }
+}
+
+/// The filename out of a `Content-Disposition`, before it is made safe.
+///
+/// `filename*` first, because that is the one that can hold a name in any
+/// script (RFC 8187, percent-encoded UTF-8); `filename` is the fallback, and
+/// what an older saneha sends. The header is read as bytes, so a server that
+/// put the name in it as it was written is understood too.
+fn filename_from(headers: &ureq::http::HeaderMap) -> Option<String> {
+    let disposition =
+        String::from_utf8_lossy(headers.get("content-disposition")?.as_bytes()).into_owned();
+    let parameters = parameters_of(&disposition);
+
+    if let Some(value) = parameter(&parameters, "filename*") {
+        // `UTF-8''name`: the charset, the language that is always empty here,
+        // and then the name.
+        let encoded = value.rsplit('\'').next().unwrap_or_default();
+        let decoded = decode_filename(encoded);
+        if !decoded.trim().is_empty() {
+            return Some(decoded);
+        }
+    }
+
+    let value = parameter(&parameters, "filename")?;
+    let name = match value.strip_prefix('"') {
+        Some(quoted) => quoted.strip_suffix('"').unwrap_or(quoted),
+        None => value,
+    };
+    Some(name.to_string())
+}
+
+/// A header value split on the semicolons that separate its parameters, and
+/// not on the ones written inside a quoted value.
+///
+/// A filename may contain a semicolon, and a name such as
+/// `a; filename*=UTF-8''elsewhere.sh` is a name and not a second parameter.
+/// Anything that scans a `Content-Disposition` without minding quotes can be
+/// made to read a filename out of a filename.
+fn parameters_of(disposition: &str) -> Vec<&str> {
+    let mut parameters = Vec::new();
+    let mut quoted = false;
+    let mut start = 0;
+    for (at, character) in disposition.char_indices() {
+        match character {
+            '"' => quoted = !quoted,
+            ';' if !quoted => {
+                parameters.push(disposition[start..at].trim());
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parameters.push(disposition[start..].trim());
+    parameters
+}
+
+/// The value of one parameter, by name, case-insensitively as a header
+/// parameter is written.
+fn parameter<'a>(parameters: &[&'a str], name: &str) -> Option<&'a str> {
+    parameters.iter().find_map(|parameter| {
+        let (key, value) = parameter.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then_some(value.trim())
+    })
+}
+
+/// What a file is, as far as its name says. A short table rather than a
+/// dependency: everything not in it is bytes, which is what an attachment is
+/// to saneha anyway.
+fn content_type_of(filename: &str) -> &'static str {
+    let extension = filename
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "md" | "markdown" => "text/markdown",
+        "txt" | "log" | "diff" | "patch" | "rs" | "toml" | "yaml" | "yml" | "sql" => "text/plain",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "tar" => "application/x-tar",
+        _ => DEFAULT_CONTENT_TYPE,
     }
 }
 
@@ -378,6 +571,59 @@ fn describe(err: &ureq::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `Content-Disposition` as the server writes one, as a header map.
+    fn disposition(value: &str) -> ureq::http::HeaderMap {
+        let mut headers = ureq::http::HeaderMap::new();
+        headers.insert(
+            "content-disposition",
+            ureq::http::HeaderValue::from_str(value).expect("a header value"),
+        );
+        headers
+    }
+
+    #[test]
+    fn a_download_takes_the_name_that_can_hold_any_script() {
+        // Both forms, which is what saneha sends: the encoded one wins.
+        let both =
+            disposition("attachment; filename=\"r_sum_.md\"; filename*=UTF-8''r%C3%A9sum%C3%A9.md");
+        assert_eq!(filename_from(&both).as_deref(), Some("résumé.md"));
+
+        // The old form alone, which is what an older saneha sends.
+        let plain = disposition("attachment; filename=\"handoff.md\"");
+        assert_eq!(filename_from(&plain).as_deref(), Some("handoff.md"));
+
+        // An encoded form that decodes to nothing falls back rather than
+        // taking the name away.
+        let empty = disposition("attachment; filename=\"handoff.md\"; filename*=UTF-8''");
+        assert_eq!(filename_from(&empty).as_deref(), Some("handoff.md"));
+
+        // Nothing to take a name from at all.
+        assert_eq!(filename_from(&ureq::http::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn a_name_cannot_write_a_second_name_inside_itself() {
+        // A filename may hold a semicolon, so a name written to look like the
+        // rest of the header is still one name. Scanning for `filename*=`
+        // without minding the quotes would take the file somewhere else
+        // entirely.
+        let smuggled = disposition(
+            "attachment; filename*=UTF-8''a%3B%20filename%2A%3DUTF-8%27%27elsewhere.sh; \
+             filename=\"a; filename*=UTF-8''elsewhere.sh\"",
+        );
+        assert_eq!(
+            filename_from(&smuggled).as_deref(),
+            Some("a; filename*=UTF-8''elsewhere.sh")
+        );
+
+        // And the same when only the old form is there to read.
+        let plain = disposition("attachment; filename=\"a; filename*=UTF-8''elsewhere.sh\"");
+        assert_eq!(
+            filename_from(&plain).as_deref(),
+            Some("a; filename*=UTF-8''elsewhere.sh")
+        );
+    }
 
     #[test]
     fn adds_a_scheme_and_trims_trailing_slashes() {
