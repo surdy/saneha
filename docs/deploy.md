@@ -127,7 +127,7 @@ From either laptop, on the LAN or the tailnet:
 
 ```sh
 curl https://saneha.clusterfault.com/health
-# {"service":"saneha","status":"ok"}
+# {"held_waits":0,"service":"saneha","status":"ok"}
 
 export SANEHA_URL=https://saneha.clusterfault.com
 saneha new --purpose "checking the deploy"
@@ -307,7 +307,7 @@ the `@all` in the headline sits outside the fence where it still counts.
 ```sh
 ssh core@192.168.16.169 'sudo journalctl -t saneha-backup-failed -n 20 --no-pager'
 ssh core@192.168.16.169 'sudo systemctl start saneha-backup-failed.service'   # by hand
-saneha read ops                                                               # after the deploy bump
+saneha read ops
 ```
 
 **Join `ops` from your laptop, once.** `@all` means every participant in the
@@ -323,21 +323,14 @@ saneha read ops
 saneha wait ops                # optional, and the actual point: be told, not check
 ```
 
-This needs `POST /channels/{channel}/participants`, so it waits on the same
-deploy bump the notifier's posting half does ([issue
-#25](https://github.com/surdy/saneha/issues/25)).
-
-**Half of this is proven and half is waiting on a deploy.** Proven on quadhost:
-the `OnFailure=` wiring fires (`systemctl show saneha-backup.service -p
-OnFailure`, and a throwaway unit made to fail on purpose was watched starting
-it — the real backup unit was not touched to test this), the `user.err` line
-reaches the journal, and the channel is created (`201`, then `409` on the run
-after). Not yet proven: the message itself. The image currently deployed
-predates `POST /channels/{channel}/participants` and `POST
-/channels/{channel}/messages`, and answers `404` to both, which is exactly what
-the reporter prints today. Once the deploy bump lands, run
-`systemctl start saneha-backup-failed.service` once by hand and check the
-message arrived in `ops`.
+**All of this is proven, as of the `sha-1ee3300` deploy ([issue
+#25](https://github.com/surdy/saneha/issues/25)).** On quadhost: the
+`OnFailure=` wiring fires (`systemctl show saneha-backup.service -p OnFailure`,
+and a throwaway unit made to fail on purpose was watched starting it — the real
+backup unit was not touched to test this), the `user.err` line reaches the
+journal, the channel is created (`201`, then `409` on the run after), the
+identity joins (`201`, then `200`), and the message posts (`201`), with the unit
+exiting 0. A hand-started run was read back out of `ops` from a laptop.
 
 ### Snapshots on satyanas
 
@@ -495,7 +488,7 @@ sudo podman run --rm --network none --user 10001:10001 --entrypoint /bin/sh \
 # The real server, on the restored copy, with no network and no published port.
 sudo podman run -d --rm --name saneha-restore-drill --network none \
   --user 10001:10001 -v saneha-restore-drill:/data \
-  ghcr.io/surdy/saneha:sha-9ede845 serve
+  "$(grep ^Image= /etc/containers/systemd/saneha/saneha.container | cut -d= -f2-)" serve
 sudo podman exec saneha-restore-drill curl -s http://127.0.0.1:7343/channels
 
 sudo podman stop -t 5 saneha-restore-drill
@@ -535,12 +528,9 @@ inherits it.
 - **`saneha-backup-failed.service` failed** — the backup failed *and* the report
   did not get through. The failure itself is still in the journal
   (`journalctl -t saneha-backup-failed`), along with the status the server gave
-  each request. Until the deploy bump ([issue
-  #25](https://github.com/surdy/saneha/issues/25)) lands — and delete this
-  sentence when it does — a `404` on `/channels/ops/participants` or
-  `/channels/ops/messages` means only that the deployed image predates those
-  routes. After it, a `404` there means the `ops` channel or the participant is
-  gone; anything else means the server is down or the channel was closed.
+  each request. A `404` on `/channels/ops/participants` or
+  `/channels/ops/messages` means the `ops` channel or the participant is gone;
+  anything else means the server is down or the channel was closed.
 - **Certificate errors** — Caddy needs `CLOUDFLARE_API_TOKEN`, which lives in
   its own environment file on quadhost. The label in the unit references it as
   `{$$CLOUDFLARE_API_TOKEN}`; the double `$` is intentional, because Podman
