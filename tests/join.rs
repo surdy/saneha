@@ -211,15 +211,68 @@ fn an_identity_is_the_directory_the_harness_and_the_host() {
         serde_json::json!(std::process::id())
     );
 
-    // With no harness marker the identity still forms, and the CLI says how to
-    // do better.
+    // With no harness marker the identity still forms, and the CLI says what
+    // that costs: a name nothing tells apart from itself.
     let output = server.run_in(&directory, &["join", "brisk-otter"], &[]);
     let identity = stdout_of("saneha join", &output);
     assert_eq!(identity, format!("notes-method-unknown@{}", host()));
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
     assert!(stderr.contains("no harness was recognised"), "{stderr}");
+    assert!(stderr.contains(&identity), "{stderr}");
+    assert!(stderr.contains("resumes this participant"), "{stderr}");
     assert!(stderr.contains("--harness"), "{stderr}");
-    assert!(stderr.contains("SANEHA_AS"), "{stderr}");
+}
+
+/// The hint about names is for a name nobody chose. A name that was given —
+/// by `--as` or by `SANEHA_AS` — is already the answer, and a person at a
+/// shell has no harness to name either, so nothing is said (issue #46).
+#[test]
+fn a_name_that_was_given_gets_no_hint_about_naming() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    let parent = plain_directory("notes-method");
+    let directory = parent.path().join("notes-method");
+
+    // A person at a shell, with no harness environment at all.
+    let output = server.run_in(&directory, &["join", "brisk-otter", "--as", "surdy"], &[]);
+    assert_eq!(
+        stdout_of("saneha join --as surdy", &output),
+        format!("surdy@{}", host())
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "",
+        "a given name needs no advice about naming"
+    );
+
+    // The environment says the same thing, and is answered the same way.
+    let output = server.run_in(
+        &directory,
+        &["join", "brisk-otter"],
+        &[("SANEHA_AS", "surdy-env")],
+    );
+    assert_eq!(
+        stdout_of("SANEHA_AS=surdy-env saneha join", &output),
+        format!("surdy-env@{}", host())
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "", "SANEHA_AS");
+
+    // A derived name under a harness that was recognised needs no hint either:
+    // the sessions are told apart.
+    let output = server.run_in(&directory, &["join", "brisk-otter"], &[("CLAUDECODE", "1")]);
+    assert_eq!(
+        stdout_of("saneha join under a harness", &output),
+        format!("notes-method-claude@{}", host())
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "",
+        "a recognised harness needs no hint"
+    );
 }
 
 #[test]

@@ -534,6 +534,10 @@ struct Caller {
     harness: String,
     /// True when `--harness` said which, rather than the environment.
     harness_given: bool,
+    /// True when `--as` or `SANEHA_AS` said the name, rather than it being
+    /// derived from the project and the harness. A name that was given needs
+    /// no advice about naming.
+    name_given: bool,
 }
 
 impl Caller {
@@ -559,8 +563,9 @@ fn caller(me: &IdentityArgs) -> Result<Caller> {
     let host = identity::host(store::HOST.max);
     store::validate_host(&host)?;
 
-    let name = match trimmed(me.as_name.as_deref()) {
-        Some(given) => given,
+    let given_name = trimmed(me.as_name.as_deref());
+    let name = match &given_name {
+        Some(given) => given.clone(),
         None => identity::derived_name(
             &identity::project_basename(),
             &harness,
@@ -574,6 +579,7 @@ fn caller(me: &IdentityArgs) -> Result<Caller> {
         host,
         harness,
         harness_given: given_harness.is_some(),
+        name_given: given_name.is_some(),
     })
 }
 
@@ -602,6 +608,7 @@ fn join(args: JoinArgs, me: &IdentityArgs) -> Result<()> {
         host,
         harness,
         harness_given,
+        name_given,
     } = caller;
 
     let cwd = std::env::current_dir()
@@ -664,12 +671,15 @@ fn join(args: JoinArgs, me: &IdentityArgs) -> Result<()> {
             joined.identity
         ));
     }
-    if !harness_given && harness == identity::UNKNOWN_HARNESS {
+    // Only a derived name is worth explaining. A name that was given is the
+    // one that was asked for, and a person at a shell has no harness to name,
+    // so the advice below would be noise (issue #46).
+    if !name_given && !harness_given && harness == identity::UNKNOWN_HARNESS {
         warn(&format!(
-            "no harness was recognised, so this joined as {}; pass --harness ID or set {} \
-             to name yourself",
-            joined.identity,
-            identity::AS_ENV
+            "no harness was recognised, so this joined as {}; a second session on this host \
+             under the same name resumes this participant rather than being told apart from it \
+             — agents should pass --harness ID, or name yourself with --as NAME",
+            joined.identity
         ));
     }
     Ok(())
