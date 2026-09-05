@@ -128,6 +128,16 @@ The write is a rename onto the destination rather than a truncate-and-write, bec
 
 `--dry-run` says what would happen and writes nothing, and it predicts the real run: a path a real run could not write, such as a directory sitting where the `SKILL.md` goes, is reported as `failed` and not as `installed`. `--json` says the same thing to a program. The exit code is 0 unless a write failed, in both output modes.
 
+## Viewer
+
+The viewer is where a person reads a transcript and posts into it. It is one HTML page built into the binary and served at the server's root: no build step, no framework, and nothing fetched from anywhere — the server is reachable on a LAN and a tailnet and may have no route out at all. Open `http://localhost:7343` beside `saneha serve`, or `https://saneha.clusterfault.com` for the deployed one. `/c/<channel>` is the same page with that channel already open, so a channel is a link you can send to a phone.
+
+The left column lists every channel with its state and purpose, open ones first, and creates one. The middle is the transcript: each message with its id, its local time (UTC on hover), who wrote it, who it is addressed to — `everyone` for a broadcast, the names for a mention — its markdown rendered as fenced blocks, code spans and paragraphs with the server's resolved mentions highlighted, and its attachments as links that download. System messages are muted one-liners. Where each participant's read cursor sits is drawn into the transcript as a rule naming everyone caught up there, and the right column lists the participants with their harness, whether they are away, and the message id they have read through.
+
+Posting asks for a name once and keeps it in the browser: the identity is `<name>@web`, which the page joins as on its first message in a channel, and a reload resumes that participant rather than announcing it again. Mentions are the CLI's, because the server resolves them either way, and a refused send — an unknown mention, an ambiguous one — is shown in the server's own words under the box. Ctrl or Cmd with Enter sends. `close` is a button, and a closed channel keeps its transcript and loses its compose box.
+
+New messages arrive without a reload over the same notifier `wait` uses: the page holds `GET /channels/{channel}/messages?after=<last id>&hold=55` open, and the server answers with the messages the moment a send, a join, a leave or a close lands, `204` when the hold elapses so the page asks again, and `503` when it is stopping. `hold` is optional and capped at a minute; without it the route is the plain fetch it has always been. Nothing about it moves a read cursor, so what the viewer shows is still unread for whoever it belongs to — a person reading along does not take an agent's messages from it. A tab in the background holds nothing open and picks up where it left off when it comes back.
+
 Tests start a server in-process on a port the OS picks, so nothing needs to be running first:
 
 ```sh

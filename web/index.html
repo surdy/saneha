@@ -1,0 +1,903 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>saneha</title>
+<!-- The favicon is the page: one inline SVG, percent-encoded so that nothing
+     here is a fetch to anywhere. The server is on a LAN and a tailnet and may
+     have no route out at all. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%232f6f4f%22%2F%3E%3Cpath%20d%3D%22M7%208.5h18a2%202%200%200%201%202%202v9a2%202%200%200%201-2%202h-9l-6.5%205v-5H7a2%202%200%200%201-2-2v-9a2%202%200%200%201%202-2z%22%20fill%3D%22%23f6f3e9%22%2F%3E%3C%2Fsvg%3E">
+<style>
+:root {
+  --bg: #f7f6f2;
+  --panel: #ffffff;
+  --fg: #1d1f1e;
+  --muted: #6a706d;
+  --line: #dcdad2;
+  --accent: #2f6f4f;
+  --accent-soft: #e2efe7;
+  --code-bg: #f0efe9;
+  --danger: #9c2b2b;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16191a;
+    --panel: #1d2122;
+    --fg: #e6e6e1;
+    --muted: #98a09c;
+    --line: #2f3537;
+    --accent: #7fc9a1;
+    --accent-soft: #23342b;
+    --code-bg: #121516;
+    --danger: #f08b8b;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+button, input, textarea { font: inherit; color: inherit; }
+button {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+input, textarea {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  width: 100%;
+}
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+
+/* Three columns on a desk, one on a phone. */
+#app {
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr) 220px;
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas: "head head head" "channels transcript people";
+  height: 100%;
+}
+header {
+  grid-area: head;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+header h1 {
+  font-size: 17px;
+  margin: 0;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+}
+header .spacer { flex: 1; }
+#who { font-size: 13px; }
+
+#channels {
+  grid-area: channels;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  padding: 8px;
+  background: var(--panel);
+}
+#channels .head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+#channels .head span { flex: 1; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.channel {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  background: none;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 2px;
+}
+.channel:hover { background: var(--code-bg); }
+.channel.on { background: var(--accent-soft); border-color: var(--accent); }
+.channel .name { font-family: var(--mono); font-size: 13px; }
+.channel .purpose { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.state {
+  font-size: 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 6px;
+  color: var(--muted);
+}
+.state.closed { color: var(--danger); border-color: var(--danger); }
+
+main {
+  grid-area: transcript;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+}
+#topbar .title { font-family: var(--mono); font-weight: 600; }
+#topbar .purpose { color: var(--muted); font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#banner {
+  padding: 8px 14px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+#transcript {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 14px 20px;
+}
+.msg { padding: 6px 0; border-top: 1px solid var(--line); }
+.msg:first-child { border-top: none; }
+.msg .meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.msg .id { font-family: var(--mono); }
+.msg .from { color: var(--fg); font-weight: 600; }
+.msg .to { color: var(--accent); }
+.msg .body { margin-top: 2px; overflow-wrap: anywhere; }
+.msg .body p { margin: 4px 0; }
+.msg .body code { font-family: var(--mono); font-size: 13px; background: var(--code-bg); border-radius: 4px; padding: 0 3px; }
+.msg .body pre {
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+.msg .body pre code { background: none; padding: 0; }
+.mention { background: var(--accent-soft); color: var(--accent); border-radius: 4px; padding: 0 3px; font-weight: 600; }
+.sys { padding: 3px 0; font-size: 12.5px; color: var(--muted); }
+.sys .id { font-family: var(--mono); }
+.attachments { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+.attachment { font-size: 13px; color: var(--accent); text-decoration: none; }
+.attachment:hover { text-decoration: underline; }
+.attachment .size { color: var(--muted); font-size: 12px; }
+
+/* Read cursors, grouped: one rule per position, however many participants
+   share it, so five of them are five names on one line at worst. */
+.readmark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  font-size: 11.5px;
+  color: var(--accent);
+}
+.readmark::before, .readmark::after { content: ""; height: 1px; background: var(--accent); opacity: 0.45; flex: 1; }
+.readmark::before { flex: 0 0 14px; }
+
+#compose { border-top: 1px solid var(--line); padding: 8px 14px 10px; background: var(--panel); }
+#compose textarea { min-height: 62px; resize: vertical; font-family: inherit; }
+#compose .row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+#compose .hint { flex: 1; font-size: 12px; color: var(--muted); }
+#sendError { color: var(--danger); font-size: 13px; margin-top: 6px; white-space: pre-wrap; }
+
+#people {
+  grid-area: people;
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+  padding: 8px 10px;
+  background: var(--panel);
+  font-size: 13px;
+}
+#people h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 6px; }
+.person { padding: 4px 0; border-top: 1px solid var(--line); }
+.person:first-of-type { border-top: none; }
+.person .identity { font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.person .facts { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+.person.away .identity { opacity: 0.65; }
+.away-tag { color: var(--muted); }
+
+#status { font-size: 12px; color: var(--muted); padding: 0 14px 6px; }
+dialog {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--fg);
+  padding: 16px;
+  min-width: min(340px, 90vw);
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+dialog h2 { margin: 0 0 10px; font-size: 15px; }
+dialog label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 2px; }
+dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.empty { color: var(--muted); padding: 20px 0; }
+
+@media (max-width: 860px) {
+  #app {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-areas: "head" "channels" "transcript" "people";
+  }
+  #channels {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    max-height: 30vh;
+  }
+  #people {
+    border-left: none;
+    border-top: 1px solid var(--line);
+    max-height: 22vh;
+  }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>saneha</h1>
+    <span class="muted" id="serverNote">a channel for agents and the person running them</span>
+    <span class="spacer"></span>
+    <button id="who" type="button" title="Change the name you post under"></button>
+  </header>
+
+  <nav id="channels">
+    <div class="head"><span>channels</span><button id="newChannel" type="button" title="Create a channel">new</button></div>
+    <div id="channelList"></div>
+  </nav>
+
+  <main>
+    <div id="topbar">
+      <span class="title" id="channelName">no channel</span>
+      <span class="state" id="channelState" hidden></span>
+      <span class="purpose" id="channelPurpose"></span>
+      <button id="closeChannel" type="button" hidden>close</button>
+    </div>
+    <div id="banner" hidden></div>
+    <div id="transcript"><p class="empty">Pick a channel on the left, or create one.</p></div>
+    <div id="status"></div>
+    <form id="compose" hidden>
+      <textarea id="body" placeholder="Write a message. @name addresses a participant; @all addresses everyone."></textarea>
+      <div class="row">
+        <span class="hint" id="composeHint"></span>
+        <button type="submit" class="primary">send</button>
+      </div>
+      <div id="sendError"></div>
+    </form>
+  </main>
+
+  <aside id="people">
+    <h2>participants</h2>
+    <div id="peopleList"><p class="muted">—</p></div>
+  </aside>
+</div>
+
+<dialog id="nameDialog">
+  <form method="dialog">
+    <h2>Post as</h2>
+    <label for="nameInput">Name. Your identity in a channel is this name at <span class="mono">web</span>.</label>
+    <input id="nameInput" autocomplete="off" spellcheck="false">
+    <p class="muted" id="namePreview"></p>
+    <div class="row"><button value="cancel">cancel</button><button value="ok" class="primary" id="nameOk">use it</button></div>
+  </form>
+</dialog>
+
+<dialog id="channelDialog">
+  <form method="dialog">
+    <h2>New channel</h2>
+    <label for="newName">Name. Leave it empty and the server mints one.</label>
+    <input id="newName" autocomplete="off" spellcheck="false" placeholder="brisk-otter">
+    <label for="newPurpose">Purpose, one line.</label>
+    <input id="newPurpose" autocomplete="off" placeholder="coordinating the refactor">
+    <p class="muted" id="newError"></p>
+    <div class="row"><button value="cancel">cancel</button><button value="ok" class="primary">create</button></div>
+  </form>
+</dialog>
+
+<script>
+"use strict";
+(function () {
+  // The host and harness halves of a person posting from this page. The scope
+  // says a person joining from the viewer is <name>@web; the harness is what
+  // program a participant runs inside, and this one is a browser.
+  const HOST = "web";
+  const HARNESS = "web";
+  const NAME_KEY = "saneha.name";
+  const DEFAULT_NAME = "surdy";
+  const PAGE = 500;            // how much history one fetch asks for
+  const HOLD = 55;             // seconds the server may hold a poll open
+  const BACKOFF_MAX = 30000;
+
+  const el = (id) => document.getElementById(id);
+  const ui = {
+    channelList: el("channelList"), channelName: el("channelName"),
+    channelState: el("channelState"), channelPurpose: el("channelPurpose"),
+    closeChannel: el("closeChannel"), banner: el("banner"),
+    transcript: el("transcript"), status: el("status"), compose: el("compose"),
+    body: el("body"), sendError: el("sendError"), composeHint: el("composeHint"),
+    people: el("peopleList"), who: el("who"),
+    nameDialog: el("nameDialog"), nameInput: el("nameInput"), namePreview: el("namePreview"),
+    channelDialog: el("channelDialog"), newName: el("newName"),
+    newPurpose: el("newPurpose"), newError: el("newError")
+  };
+
+  const state = {
+    channels: [],
+    current: null,       // the channel being read, by name
+    detail: null,        // its Channel, for state and purpose
+    messages: [],        // what has been loaded, oldest first
+    lastId: 0,           // the id the next poll asks after
+    participants: [],
+    name: null,          // the name half of this person's identity
+    joined: new Set(),   // channels this page has already joined, so a reload
+                         // is not a join message per visit
+    // Bumped whenever the channel changes or a follower is restarted. A
+    // follower whose generation is stale returns instead of rendering over
+    // whatever is on screen now.
+    generation: 0
+  };
+
+  const enc = encodeURIComponent;
+  const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+  function esc(text) {
+    return String(text).replace(/[&<>"']/g, (c) => (
+      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+    ));
+  }
+
+  /// One request. A 204 is `null`, a failure is an Error carrying the
+  /// server's own words, which are written to be read (there is no auth, so
+  /// nothing is hidden).
+  async function api(path, init) {
+    const options = Object.assign({ headers: { "content-type": "application/json" } }, init || {});
+    const response = await fetch(path, options);
+    if (response.status === 204) return null;
+    const text = await response.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (ignored) { data = null; }
+    if (!response.ok) {
+      const failure = new Error((data && data.error) || text || ("request failed: " + response.status));
+      failure.status = response.status;
+      throw failure;
+    }
+    return data;
+  }
+
+  // ---- identity -----------------------------------------------------------
+
+  /// The alphabet the server holds a name to: lowercase letters, digits and
+  /// single hyphens. Folding here means the dialog shows what will be granted
+  /// rather than the server refusing it a moment later.
+  function slug(raw) {
+    return String(raw).toLowerCase().replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "").slice(0, 64);
+  }
+
+  function identity() { return state.name ? state.name + "@" + HOST : null; }
+
+  function showWho() {
+    ui.who.textContent = state.name ? "posting as " + identity() : "set a name";
+    ui.composeHint.textContent = state.name
+      ? "Ctrl or Cmd with Enter sends. You post as " + identity() + "."
+      : "Ctrl or Cmd with Enter sends.";
+  }
+
+  function askName() {
+    ui.nameInput.value = state.name || DEFAULT_NAME;
+    const preview = () => {
+      const name = slug(ui.nameInput.value);
+      ui.namePreview.textContent = name ? "You will post as " + name + "@" + HOST : "A name is needed.";
+    };
+    preview();
+    ui.nameInput.oninput = preview;
+    ui.nameDialog.showModal();
+    ui.nameInput.select();
+    return new Promise((done) => {
+      ui.nameDialog.onclose = () => {
+        if (ui.nameDialog.returnValue === "ok") {
+          const name = slug(ui.nameInput.value);
+          if (name) {
+            state.name = name;
+            try { localStorage.setItem(NAME_KEY, name); } catch (ignored) { /* private window */ }
+          }
+        }
+        showWho();
+        done(state.name);
+      };
+    });
+  }
+
+  async function ensureName() {
+    if (state.name) return state.name;
+    return await askName();
+  }
+
+  /// Joins the channel if this identity is not already in it and present.
+  /// A join writes a system message and a resume writes one too, so the page
+  /// looks at the participants it is already polling before it makes one.
+  async function ensureJoined(channel) {
+    if (state.joined.has(channel)) return;
+    const mine = state.participants.find((p) => p.identity === identity());
+    if (mine && !mine.away) { state.joined.add(channel); return; }
+    await api("/channels/" + enc(channel) + "/participants", {
+      method: "POST",
+      body: JSON.stringify({
+        name: state.name, host: HOST, harness: HARNESS, cwd: "viewer",
+        same_host_session_live: false,
+        // Resume semantics: the server refuses a join whose idea of who held
+        // the identity is stale, so the page says what it last saw.
+        held_session_id: (mine && mine.session_id) || undefined
+      })
+    });
+    state.joined.add(channel);
+  }
+
+  // ---- channels -----------------------------------------------------------
+
+  async function loadChannels() {
+    try {
+      const data = await api("/channels");
+      state.channels = data.channels || [];
+      renderChannels();
+    } catch (failure) {
+      ui.channelList.innerHTML = '<p class="muted">' + esc(failure.message) + "</p>";
+    }
+  }
+
+  function renderChannels() {
+    // Open first, then by name: what is live is what is being read.
+    const sorted = state.channels.slice().sort((a, b) => {
+      if (a.state !== b.state) return a.state === "open" ? -1 : 1;
+      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    });
+    if (!sorted.length) {
+      ui.channelList.innerHTML = '<p class="muted">No channels yet.</p>';
+      return;
+    }
+    ui.channelList.innerHTML = sorted.map((channel) => (
+      '<button type="button" class="channel' + (channel.name === state.current ? " on" : "") +
+      '" data-channel="' + esc(channel.name) + '">' +
+      '<span class="name">' + esc(channel.name) + "</span> " +
+      '<span class="state' + (channel.state === "closed" ? " closed" : "") + '">' + esc(channel.state) + "</span>" +
+      '<span class="purpose">' + esc(channel.purpose || "") + "</span>" +
+      "</button>"
+    )).join("");
+    for (const button of ui.channelList.querySelectorAll(".channel")) {
+      button.onclick = () => openChannel(button.dataset.channel, true);
+    }
+  }
+
+  // ---- the transcript -----------------------------------------------------
+
+  /// A body as markdown, minimally and safely: everything is escaped before
+  /// anything is marked up, so no part of a body can become an element. What
+  /// is supported is what agents write: fenced blocks, code spans, paragraphs,
+  /// and the mentions the server resolved for us.
+  function renderBody(text, mentionable) {
+    const lines = String(text).split("\n");
+    let html = "";
+    let paragraph = [];
+    let code = null;   // the lines of a fenced block, while one is open
+
+    const flush = () => {
+      if (!paragraph.length) return;
+      html += "<p>" + paragraph.map((line) => inline(line, mentionable)).join("<br>") + "</p>";
+      paragraph = [];
+    };
+    for (const line of lines) {
+      if (line.trimStart().startsWith("```")) {
+        if (code) { html += "<pre><code>" + esc(code.join("\n")) + "</code></pre>"; code = null; }
+        else { flush(); code = []; }
+        continue;
+      }
+      if (code) { code.push(line); continue; }
+      if (!line.trim()) { flush(); continue; }
+      paragraph.push(line);
+    }
+    // A fence nobody closed is still code: that is what it was being written
+    // as, and rendering the rest as prose would find mentions in it.
+    if (code) html += "<pre><code>" + esc(code.join("\n")) + "</code></pre>";
+    flush();
+    return html;
+  }
+
+  /// One line: code spans are code, and only what is left is prose that can
+  /// hold a mention. Splitting on backticks first is what keeps `@types/node`
+  /// inside a span from being lit up.
+  function inline(line, mentionable) {
+    const pieces = line.split("`");
+    const balanced = pieces.length % 2 === 1;
+    let html = "";
+    let previousWasProse = false;
+    pieces.forEach((piece, index) => {
+      const isCode = index % 2 === 1 && (balanced || index < pieces.length - 1);
+      if (isCode) {
+        html += "<code>" + esc(piece) + "</code>";
+        previousWasProse = false;
+      } else {
+        // A backtick that opened nothing is a backtick.
+        if (index > 0 && previousWasProse) html += "`";
+        html += mentions(esc(piece), mentionable);
+        previousWasProse = true;
+      }
+    });
+    return html;
+  }
+
+  /// Lights up the `@name` mentions that really addressed somebody. The server
+  /// resolved the recipients when the message was written, so the page marks
+  /// what it can match against them rather than guessing at its own rules;
+  /// `@all` is expanded by the server, so it is recognised by name.
+  function mentions(escaped, mentionable) {
+    return escaped.replace(/(^|\s)@([a-z0-9-]+(?:@[a-z0-9-]+)?)(?![\w./-])/gi, (whole, before, who) => {
+      if (!mentionable.has(who.toLowerCase())) return whole;
+      return before + '<span class="mention">@' + who + "</span>";
+    });
+  }
+
+  /// Every name a mention in this message could have used: each recipient's
+  /// short name and full identity, plus `all`, which the server expanded into
+  /// those recipients on the way in.
+  function mentionable(message) {
+    const names = new Set();
+    if (message.recipients && message.recipients.length) names.add("all");
+    for (const recipient of message.recipients || []) {
+      names.add(recipient.toLowerCase());
+      names.add(recipient.split("@")[0].toLowerCase());
+    }
+    return names;
+  }
+
+  function shortName(identityText) { return String(identityText).split("@")[0]; }
+
+  function when(created) {
+    const at = new Date(created);
+    if (isNaN(at)) return { text: created, title: created };
+    const today = new Date();
+    const sameDay = at.toDateString() === today.toDateString();
+    const time = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return {
+      text: sameDay ? time : at.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + time,
+      title: created + " (UTC)"
+    };
+  }
+
+  function size(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
+  }
+
+  function renderTranscript() {
+    if (!state.current) return;
+    // Follow the end of the transcript only for a reader who is already there,
+    // so a live message never yanks somebody out of the history they scrolled
+    // back to.
+    const box = ui.transcript;
+    const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+
+    if (!state.messages.length) {
+      box.innerHTML = '<p class="empty">Nothing in this transcript yet.</p>';
+      return;
+    }
+
+    // Read cursors, grouped by the message they sit on: one marker per
+    // position, naming everyone whose cursor is there. Five participants
+    // caught up are one line, not five.
+    const readers = new Map();
+    for (const person of state.participants) {
+      if (!person.read_cursor) continue;
+      const at = readers.get(person.read_cursor) || [];
+      at.push(person.identity);
+      readers.set(person.read_cursor, at);
+    }
+
+    const html = [];
+    for (const message of state.messages) {
+      html.push(message.kind === "message" ? renderMessage(message) : renderSystem(message));
+      const here = readers.get(message.id);
+      if (here) {
+        html.push('<div class="readmark">' +
+          esc(here.map(shortName).join(", ")) +
+          (here.length > 1 ? " have read to here" : " has read to here") + "</div>");
+      }
+    }
+    box.innerHTML = html.join("");
+    if (atEnd) box.scrollTop = box.scrollHeight;
+  }
+
+  function renderMessage(message) {
+    const at = when(message.created_at);
+    const to = (message.recipients && message.recipients.length)
+      ? '<span class="to" title="' + esc(message.recipients.join(", ")) + '">to ' +
+        esc(message.recipients.map(shortName).join(", ")) + "</span>"
+      : '<span class="to">everyone</span>';
+    const files = (message.attachments || []).map((attachment) => (
+      '<a class="attachment" href="/channels/' + enc(message.channel) + "/attachments/" + enc(attachment.id) +
+      '">' + esc(attachment.filename) + ' <span class="size">' + esc(size(attachment.size)) + "</span></a>"
+    )).join("");
+    return '<div class="msg">' +
+      '<div class="meta">' +
+      '<span class="id">#' + message.id + "</span>" +
+      '<span class="from" title="' + esc(message.from || "") + '">' + esc(shortName(message.from || "?")) + "</span>" +
+      to +
+      '<span title="' + esc(at.title) + '">' + esc(at.text) + "</span>" +
+      "</div>" +
+      '<div class="body">' + renderBody(message.body, mentionable(message)) + "</div>" +
+      (files ? '<div class="attachments">' + files + "</div>" : "") +
+      "</div>";
+  }
+
+  function renderSystem(message) {
+    const at = when(message.created_at);
+    return '<div class="sys"><span class="id">#' + message.id + "</span> " +
+      esc(message.body) + ' <span title="' + esc(at.title) + '">' + esc(at.text) + "</span></div>";
+  }
+
+  function renderPeople() {
+    if (!state.participants.length) {
+      ui.people.innerHTML = '<p class="muted">Nobody has joined.</p>';
+      return;
+    }
+    ui.people.innerHTML = state.participants.map((person) => (
+      '<div class="person' + (person.away ? " away" : "") + '">' +
+      '<div class="identity">' + esc(person.identity) + "</div>" +
+      '<div class="facts">' +
+      "<span>" + esc(person.harness) + "</span>" +
+      (person.away ? '<span class="away-tag">away</span>' : "") +
+      "<span>" + (person.read_cursor ? "read #" + person.read_cursor : "read nothing") + "</span>" +
+      "</div></div>"
+    )).join("");
+  }
+
+  function renderChannelHead() {
+    const closed = state.detail && state.detail.state === "closed";
+    ui.channelName.textContent = state.current || "no channel";
+    ui.channelPurpose.textContent = (state.detail && state.detail.purpose) || "";
+    ui.channelState.hidden = !state.detail;
+    if (state.detail) {
+      ui.channelState.textContent = state.detail.state;
+      ui.channelState.classList.toggle("closed", closed);
+    }
+    ui.closeChannel.hidden = !state.current || closed;
+    ui.banner.hidden = !closed;
+    if (closed) ui.banner.textContent = "This channel is closed. It takes no more messages and is here to be read.";
+    ui.compose.hidden = !state.current || closed;
+  }
+
+  // ---- following a channel ------------------------------------------------
+
+  function openChannel(name, push) {
+    state.generation += 1;
+    state.current = name;
+    state.detail = null;
+    state.messages = [];
+    state.lastId = 0;
+    state.participants = [];
+    ui.sendError.textContent = "";
+    ui.transcript.innerHTML = '<p class="empty">Loading…</p>';
+    renderChannels();
+    renderChannelHead();
+    renderPeople();
+    if (push) history.pushState({ channel: name }, "", "/c/" + enc(name));
+    document.title = name + " · saneha";
+    follow(name, state.generation);
+  }
+
+  /// Restarts the follower on the channel already open, from the last id it
+  /// has: what a tab coming back into view does, and what a poll that failed
+  /// does after its backoff.
+  function resume() {
+    if (!state.current) return;
+    state.generation += 1;
+    follow(state.current, state.generation);
+  }
+
+  async function refreshSide(channel) {
+    const [detail, people] = await Promise.all([
+      api("/channels/" + enc(channel)),
+      api("/channels/" + enc(channel) + "/participants")
+    ]);
+    state.detail = detail.channel || detail;
+    state.participants = people.participants || [];
+  }
+
+  /// History to the end, then one long poll after another.
+  ///
+  /// The poll is `GET /channels/{c}/messages?after=<last id>&hold=55`: no
+  /// identity, no read cursor, nothing moved. The server answers with the
+  /// messages when any land, or 204 when the hold elapses, and either way the
+  /// next request goes out at once, so a message appears here about as fast as
+  /// it appears in a CLI `wait`.
+  async function follow(channel, generation) {
+    let backoff = 1000;
+    const stale = () => generation !== state.generation || channel !== state.current;
+
+    while (!stale()) {
+      try {
+        if (document.hidden) { ui.status.textContent = "Paused while this tab is in the background."; return; }
+
+        // History first, a page at a time, until the end of the transcript.
+        if (state.lastId === 0) {
+          for (;;) {
+            const data = await api("/channels/" + enc(channel) + "/messages?after=" + state.lastId + "&limit=" + PAGE);
+            if (stale()) return;
+            const got = data.messages || [];
+            take(got);
+            if (got.length < PAGE) break;
+          }
+          await refreshSide(channel);
+          if (stale()) return;
+          renderChannelHead();
+          renderPeople();
+          renderTranscript();
+        }
+        backoff = 1000;
+
+        if (state.detail && state.detail.state === "closed") {
+          ui.status.textContent = "This channel is closed; nothing more will arrive.";
+          return;
+        }
+        ui.status.textContent = "";
+
+        const data = await api("/channels/" + enc(channel) + "/messages?after=" + state.lastId + "&hold=" + HOLD);
+        if (stale()) return;
+        // Null is the 204 at the end of a hold: nothing arrived, ask again.
+        if (data) take(data.messages || []);
+        // Cursors move without a message being written — a CLI `read` moves
+        // one — so the panel is refreshed on the same beat as the poll.
+        await refreshSide(channel);
+        if (stale()) return;
+        renderChannelHead();
+        renderPeople();
+        renderTranscript();
+        if (data) renderChannels();
+      } catch (failure) {
+        if (stale()) return;
+        if (failure.status === 404) {
+          ui.status.textContent = "";
+          ui.transcript.innerHTML = '<p class="empty">' + esc(failure.message) + "</p>";
+          state.current = null;
+          renderChannelHead();
+          loadChannels();
+          return;
+        }
+        ui.status.textContent = failure.message + " — trying again in " + Math.round(backoff / 1000) + "s.";
+        await sleep(backoff);
+        backoff = Math.min(backoff * 2, BACKOFF_MAX);
+      }
+    }
+  }
+
+  /// Adds a page of messages, keeping the transcript ordered and the id the
+  /// next poll asks after.
+  function take(messages) {
+    for (const message of messages) {
+      if (message.id <= state.lastId) continue;
+      state.messages.push(message);
+      state.lastId = message.id;
+    }
+  }
+
+  // ---- posting ------------------------------------------------------------
+
+  async function send() {
+    const body = ui.body.value;
+    if (!body.trim() || !state.current) return;
+    ui.sendError.textContent = "";
+    try {
+      if (!(await ensureName())) return;
+      await ensureJoined(state.current);
+      await api("/channels/" + enc(state.current) + "/messages", {
+        method: "POST",
+        body: JSON.stringify({ from: identity(), body: body })
+      });
+      ui.body.value = "";
+      // Nothing is added here: the poll in flight is woken by this send and
+      // brings the message back the same way it brings anyone else's.
+    } catch (failure) {
+      // The server's words, which say what to do about an unknown mention or
+      // an ambiguous one.
+      ui.sendError.textContent = failure.message;
+    }
+  }
+
+  async function closeCurrent() {
+    if (!state.current) return;
+    if (!(await ensureName())) return;
+    if (!confirm("Close " + state.current + "? It takes no more messages afterwards, and every wait on it ends.")) return;
+    try {
+      await api("/channels/" + enc(state.current) + "/close", {
+        method: "POST",
+        body: JSON.stringify({ by: identity() })
+      });
+      await loadChannels();
+      resume();
+    } catch (failure) {
+      ui.status.textContent = failure.message;
+    }
+  }
+
+  async function createChannel() {
+    ui.newName.value = "";
+    ui.newPurpose.value = "";
+    ui.newError.textContent = "";
+    ui.channelDialog.showModal();
+    ui.channelDialog.onclose = async () => {
+      if (ui.channelDialog.returnValue !== "ok") return;
+      const name = ui.newName.value.trim();
+      const purpose = ui.newPurpose.value.trim();
+      try {
+        const channel = await api("/channels", {
+          method: "POST",
+          body: JSON.stringify({ name: name || undefined, purpose: purpose || undefined })
+        });
+        await loadChannels();
+        openChannel(channel.name, true);
+      } catch (failure) {
+        ui.newError.textContent = failure.message;
+        ui.channelDialog.showModal();
+      }
+    };
+  }
+
+  // ---- wiring -------------------------------------------------------------
+
+  ui.compose.addEventListener("submit", (event) => { event.preventDefault(); send(); });
+  ui.body.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); send(); }
+  });
+  ui.who.onclick = askName;
+  ui.closeChannel.onclick = closeCurrent;
+  el("newChannel").onclick = createChannel;
+
+  // A background tab holds no poll open: the server has better things to do
+  // than hold a minute per forgotten tab, and coming back is one request.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) resume();
+    else state.generation += 1;
+  });
+
+  window.addEventListener("popstate", () => {
+    const name = channelFromPath();
+    if (name) openChannel(name, false); else location.reload();
+  });
+
+  /// The channel in `/c/<name>`, so a channel is a link that can be sent.
+  function channelFromPath() {
+    const match = location.pathname.match(/^\/c\/([^/]+)\/?$/);
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  try { state.name = localStorage.getItem(NAME_KEY); } catch (ignored) { state.name = null; }
+  showWho();
+  loadChannels();
+  const opening = channelFromPath();
+  if (opening) openChannel(opening, false);
+})();
+</script>
+</body>
+</html>

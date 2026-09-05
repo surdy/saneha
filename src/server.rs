@@ -211,7 +211,12 @@ impl Drop for Held<'_> {
 /// ever end.
 fn routes() -> Router<Arc<Serving>> {
     Router::new()
-        .route("/", get(root))
+        // The viewer, and the same viewer under a channel's own path so that a
+        // channel is a link somebody can send. The page reads the path and
+        // opens that channel; there is nothing per-channel to render on the
+        // server, and one page in the binary is the whole of it.
+        .route("/", get(viewer))
+        .route("/c/{channel}", get(viewer))
         .route("/health", get(health))
         .route("/channels", post(create_channel).get(list_channels))
         // One channel, and the counts a delete is confirmed against; and the
@@ -466,8 +471,19 @@ fn say(line: &str) {
     let _ = writeln!(out, "{line}").and_then(|()| out.flush());
 }
 
-async fn root() -> &'static str {
-    "saneha is running. Point SANEHA_URL at this address.\n"
+/// The viewer: one page, built into the binary.
+///
+/// It is served here rather than from a directory because the whole of it is
+/// one file with no build step and nothing to fetch: a deploy is the binary,
+/// and a server on a LAN with no route to the internet still renders it.
+pub const VIEWER: &str = include_str!("../web/index.html");
+
+async fn viewer() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8".to_string())],
+        VIEWER,
+    )
+        .into_response()
 }
 
 /// Whether the server is up, and the one number about it that is not visible
@@ -963,19 +979,101 @@ fn look(
     ))
 }
 
-/// A page of a transcript. This moves nothing, so a caller that wants its read
-/// cursor advanced asks for that separately.
+/// A page of a transcript, and with `hold` a page the server will wait for.
+///
+/// This moves nothing, so a caller that wants its read cursor advanced asks
+/// for that separately, and a held request moves nothing either: what the
+/// viewer is shown is still unread for every participant it belongs to.
+///
+/// Without `hold` this answers at once, with an empty list when there is
+/// nothing after `after`. With it, an empty page is held open on the same
+/// notifier the per-participant wait uses, and ends in one of four ways: the
+/// messages, when a send, a join, a leave or a close lands; `204`, when the
+/// hold elapses and the caller asks again; `503`, when the server is
+/// stopping; and `404`, when the channel is deleted underneath it, because the
+/// wake sends it back to look and there is nothing left to look at.
+///
+/// The order inside the loop is the wait route's, for the reason given there:
+/// the `Notified` is made before the look, so a message written between the
+/// look and the sleep is a wake this request already holds rather than one it
+/// sleeps through. The first look happens before anything is registered, so a
+/// channel name nobody has ever used leaves no notifier behind on its way to
+/// a `404`.
 async fn list_messages(
     State(serving): State<Arc<Serving>>,
     Path(channel): Path<String>,
     ApiQuery(query): ApiQuery<MessageQuery>,
-) -> Result<Json<MessageList>, Failure> {
-    let messages = serving.store.messages(
-        &channel,
-        query.after.unwrap_or(0),
-        query.limit.unwrap_or(DEFAULT_MESSAGE_LIMIT),
-    )?;
-    Ok(Json(MessageList { messages }))
+) -> Result<Response, Failure> {
+    let after = query.after.unwrap_or(0);
+    let limit = query.limit.unwrap_or(DEFAULT_MESSAGE_LIMIT);
+
+    let Some(hold) = hold_of(query.hold) else {
+        let messages = serving.store.messages(&channel, after, limit)?;
+        return Ok(Json(MessageList { messages }).into_response());
+    };
+
+    let deadline = tokio::time::Instant::now() + hold;
+    let mut stopping = serving.stopping();
+
+    if *stopping.borrow_and_update() {
+        return Err(Failure::stopping());
+    }
+    if let Some(answer) = page(&serving, &channel, after, limit)? {
+        return Ok(answer);
+    }
+    let notify = serving.waiters.on(&channel);
+
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+
+        let woken = notify.notified();
+        tokio::pin!(woken);
+
+        if *stopping.borrow_and_update() {
+            return Err(Failure::stopping());
+        }
+        if let Some(answer) = page(&serving, &channel, after, limit)? {
+            return Ok(answer);
+        }
+
+        tokio::select! {
+            () = woken => {}
+            () = tokio::time::sleep(left) => return Ok(StatusCode::NO_CONTENT.into_response()),
+            _ = stopping.changed() => return Err(Failure::stopping()),
+        }
+    }
+}
+
+/// How long a transcript poll may be held open.
+///
+/// Absent is not held at all: a page that asks for what is there now is the
+/// fetch this route has always been. `hold=0` is a caller asking for the
+/// shortest hold there is rather than for none, so it is floored at a second;
+/// anything above [`MAX_HOLD`] is the server's cap rather than the caller's
+/// request, for the reason [`MAX_HOLD`] gives.
+fn hold_of(asked: Option<u64>) -> Option<Duration> {
+    asked.map(|seconds| Duration::from_secs(seconds.clamp(1, MAX_HOLD)))
+}
+
+/// One look at what a channel holds after `after`: `Some` when that is an
+/// answer to give, `None` when the transcript has nothing newer yet.
+///
+/// The store's lock is taken and given back inside this call, so a held
+/// request never holds it across an await.
+fn page(
+    serving: &Serving,
+    channel: &str,
+    after: i64,
+    limit: usize,
+) -> Result<Option<Response>, Failure> {
+    let messages = serving.store.messages(channel, after, limit)?;
+    if messages.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Json(MessageList { messages }).into_response()))
 }
 
 /// Moves a read cursor forward. A value below the one recorded is ignored
@@ -1106,6 +1204,22 @@ impl From<StoreError> for Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a transcript poll is allowed to ask for. The cap is the server's
+    /// and not the caller's, and asking for none of it is not the same request
+    /// as asking for as little as there is.
+    #[test]
+    fn a_hold_is_what_the_server_allows() {
+        assert_eq!(hold_of(None), None, "a fetch with no hold was held anyway");
+        assert_eq!(hold_of(Some(0)), Some(Duration::from_secs(1)));
+        assert_eq!(hold_of(Some(55)), Some(Duration::from_secs(55)));
+        assert_eq!(hold_of(Some(MAX_HOLD)), Some(Duration::from_secs(MAX_HOLD)));
+        assert_eq!(
+            hold_of(Some(3600)),
+            Some(Duration::from_secs(MAX_HOLD)),
+            "an hour was not cut down to the cap"
+        );
+    }
 
     /// The order the wait handler works in, on its own: a `Notified` made
     /// before the wake is woken by it, even though nothing polled it in
