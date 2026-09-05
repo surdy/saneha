@@ -287,7 +287,8 @@ saneha read ops                                                               # 
 
 **Half of this is proven and half is waiting on a deploy.** Proven on quadhost:
 the `OnFailure=` wiring fires (`systemctl show saneha-backup.service -p
-OnFailure`, and a failing unit was watched trigger it), the `user.err` line
+OnFailure`, and a throwaway unit made to fail on purpose was watched starting
+it — the real backup unit was not touched to test this), the `user.err` line
 reaches the journal, and the channel is created (`201`, then `409` on the run
 after). Not yet proven: the message itself. The image currently deployed
 predates `POST /channels/{channel}/participants` and `POST
