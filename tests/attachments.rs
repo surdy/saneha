@@ -529,6 +529,55 @@ fn an_attachment_id_that_names_nothing_or_something_else_fails_the_send() {
 }
 
 #[test]
+fn a_send_made_again_under_its_key_still_carries_what_it_bound() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    let workspace = tempfile::tempdir().expect("a directory to attach from");
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+    let path = file(workspace.path(), "handoff.md", b"the handoff\n");
+    let attachment = remote
+        .upload_attachment("brisk-otter", &path)
+        .expect("upload");
+
+    // An attachment belongs to the one message that carries it, so naming it
+    // twice is refused — but a send made again under its own key is not a
+    // second message naming it, it is the first one being asked for again. It
+    // comes back carrying what it bound rather than refused for having bound
+    // it (issue #38).
+    let carrying = NewMessage {
+        from: alice.clone(),
+        body: "the handoff".to_string(),
+        to: Vec::new(),
+        attachments: vec![attachment.id.clone()],
+        key: Some(saneha::api::mint_id()),
+    };
+    let first = remote
+        .send_message("brisk-otter", &carrying)
+        .expect("the send");
+    let again = remote
+        .send_message("brisk-otter", &carrying)
+        .expect("the send made again");
+
+    assert_eq!(again.id, first.id);
+    assert_eq!(again.attachments, first.attachments);
+    assert_eq!(again.attachments.len(), 1);
+    assert_eq!(again.attachments[0].id, attachment.id);
+    assert_eq!(again.attachments[0].filename, "handoff.md");
+
+    // One message, and one file under it.
+    let transcript = remote.messages_after("brisk-otter", 0).expect("read");
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(|message| !message.attachments.is_empty())
+            .count(),
+        1,
+        "{transcript:?}"
+    );
+}
+
+#[test]
 fn the_sweep_removes_what_nothing_ever_carried_and_leaves_the_rest() {
     let server = TestServer::start();
     let remote = server.remote();
