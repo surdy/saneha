@@ -325,6 +325,13 @@ pub struct MessageQuery {
     /// participant, so it asks by message id on the route it already reads
     /// history from, and the per-participant wait route stays what it is.
     /// Holding still moves nothing.
+    ///
+    /// A `204` says there is nothing after `after`, and is the answer both
+    /// when the hold elapsed and when something changed in the channel that
+    /// was not a message — a read cursor advancing is the only such thing.
+    /// Either way the caller looks again, which is what makes a viewer's rule
+    /// follow a `saneha read` rather than sit where it was until the next
+    /// message happened to land.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<u64>,
 }

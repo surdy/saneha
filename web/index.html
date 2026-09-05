@@ -17,6 +17,10 @@
   --line: #dcdad2;
   --accent: #2f6f4f;
   --accent-soft: #e2efe7;
+  /* The muted grey of the state pill, which sits on --accent-soft on the
+     selected row: --muted itself measures 4.27:1 there, under AA, and 11px
+     text is the last place to be short of it. */
+  --pill: #5c625f;
   --code-bg: #f0efe9;
   --danger: #9c2b2b;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -30,6 +34,8 @@
     --line: #2f3537;
     --accent: #7fc9a1;
     --accent-soft: #23342b;
+    /* On a dark selected row the muted grey is already well clear of AA. */
+    --pill: #98a09c;
     --code-bg: #121516;
     --danger: #f08b8b;
   }
@@ -121,7 +127,7 @@ header .spacer { flex: 1; }
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 0 6px;
-  color: var(--muted);
+  color: var(--pill);
 }
 .state.closed { color: var(--danger); border-color: var(--danger); }
 
@@ -279,7 +285,7 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     <div id="transcript"><p class="empty">Pick a channel on the left, or create one.</p></div>
     <div id="status"></div>
     <form id="compose" hidden>
-      <textarea id="body" placeholder="Write a message. @name addresses a participant; @all addresses everyone."></textarea>
+      <textarea id="body" aria-label="Message to send" placeholder="Write a message. @name addresses a participant; @all addresses everyone."></textarea>
       <div class="row">
         <span class="hint" id="composeHint"></span>
         <button type="submit" class="primary">send</button>
@@ -328,7 +334,12 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   const DEFAULT_NAME = "surdy";
   const PAGE = 500;            // how much history one fetch asks for
   const HOLD = 55;             // seconds the server may hold a poll open
-  const BACKOFF_MAX = 30000;
+  const FIRST_BACKOFF = 1000;  // how long the first retry after a failure waits
+  const BACKOFF_MAX = 30000;   // and the longest a run of them ever waits
+  // How often the channel list is re-fetched when no channel is open and so
+  // no poll is bringing it along. A channel arriving half a minute late in a
+  // list nobody is looking at costs nothing.
+  const CHANNELS_EVERY = 30000;
 
   const el = (id) => document.getElementById(id);
   const ui = {
@@ -356,11 +367,26 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     // Bumped whenever the channel changes or a follower is restarted. A
     // follower whose generation is stale returns instead of rendering over
     // whatever is on screen now.
-    generation: 0
+    generation: 0,
+    // The controller for the poll the current follower has in flight. A stale
+    // follower that only returned would leave the server holding its request
+    // for the rest of the minute, so the request is dropped as well as
+    // ignored: that is what makes a hidden tab really hold nothing open.
+    abort: null
   };
 
   const enc = encodeURIComponent;
   const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+  /// Ends the follower that is running, request and all, and hands back the
+  /// generation the next one runs under. Everything that changes what the page
+  /// is following goes through here, so nothing is ever left holding.
+  function nextGeneration() {
+    if (state.abort) state.abort.abort();
+    state.abort = new AbortController();
+    state.generation += 1;
+    return state.generation;
+  }
 
   function esc(text) {
     return String(text).replace(/[&<>"']/g, (c) => (
@@ -463,7 +489,12 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
       state.channels = data.channels || [];
       renderChannels();
     } catch (failure) {
-      ui.channelList.innerHTML = '<p class="muted">' + esc(failure.message) + "</p>";
+      // A list that was right a moment ago is better than an error where the
+      // channels were: this runs on every poll beat, and the follower's own
+      // status line is where a server that has gone away is reported.
+      if (!state.channels.length) {
+        ui.channelList.innerHTML = '<p class="muted">' + esc(failure.message) + "</p>";
+      }
     }
   }
 
@@ -709,7 +740,7 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   // ---- following a channel ------------------------------------------------
 
   function openChannel(name, push) {
-    state.generation += 1;
+    const generation = nextGeneration();
     state.current = name;
     state.detail = null;
     state.messages = [];
@@ -722,7 +753,7 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     renderPeople();
     if (push) history.pushState({ channel: name }, "", "/c/" + enc(name));
     document.title = name + " · saneha";
-    follow(name, state.generation);
+    follow(name, generation, state.abort.signal);
   }
 
   /// Restarts the follower on the channel already open, from the last id it
@@ -730,14 +761,14 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   /// does after its backoff.
   function resume() {
     if (!state.current) return;
-    state.generation += 1;
-    follow(state.current, state.generation);
+    const generation = nextGeneration();
+    follow(state.current, generation, state.abort.signal);
   }
 
-  async function refreshSide(channel) {
+  async function refreshSide(channel, signal) {
     const [detail, people] = await Promise.all([
-      api("/channels/" + enc(channel)),
-      api("/channels/" + enc(channel) + "/participants")
+      api("/channels/" + enc(channel), { signal }),
+      api("/channels/" + enc(channel) + "/participants", { signal })
     ]);
     state.detail = detail.channel || detail;
     state.participants = people.participants || [];
@@ -750,8 +781,8 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   /// messages when any land, or 204 when the hold elapses, and either way the
   /// next request goes out at once, so a message appears here about as fast as
   /// it appears in a CLI `wait`.
-  async function follow(channel, generation) {
-    let backoff = 1000;
+  async function follow(channel, generation, signal) {
+    let backoff = FIRST_BACKOFF;
     // Whether this run has caught up and drawn once. Every run does, before it
     // holds anything open: a follower started by a close, by a tab coming back
     // or by a failed poll would otherwise show what was true a minute ago
@@ -767,18 +798,20 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
           // History, a page at a time, until the end of the transcript — and
           // nothing at all when this run is picking up where another left off.
           for (;;) {
-            const data = await api("/channels/" + enc(channel) + "/messages?after=" + state.lastId + "&limit=" + PAGE);
+            const data = await api(
+              "/channels/" + enc(channel) + "/messages?after=" + state.lastId + "&limit=" + PAGE,
+              { signal }
+            );
             if (stale()) return;
             const got = data.messages || [];
             take(got);
             if (got.length < PAGE) break;
           }
-          await refreshSide(channel);
+          await refreshSide(channel, signal);
           if (stale()) return;
           draw();
           caughtUp = true;
         }
-        backoff = 1000;
 
         if (state.detail && state.detail.state === "closed") {
           ui.status.textContent = "This channel is closed; nothing more will arrive.";
@@ -786,16 +819,25 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
         }
         ui.status.textContent = "";
 
-        const data = await api("/channels/" + enc(channel) + "/messages?after=" + state.lastId + "&hold=" + HOLD);
+        const data = await api(
+          "/channels/" + enc(channel) + "/messages?after=" + state.lastId + "&hold=" + HOLD,
+          { signal }
+        );
         if (stale()) return;
-        // Null is the 204 at the end of a hold: nothing arrived, ask again.
+        // The poll came back, so the server is there: the next failure starts
+        // over at a second rather than where the last run of failures left off.
+        backoff = FIRST_BACKOFF;
+        // Null is the 204 that ends a hold: either it elapsed, or something
+        // changed that was not a message — a read cursor moved — and either
+        // way what follows is the look that shows it.
         if (data) take(data.messages || []);
-        // Cursors move without a message being written — a CLI `read` moves
-        // one — so the panel is refreshed on the same beat as the poll.
-        await refreshSide(channel);
+        // Cursors move without a message being written, and channels are
+        // created, closed and deleted from other machines, so the panel and
+        // the left column are refreshed on the same beat as the poll.
+        await refreshSide(channel, signal);
         if (stale()) return;
         draw();
-        if (data) renderChannels();
+        await loadChannels();
       } catch (failure) {
         if (stale()) return;
         if (failure.status === 404) {
@@ -808,6 +850,9 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
         }
         ui.status.textContent = failure.message + " — trying again in " + Math.round(backoff / 1000) + "s.";
         await sleep(backoff);
+        // Only here: a run of failures backs off further each time, and it is
+        // a poll that came back which says the server is worth asking quickly
+        // again.
         backoff = Math.min(backoff * 2, BACKOFF_MAX);
       }
     }
@@ -896,10 +941,12 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   el("newChannel").onclick = createChannel;
 
   // A background tab holds no poll open: the server has better things to do
-  // than hold a minute per forgotten tab, and coming back is one request.
+  // than hold a minute per forgotten tab, and coming back is one request. The
+  // poll in flight is dropped rather than merely ignored, so the server stops
+  // holding it the moment the tab goes away.
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) resume();
-    else state.generation += 1;
+    else nextGeneration();
   });
 
   window.addEventListener("popstate", () => {
@@ -908,10 +955,26 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   });
 
   /// The channel in `/c/<name>`, so a channel is a link that can be sent.
+  /// A path that is not valid percent-encoding names no channel, which is the
+  /// same answer as a path that names none.
   function channelFromPath() {
     const match = location.pathname.match(/^\/c\/([^/]+)\/?$/);
-    return match ? decodeURIComponent(match[1]) : null;
+    if (!match) return null;
+    try {
+      return decodeURIComponent(match[1]);
+    } catch (ignored) {
+      return null;
+    }
   }
+
+  // A channel created or closed on another machine wakes nothing here: it is
+  // not a message in the channel this page is following, and with no channel
+  // open there is no poll at all. A follower refreshes the list on its own
+  // beat, which is up to a hold apart, and this is what keeps the left column
+  // from being a minute out of date in between.
+  setInterval(() => {
+    if (!document.hidden) loadChannels();
+  }, CHANNELS_EVERY);
 
   try { state.name = localStorage.getItem(NAME_KEY); } catch (ignored) { state.name = null; }
   showWho();

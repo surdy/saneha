@@ -1027,6 +1027,9 @@ async fn list_messages(
     // channel is a request the server is holding open, and what `held_waits`
     // answers is how many of those there are.
     let held = serving.waiters.hold(&channel);
+    // Whether a wake has already sent this request back to look. The first
+    // pass has not looked because anything happened; every later one has.
+    let mut woken_once = false;
 
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1043,9 +1046,18 @@ async fn list_messages(
         if let Some(answer) = page(&serving, &channel, after, limit)? {
             return Ok(answer);
         }
+        // Woken, and yet there is nothing after `after`: what changed was not a
+        // message, and the only thing that changes without writing one is a
+        // read cursor. The caller is told to come and look rather than held for
+        // the rest of the minute, because a cursor is something the viewer
+        // draws — "alpha has read to here" — and a rule that moves a minute
+        // after the read did is a rule that is wrong for a minute.
+        if woken_once {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
 
         tokio::select! {
-            () = woken => {}
+            () = woken => woken_once = true,
             () = tokio::time::sleep(left) => return Ok(StatusCode::NO_CONTENT.into_response()),
             _ = stopping.changed() => return Err(Failure::stopping()),
         }
@@ -1084,6 +1096,14 @@ fn page(
 /// Moves a read cursor forward. A value below the one recorded is ignored
 /// rather than refused, so a cursor never moves backwards however many readers
 /// share an identity.
+///
+/// This wakes, which nothing else that writes no message does. A cursor is
+/// something the viewer draws — "alpha has read to here" — and a `saneha read`
+/// moves one without adding a line to the transcript, so without this the
+/// viewer's rule would sit where it was until the next message happened to
+/// land, up to a whole hold later. What a wake costs the waits is one look
+/// each: a `wait` re-reads its unread, finds the same nothing, and goes back
+/// to holding.
 async fn set_read_cursor(
     State(serving): State<Arc<Serving>>,
     Path((channel, identity)): Path<(String, String)>,
@@ -1092,6 +1112,7 @@ async fn set_read_cursor(
     let participant = serving
         .store
         .set_read_cursor(&channel, &identity, body.read_cursor)?;
+    serving.waiters.wake(&channel);
     Ok(Json(participant))
 }
 

@@ -313,6 +313,62 @@ fn a_hold_that_hears_nothing_answers_204() {
     );
 }
 
+/// A read cursor moves without a message being written, and the viewer draws
+/// where each cursor sits, so a held poll is sent back to look: it finds
+/// nothing after `after`, answers `204`, and the page asks again and moves its
+/// rule. Without this the rule would be wrong until the next message happened
+/// to land — up to a whole hold later.
+#[test]
+fn a_cursor_that_moves_ends_a_hold() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    remote
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    let alpha = join(&remote, "brisk-otter", "alpha");
+    let after = remote
+        .messages("brisk-otter", 0, 500)
+        .expect("the transcript so far")
+        .last()
+        .expect("the join")
+        .id;
+
+    let url = format!(
+        "{}/channels/brisk-otter/messages?after={after}&hold=30",
+        server.url
+    );
+    std::thread::scope(|scope| {
+        let held = scope.spawn(move || {
+            let (status, body) = get(&url);
+            (Instant::now(), status, body)
+        });
+
+        server.wait_until_holding(1);
+        let moved_at = Instant::now();
+        remote
+            .set_read_cursor("brisk-otter", &alpha, after)
+            .expect("move the cursor");
+
+        let (answered_at, status, body) = held.join().expect("the held poll");
+        assert_eq!(
+            status, 204,
+            "a cursor that moved did not end the hold with a 204: {body}"
+        );
+        let woken = answered_at.saturating_duration_since(moved_at);
+        assert!(
+            woken < Duration::from_secs(1),
+            "the hold took {woken:?} to answer a cursor that had already moved"
+        );
+    });
+
+    // And the cursor really did move, which is what the page draws.
+    let alpha_now = remote
+        .participant("brisk-otter", &alpha)
+        .expect("participant")
+        .expect("alpha is there");
+    assert_eq!(alpha_now.read_cursor, after);
+}
+
 /// A viewer following a channel is a request the server is holding open, and
 /// `held_waits` counts it alongside the per-participant waits: what that number
 /// answers is how much the server has in flight on purpose, and a tab left open
