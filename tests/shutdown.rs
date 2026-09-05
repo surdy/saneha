@@ -168,6 +168,86 @@ fn a_held_wait_does_not_stall_the_stop() {
     );
 }
 
+/// A held transcript poll must not stall the stop either.
+///
+/// The viewer follows a channel by holding `GET .../messages?hold=55` open on
+/// the same notifier a `wait` uses, so a tab left open on a quiet channel is a
+/// request in flight for a minute at a time. It ends on the same switch: the
+/// server says it is stopping, and the page asks again when it is back.
+#[test]
+fn a_held_transcript_poll_does_not_stall_the_stop() {
+    let database = tempfile::tempdir().expect("temporary directory");
+    let mut server = Command::new(env!("CARGO_BIN_EXE_saneha"))
+        .args(["serve", "--bind", "127.0.0.1:0", "--db"])
+        .arg(database.path().join("saneha.db"))
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start the server");
+
+    let mut lines = BufReader::new(server.stdout.take().expect("the server's standard output"))
+        .lines()
+        .map(|line| line.expect("read a line the server printed"));
+    let address = address_from(&lines.next().expect("the line saying where it is serving"));
+    let url = format!("http://{address}");
+
+    // An empty channel, so the poll below really is held rather than answered
+    // by what is already in the transcript.
+    let created = Command::new(env!("CARGO_BIN_EXE_saneha"))
+        .args(["new", "brisk-otter"])
+        .env("SANEHA_URL", &url)
+        .env_remove("SANEHA_AS")
+        .output()
+        .expect("run the saneha binary");
+    assert!(
+        created.status.success(),
+        "saneha new failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    // A hold far longer than the moment the signal arrives, so what ends this
+    // is the server rather than the hold elapsing.
+    let held_address = address.clone();
+    let polling = std::thread::spawn(move || {
+        get(
+            &held_address,
+            "/channels/brisk-otter/messages?after=0&hold=60",
+        )
+    });
+
+    // The poll is really being held rather than still on its way: the server
+    // counts what it holds and says so on `/health`, so this is asked.
+    let deadline = Instant::now() + PATIENCE;
+    while !get(&address, "/health").contains("\"held_waits\":1") {
+        assert!(
+            Instant::now() < deadline,
+            "the server never held the transcript poll"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let sent = Command::new("kill")
+        .arg("-TERM")
+        .arg(server.id().to_string())
+        .status()
+        .expect("run kill");
+    assert!(sent.success(), "kill -TERM failed");
+
+    let status = wait_for(&mut server, "TERM");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the server did not exit 0 with a transcript poll held open: {status}"
+    );
+
+    // The page is told the server is stopping rather than left holding a
+    // socket that goes away under it.
+    let answer = polling.join().expect("the held poll");
+    assert!(
+        answer.contains("503"),
+        "the held poll was not ended by the server stopping: {answer}"
+    );
+}
+
 /// `127.0.0.1:<port>` out of the line the server prints when it starts.
 fn address_from(line: &str) -> String {
     line.rsplit_once("http://")

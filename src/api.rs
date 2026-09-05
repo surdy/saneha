@@ -315,6 +315,25 @@ pub struct MessageQuery {
     /// At most this many, capped at [`MAX_MESSAGE_LIMIT`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// How long the server may hold this request open when there is nothing
+    /// after `after` yet, in seconds, capped at [`MAX_HOLD`] and floored at
+    /// one. Absent means answer at once, with an empty page when the
+    /// transcript has nothing newer.
+    ///
+    /// This is the viewer's live transcript (issue #8), which has neither an
+    /// identity nor a read cursor: it follows a channel rather than a
+    /// participant, so it asks by message id on the route it already reads
+    /// history from, and the per-participant wait route stays what it is.
+    /// Holding still moves nothing.
+    ///
+    /// A `204` says there is nothing after `after`, and is the answer both
+    /// when the hold elapsed and when something changed in the channel that
+    /// was not a message — a read cursor advancing is the only such thing.
+    /// Either way the caller looks again, which is what makes a viewer's rule
+    /// follow a `saneha read` rather than sit where it was until the next
+    /// message happened to land.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<u64>,
 }
 
 /// The query of `GET /channels/{name}/participants/{identity}/wait`: hold this
