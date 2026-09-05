@@ -201,15 +201,20 @@ fn the_page_reads_for_the_person_only_under_the_rule() {
 }
 
 /// The page is the whole viewer and is carried in the binary, so its size is
-/// something to be held to rather than noticed later. The send key spent what
-/// was left of the old 40 KB, so the budget is 48 KB: a few KB of room for the
-/// next thing the page has to say, and still small enough that a phone on a
-/// tailnet has the whole viewer at once, in one response, over a link that may
-/// have no route out. It is raised by the change that needs the room and not
-/// by the change that runs out of it.
+/// something to be held to rather than noticed later. The budget is 72 KB: the
+/// visual redesign spent the 48 KB it inherited and about 17 KB more, and it is
+/// clear where — a light and a dark palette with a colour per host and a phone
+/// layout (17 KB of stylesheet, up from 5), a sprite of the harness, system and
+/// control glyphs the page draws inline (2 KB), and the drawing the layout
+/// needs: monograms, day dividers, grouped messages, read-cursor clusters, the
+/// caught-up counts, and the two screens and one sheet a phone has. What is
+/// left is a few KB of room for the next thing the page has to say, and the
+/// whole viewer is still one response a phone on a tailnet has at once, over a
+/// link that may have no route out. It is raised by the change that needs the
+/// room and not by the change that runs out of it.
 #[test]
 fn the_page_stays_inside_its_budget() {
-    const BUDGET: usize = 48 * 1024;
+    const BUDGET: usize = 72 * 1024;
     let size = saneha::server::VIEWER.len();
     assert!(
         size <= BUDGET,
