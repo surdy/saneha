@@ -637,10 +637,13 @@ async fn participant(
 /// One message from a participant, with everyone it is addressed to worked out
 /// from its mentions and from `to`.
 ///
-/// A `key` makes this safe to ask for twice (issue #38): the second request
+/// A send key makes this safe to ask for twice (issue #38): the second request
 /// writes nothing and answers with the message the first one wrote, under
-/// `200` rather than the `201` that says a message was written just now. A
-/// send without a key is written unconditionally, as every send was before.
+/// `200` rather than the `201` that says a message was written just now. It
+/// has to be the same send — the same sender, the same body, the same
+/// attachments — or it is a key being reused for another message, which is a
+/// `409`. A send without a key is written unconditionally, as every send was
+/// before.
 async fn send_message(
     State(serving): State<Arc<Serving>>,
     Path(channel): Path<String>,
@@ -1215,6 +1218,7 @@ impl From<StoreError> for Failure {
             StoreError::AttachmentGone { .. } => StatusCode::GONE,
             StoreError::ChannelExists(_)
             | StoreError::ChannelClosed { .. }
+            | StoreError::KeyReused { .. }
             | StoreError::ParticipantChanged { .. }
             | StoreError::AttachmentBound { .. }
             | StoreError::SuffixExhausted { .. } => StatusCode::CONFLICT,

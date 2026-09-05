@@ -201,12 +201,15 @@ fn the_page_reads_for_the_person_only_under_the_rule() {
 }
 
 /// The page is the whole viewer and is carried in the binary, so its size is
-/// something to be held to rather than noticed later. 40 KB is roughly twice
-/// what it needs today: room to grow, and small enough that a phone on a
-/// tailnet has it at once.
+/// something to be held to rather than noticed later. The send key spent what
+/// was left of the old 40 KB, so the budget is 48 KB: a few KB of room for the
+/// next thing the page has to say, and still small enough that a phone on a
+/// tailnet has the whole viewer at once, in one response, over a link that may
+/// have no route out. It is raised by the change that needs the room and not
+/// by the change that runs out of it.
 #[test]
 fn the_page_stays_inside_its_budget() {
-    const BUDGET: usize = 40 * 1024;
+    const BUDGET: usize = 48 * 1024;
     let size = saneha::server::VIEWER.len();
     assert!(
         size <= BUDGET,

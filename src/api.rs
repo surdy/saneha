@@ -306,8 +306,9 @@ pub struct NewMessage {
     /// the whole send.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<String>,
-    /// The key this send is known by, minted by the sender: [`mint_id`]'s
-    /// shape, fresh for each message somebody means to write.
+    /// The send key: the value the sender puts on a send so that making the
+    /// same request again yields the same message rather than a second one.
+    /// [`mint_id`]'s shape, fresh for each message somebody means to write.
     ///
     /// It is what makes a send safe to make again. The server keeps one
     /// message per key per channel, so a request that is made twice — because
@@ -420,8 +421,8 @@ pub const MAX_MESSAGE_LIMIT: usize = 1000;
 ///
 /// Two things are named this way, and neither can be arrived at by counting:
 /// the id of an attachment, which the server mints because that id is the
-/// whole of what a fetch presents, and the key on a send, which the sender
-/// mints because only the sender knows that two requests are one message.
+/// whole of what a fetch presents, and the send key, which the sender mints
+/// because only the sender knows that two requests are one message.
 pub fn mint_id() -> String {
     use rand::RngExt;
 
@@ -436,8 +437,8 @@ pub fn mint_id() -> String {
 }
 
 /// Whether a value has [`mint_id`]'s shape. What is minted there is looked up
-/// by name later — an attachment id becomes a path segment, a key becomes a
-/// value in a unique index — so the shape is checked before that happens
+/// by name later — an attachment id becomes a path segment, a send key becomes
+/// a value in a unique index — so the shape is checked before that happens
 /// rather than after.
 pub fn is_id(value: &str) -> bool {
     value.len() == 32
@@ -446,10 +447,10 @@ pub fn is_id(value: &str) -> bool {
             .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
 }
 
-/// Why a key was refused, in the one wording both sides use.
+/// Why a send key was refused, in the one wording both sides use.
 pub fn invalid_key(key: &str) -> String {
     format!(
-        "a message key is 32 lowercase hex characters minted by the sender, and {key:?} \
+        "a send key is 32 lowercase hex characters minted by the sender, and {key:?} \
          is not one; leave it out to send without one"
     )
 }

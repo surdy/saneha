@@ -260,23 +260,37 @@ impl Remote {
     /// refuses the whole thing if a mention names nobody, so what comes back
     /// is the message as the transcript now holds it.
     ///
-    /// This goes through `retrying` because of the key the message carries: a
-    /// signal can land on the read of the answer to a send the server has
-    /// already written down, and the attempt that follows says which message
-    /// it is, so the server answers with that one rather than writing a
-    /// second. A `NewMessage` with no `key` is written every time it arrives,
-    /// so an interruption on one of those is a message in the transcript twice
-    /// — which is why the CLI mints one for every send (issue #38).
+    /// This goes through `retrying` because of the send key the message
+    /// carries: a signal can land on the read of the answer to a send the
+    /// server has already written down, and the attempt that follows says
+    /// which message it is, so the server answers with that one rather than
+    /// writing a second. A `NewMessage` with no `key` is written every time it
+    /// arrives, so an interruption on one of those is a message in the
+    /// transcript twice — which is why the CLI mints one for every send
+    /// (issue #38).
+    ///
+    /// The answer is read inside the retry too, and not after it. The read of
+    /// the body is where the interruption that started all this actually
+    /// lands: the request is out, the server has written the message, and the
+    /// signal arrives on the way back. Reading it outside would leave exactly
+    /// that case failing, and a person rerunning `saneha send` after it would
+    /// mint a new key and write the message twice.
     pub fn send_message(&self, channel: &str, message: &NewMessage) -> Result<Message> {
-        let response = self.check(
-            retrying(|| {
-                self.agent
-                    .post(self.url(&format!("/channels/{channel}/messages")))
-                    .send_json(message)
-            })
-            .map_err(|err| self.unreachable(&err))?,
-        )?;
-        read_json(response, "message")
+        let (status, body) = retrying(|| {
+            let mut response = self
+                .agent
+                .post(self.url(&format!("/channels/{channel}/messages")))
+                .send_json(message)?;
+            let status = response.status();
+            let body = response.body_mut().read_to_vec()?;
+            Ok((status, body))
+        })
+        .map_err(|err| self.unreachable(&err))?;
+
+        if !status.is_success() {
+            return Err(anyhow!(refusal(status, &String::from_utf8_lossy(&body)).0));
+        }
+        parse_json(&body, "message")
     }
 
     /// One page of a transcript: at most `limit` messages after `after`.
@@ -628,12 +642,26 @@ fn read_json<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// The same, for a caller holding the bytes rather than the response: a send
+/// reads its answer inside the retry, so by the time anything is parsed the
+/// response is long since finished with.
+fn parse_json<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Result<T> {
+    serde_json::from_slice(body).map_err(|err| {
+        anyhow!("the saneha server sent a {what} this version does not understand ({err})")
+    })
+}
+
 /// The server's own words when it sends them, a readable fallback when it does
 /// not, and whether the server said the request is worth making again.
 fn server_message(mut response: Response<Body>) -> (String, bool) {
     let status = response.status();
     let body = response.body_mut().read_to_string().unwrap_or_default();
-    if let Ok(api_error) = serde_json::from_str::<ApiError>(&body) {
+    refusal(status, &body)
+}
+
+/// The same, for a caller that has already read the body.
+fn refusal(status: ureq::http::StatusCode, body: &str) -> (String, bool) {
+    if let Ok(api_error) = serde_json::from_str::<ApiError>(body) {
         return (api_error.error, api_error.retry);
     }
     let body = body.trim();
@@ -877,6 +905,30 @@ mod tests {
                 "{repeatable} is safe to make again and should be"
             );
         }
+    }
+
+    #[test]
+    fn a_send_reads_its_answer_inside_the_retry() {
+        // The interruption #38 is about lands on the read of the answer to a
+        // send the server has already carried out, so the read has to be
+        // inside the closure: a body read after `retrying` has returned is one
+        // more place an `EINTR` ends the send, and the rerun that follows
+        // mints another key and writes the message twice. `read_json` takes
+        // the response, so it can only be called outside; the shape that is
+        // wanted reads the body to bytes in the closure and parses after.
+        let send = body_of("pub fn send_message");
+        let retry = send.find("retrying(").expect("a send is retried");
+        let read = send
+            .find("read_to_vec()")
+            .expect("a send reads its own answer");
+        assert!(
+            read > retry,
+            "the answer to a send must be read inside the retry"
+        );
+        assert!(
+            !send.contains("read_json("),
+            "read_json takes the response, so it reads the answer outside the retry"
+        );
     }
 
     #[test]

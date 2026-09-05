@@ -91,11 +91,10 @@ const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 /// Migration 1 creates the channels table alone; it is deployed, so it is
 /// frozen. Migration 2 adds participants and the transcript, migration 3 the
 /// attachments, migration 4 makes a participant's working directory nullable,
-/// and migration 5 gives a message the key its sender wrote it under. The
+/// and migration 5 gives a message the send key it was written under. The
 /// forward-looking columns in migration 1 are the ones the channels table
-/// itself needs: `closed_at` for `saneha close`, and
-/// `last_message_id` as the per-channel allocator that makes message ids
-/// monotonic within a transcript. `AUTOINCREMENT` keeps a deleted channel's id
+/// itself needs: `closed_at` for `saneha close`, and `last_message_id` as the
+/// per-channel allocator that makes message ids monotonic within a transcript. `AUTOINCREMENT` keeps a deleted channel's id
 /// from being handed to a later channel, so anything keyed by channel id stays
 /// unambiguous.
 const MIGRATIONS: &[&str] = &[
@@ -255,7 +254,7 @@ ALTER TABLE participants DROP COLUMN cwd;
 ALTER TABLE participants RENAME COLUMN cwd_optional TO cwd;
 UPDATE participants SET cwd = NULL WHERE cwd = 'viewer';
 "#,
-    // The key the sender wrote a message under, which is what makes a send
+    // The send key a message was written under, which is what makes a send
     // safe to make again (issue #38). A sender cannot tell an answer that was
     // lost on the way back from a message that was never written, so it says
     // up front which message this is; the unique index is what holds the
@@ -267,15 +266,15 @@ UPDATE participants SET cwd = NULL WHERE cwd = 'viewer';
     // distinct, so the partial index says the same thing more plainly than
     // relying on that.
     //
-    // The index is on (channel_id, client_key) rather than on the key alone: a
-    // key belongs to the channel it was sent to, so the same key sent to
+    // The index is on (channel_id, send_key) rather than on the key alone: a
+    // send key belongs to the channel it was sent to, so the same key sent to
     // another channel is another message. It is also what the look-up before
     // an insert reads, so one index answers both.
     r#"
-ALTER TABLE messages ADD COLUMN client_key TEXT;
+ALTER TABLE messages ADD COLUMN send_key TEXT;
 
-CREATE UNIQUE INDEX messages_client_key ON messages (channel_id, client_key)
-    WHERE client_key IS NOT NULL;
+CREATE UNIQUE INDEX messages_send_key ON messages (channel_id, send_key)
+    WHERE send_key IS NOT NULL;
 "#,
 ];
 
@@ -345,10 +344,21 @@ pub enum StoreError {
     #[error("a message needs a body")]
     EmptyBody,
 
-    /// A key is looked up and then indexed, so it is held to the shape it is
-    /// minted in rather than stored as whatever arrived.
+    /// A send key is looked up and then indexed, so it is held to the shape it
+    /// is minted in rather than stored as whatever arrived.
     #[error("{}", crate::api::invalid_key(key))]
     InvalidKey { key: String },
+
+    /// The key is one this channel has seen, and the send under it is not the
+    /// send it saw. A key is 128 random bits minted per send, so this is never
+    /// a retry that lost its answer; it is a sender reusing a key for its next
+    /// message, and answering it with somebody else's message would be the
+    /// quiet mis-carry saneha refuses everywhere else.
+    #[error(
+        "the send key on this message was already used in {channel:?} for a different \
+         message (#{message_id}); mint a new key for a new message"
+    )]
+    KeyReused { channel: String, message_id: i64 },
 
     #[error("{}", crate::api::body_too_large(*size))]
     BodyTooLarge { size: usize },
@@ -894,15 +904,26 @@ impl Store {
     /// a message that quietly carried less than it was asked to would be worse
     /// than no message at all.
     ///
-    /// `key` is what the sender wrote this message under, and it is what makes
-    /// a send safe to make again (issue #38): a second send carrying a key
-    /// this channel has already seen writes nothing and answers with the
+    /// `key` is the send key this message was written under, and it is what
+    /// makes a send safe to make again (issue #38): a second send carrying a
+    /// key this channel has already seen writes nothing and answers with the
     /// message the first one wrote, so a request repeated because its answer
     /// was lost leaves one message rather than two. The key is looked up
     /// before the channel is held to being open, because a repeat is answering
     /// for a message that is already in the transcript, and a close that
     /// landed in between must not turn it into a failure. `None` is a send
     /// written unconditionally, which is what an older client sends.
+    ///
+    /// The repeat has to be the same send: who it is from, what it says and
+    /// what it carries are compared with the message already there, and
+    /// anything else is refused rather than answered with a message it did not
+    /// ask for. A key is 128 random bits minted per send, so a mismatch is
+    /// never a retry whose answer went missing — it is a sender reusing a key
+    /// for its next message, which is the same mistake as a mention that names
+    /// nobody and is refused in the same way. It also settles what the look-up
+    /// coming first would otherwise leave open: a repeat claiming to be from
+    /// an identity that never joined fails this comparison rather than being
+    /// answered.
     pub fn send(
         &self,
         channel: &str,
@@ -922,6 +943,12 @@ impl Store {
         let (channel_id, state) = channel_and_state(&tx, channel)?;
         if let Some(key) = key {
             if let Some(message) = message_with_key(&tx, channel, channel_id, key)? {
+                if !is_the_same_send(&message, from, body, attachments) {
+                    return Err(StoreError::KeyReused {
+                        channel: channel.to_string(),
+                        message_id: message.id,
+                    });
+                }
                 return Ok(Sent {
                     message,
                     created: false,
@@ -960,7 +987,7 @@ impl Store {
             &format!(
                 "INSERT INTO messages
                      (channel_id, id, kind, from_participant, about_participant, body,
-                      created_at, client_key)
+                      created_at, send_key)
                  VALUES (?1, ?2, 'message', ?3, NULL, ?4, {NOW}, ?5)
                  RETURNING created_at"
             ),
@@ -969,11 +996,24 @@ impl Store {
         );
         let created_at: String = match (written, key) {
             (Ok(created_at), _) => created_at,
-            // The key was not there when this transaction looked and is there
-            // now, which is another send carrying it that committed in
-            // between. One message per key: this one rolls back — taking the
-            // id it allocated with it — and answers with the message that send
-            // wrote, which is what the look-up above would have found.
+            // The key was not there when this transaction looked and is
+            // there now, which would be another send carrying it that
+            // committed in between. One message per key: this one rolls back
+            // — taking the id it allocated with it — and answers with the
+            // message that send wrote, which is what the look-up above would
+            // have found.
+            //
+            // Belt and braces: nothing can reach it today, and it has no test
+            // because it cannot be made to happen. In this process the store
+            // holds one connection behind a mutex, so the look-up and the
+            // insert are one turn nobody writes between. Across processes on
+            // one WAL file, this transaction is already holding a read
+            // snapshot by the time it looks, so the write of a transaction
+            // that committed after that snapshot fails the `UPDATE` in
+            // `next_message_id` with `SQLITE_BUSY_SNAPSHOT` before an insert
+            // is ever attempted. It stays because the alternative to being
+            // wrong here is a second message, and the cost of it is a
+            // comparison that is never true.
             (Err(err), Some(key)) if is_unique_violation(&err) => {
                 drop(tx);
                 return match message_with_key(&conn, channel, channel_id, key)? {
@@ -1659,7 +1699,7 @@ fn message_with_key(
 ) -> Result<Option<Message>, StoreError> {
     let id: Option<i64> = conn
         .query_row(
-            "SELECT id FROM messages WHERE channel_id = ?1 AND client_key = ?2",
+            "SELECT id FROM messages WHERE channel_id = ?1 AND send_key = ?2",
             rusqlite::params![channel_id, key],
             |row| row.get(0),
         )
@@ -1671,6 +1711,31 @@ fn message_with_key(
     Ok(read_messages(conn, channel, channel_id, id - 1, 1)?
         .into_iter()
         .next())
+}
+
+/// Whether a send arriving under a key this channel has already seen is that
+/// same send arriving again.
+///
+/// Who it is from, what it says and what it carries: everything a send decides,
+/// other than the recipients, which are worked out from the body and so cannot
+/// differ while the body does not. The attachments are compared as a set,
+/// because the same file named twice is one attachment on the way in and the
+/// order they come back in is the order they were uploaded rather than the
+/// order they were named.
+fn is_the_same_send(message: &Message, from: &str, body: &str, attachments: &[String]) -> bool {
+    if message.from.as_deref() != Some(from) || message.body != body {
+        return false;
+    }
+    let mut carried: Vec<&str> = message
+        .attachments
+        .iter()
+        .map(|attachment| attachment.id.as_str())
+        .collect();
+    let mut named: Vec<&str> = attachments.iter().map(String::as_str).collect();
+    carried.sort_unstable();
+    named.sort_unstable();
+    named.dedup();
+    carried == named
 }
 
 /// The columns of an attachment, in the order `read_attachment_row` reads.
@@ -2445,7 +2510,7 @@ mod tests {
         let keys: Vec<Option<String>> = {
             let conn = store.conn();
             let mut statement = conn
-                .prepare("SELECT client_key FROM messages ORDER BY id")
+                .prepare("SELECT send_key FROM messages ORDER BY id")
                 .expect("prepare");
             statement
                 .query_map([], |row| row.get::<_, Option<String>>(0))
