@@ -57,3 +57,25 @@ jobs:
 
       - name: Tests
         run: cargo test
+
+  # The image is what quadhost runs. Building it here (without pushing) catches
+  # a Containerfile that no longer matches what the crate embeds, which the
+  # cargo steps above cannot see because they build in a full checkout.
+  image:
+    name: image builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
