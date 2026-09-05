@@ -13,8 +13,25 @@ set -eu
 set -o pipefail
 
 RETENTION_DAYS=14
-STAMP="$(date -u +%F)"
-DEST="/backups/saneha-${STAMP}.db"
+
+# A copy is never overwritten. Two runs in one day are normal — a schema-changing
+# deploy takes one before the restart and one after — and both would land on the
+# same dated name, so the second run used to destroy the first. That is exactly
+# what nearly happened on the migration-4 deploy, where the only pre-migration
+# copy survived because an operator renamed it by hand.
+#
+# So: the dated name if it is free, and saneha-<date>-<HHMMSS>.db if it is not.
+# One reading of the clock rather than two, because a second `date` call could
+# land on the next day if the run crossed midnight between them.
+NOW="$(date -u +%F-%H%M%S)"
+DEST="/backups/saneha-${NOW%-*}.db"
+if [ -e "$DEST" ]; then
+    DEST="/backups/saneha-${NOW}.db"
+fi
+if [ -e "$DEST" ]; then
+    echo "${DEST} already exists — refusing to overwrite a copy" >&2
+    exit 1
+fi
 
 # If the volume were ever empty, or mounted somewhere other than where the
 # server writes, sqlite3 would create a database there and take a flawless
@@ -50,7 +67,8 @@ else
     source_db="file:/data/saneha.db?immutable=1"
 fi
 
-rm -f "$DEST"
+# No rm of $DEST first: it does not exist, and the checks above are what keep it
+# that way. sqlite3 .backup creates it.
 sqlite3 "$source_db" ".backup '${DEST}'"
 
 if [ "$source_db" != "/data/saneha.db" ] && [ -e /data/saneha.db-wal ]; then
@@ -87,13 +105,23 @@ if [ -d /data/attachments ]; then
     echo "copied /data/attachments -> /backups/attachments"
 fi
 
-# Dated copies, RETENTION_DAYS of them. The glob is the date shape rather than
-# saneha-*.db so that the saneha-pre-restore-* copies a restore leaves behind
-# are never aged out by a later nightly run; those are deleted by hand.
+# Dated copies, RETENTION_DAYS of them, in both the shapes this script writes:
+# one run a day leaves saneha-YYYY-MM-DD.db, and every run after the first that
+# day leaves saneha-YYYY-MM-DD-HHMMSS.db. Both age out together.
+#
+# The globs are the date shape rather than saneha-*.db so that the copies kept
+# deliberately are never aged out by a later nightly run: saneha-pre-restore-*
+# from a restore, saneha-pre-<what>-<date>.db from a schema-changing deploy.
+# Both begin `saneha-pre`, and `p` is not [0-9], so neither pattern can reach
+# them. Those are deleted by hand.
 NIGHTLY='saneha-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].db'
+NIGHTLY_TIMED='saneha-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].db'
 
 echo "pruning copies older than ${RETENTION_DAYS} days:"
-find /backups -maxdepth 1 -type f -name "$NIGHTLY" -mtime "+${RETENTION_DAYS}" -print -delete
+find /backups -maxdepth 1 -type f \
+    \( -name "$NIGHTLY" -o -name "$NIGHTLY_TIMED" \) \
+    -mtime "+${RETENTION_DAYS}" -print -delete
 
 echo "copies on satyanas now:"
-find /backups -maxdepth 1 -type f -name "$NIGHTLY" | sort
+find /backups -maxdepth 1 -type f \
+    \( -name "$NIGHTLY" -o -name "$NIGHTLY_TIMED" \) | sort
