@@ -1,0 +1,36 @@
+# What makes a failed backup arrive somewhere, instead of waiting to be found.
+#
+# Install at: /etc/systemd/system/saneha-backup-failed.service
+# alongside:  /usr/local/bin/saneha-backup-failed  (deploy/saneha-backup-failed.sh)
+# then:       sudo systemctl daemon-reload
+#
+# A plain systemd unit, not a Quadlet one: it runs a script on the host rather
+# than a container, and it must work when podman, the NFS mount or satyanas is
+# the thing that is broken.
+#
+# Nothing enables this and nothing schedules it. It is started by
+# `OnFailure=saneha-backup-failed.service` in saneha-backup.container, which
+# Quadlet copies into the saneha-backup.service it generates, so it runs when
+# and only when a backup run has failed. There is no [Install] section for the
+# same reason there is none in saneha-backup.container.
+#
+# See docs/deploy.md, "When a backup fails".
+
+[Unit]
+Description=Report a failed saneha backup into the saneha ops channel
+Documentation=https://github.com/surdy/saneha/blob/main/docs/deploy.md
+# The failing backup itself needed the network, so it is normally long up by the
+# time this runs; this matters for the boot-time catch-up run that a Persistent=
+# timer can fire before the network is ready.
+Wants=network-online.target
+After=network-online.target
+# Deliberately no OnFailure= of its own. This unit fails loudly when the server
+# refuses it — that is the point — and a reporter that reported its own failure
+# to the thing that just refused it would be a loop.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/saneha-backup-failed
+# Three requests with a 20s timeout each, plus DNS and TLS. Anything past this
+# is not slow, it is gone, and the journal already has the failure.
+TimeoutStartSec=120

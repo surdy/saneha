@@ -144,10 +144,12 @@ file is the only *live* copy of every transcript.
 
 What compensates is the nightly backup below: `saneha-backup.timer` fires at
 03:30 UTC, takes a `sqlite3 .backup` of the running database, verifies it, and
-leaves it on satyanas, where fourteen dated copies are kept. So a disk failure
-or an FCOS rebuild costs at most a day. Two things it is not: it is not
-continuous — anything written since the last run is gone — and both copies are
-in the same house.
+leaves it on satyanas, where fourteen dated copies are kept. Behind those,
+satyanas snapshots the dataset daily and keeps thirty days of snapshots, which
+is what survives quadhost deleting the copies. So a disk failure or an FCOS
+rebuild costs at most a day. Two things it is not: it is not continuous —
+anything written since the last run is gone — and every copy is in the same
+house.
 
 Attachments are on the same volume. Their bytes live in
 `/data/attachments/<channel id>/<attachment id>`, beside the database rather
@@ -177,6 +179,8 @@ than an hour old.
 | Volume unit | `/etc/containers/systemd/saneha/saneha-backups.volume` |
 | Copies | `satyanas:/mnt/pool/container-volumes/saneha/backups/saneha-YYYY-MM-DD.db` |
 | Retention | 14 days, pruned by the same run that writes |
+| On failure | `/etc/systemd/system/saneha-backup-failed.service`, running `/usr/local/bin/saneha-backup-failed` |
+| Snapshots | `pool/container-volumes/saneha`, daily 21:00 `America/Los_Angeles`, kept 30 days |
 
 quadhost has no `sqlite3`, and the copy must be taken with SQLite's online
 backup API rather than `cp` — a `cp` of a database in WAL mode that is being
@@ -221,15 +225,20 @@ Once. The units are in [`deploy/`](../deploy) like the server's.
 
 ```sh
 scp deploy/saneha-backup.container deploy/saneha-backups.volume \
-    deploy/saneha-backup.sh deploy/saneha-backup.timer core@192.168.16.169:/tmp/
+    deploy/saneha-backup.sh deploy/saneha-backup.timer \
+    deploy/saneha-backup-failed.service deploy/saneha-backup-failed.sh \
+    core@192.168.16.169:/tmp/
 ssh core@192.168.16.169 '
   sudo install -m 0644 -o root -g root \
     /tmp/saneha-backup.container /tmp/saneha-backups.volume \
     /etc/containers/systemd/saneha/ &&
   sudo install -m 0755 -o root -g root /tmp/saneha-backup.sh \
     /etc/containers/systemd/saneha/ &&
-  sudo install -m 0644 -o root -g root /tmp/saneha-backup.timer \
+  sudo install -m 0644 -o root -g root \
+    /tmp/saneha-backup.timer /tmp/saneha-backup-failed.service \
     /etc/systemd/system/ &&
+  sudo install -m 0755 -o root -g root /tmp/saneha-backup-failed.sh \
+    /usr/local/bin/saneha-backup-failed &&
   sudo systemctl daemon-reload &&
   sudo systemctl enable --now saneha-backup.timer'
 ```
@@ -237,7 +246,15 @@ ssh core@192.168.16.169 '
 The timer is a plain systemd unit and goes under `/etc/systemd/system`, not
 under `/etc/containers/systemd`: Quadlet generates no timers. It fires
 `saneha-backup.service`, which Quadlet does generate, from the `.container`
-file.
+file. `saneha-backup-failed.service` is a plain unit for a different reason: it
+runs a script on the host, not a container, because podman or the NFS mount may
+be exactly what is broken when it runs. Nothing enables it — the `OnFailure=` in
+`saneha-backup.container` is the only thing that starts it, and `systemctl show
+saneha-backup.service -p OnFailure` is how you check the wiring survived.
+
+The script goes to `/usr/local/bin` (`/var/usrlocal/bin` on FCOS), which is
+labelled `bin_t`, so systemd can execute it under Enforcing with no drop-in and
+no `restorecon`.
 
 ### Check the last run
 
@@ -247,10 +264,9 @@ ssh core@192.168.16.169 'systemctl status saneha-backup.service --no-pager'
 ssh core@192.168.16.169 'sudo journalctl -u saneha-backup.service -n 20 --no-pager'
 ```
 
-Worth doing weekly: nothing on quadhost forwards a failure anywhere, so a unit
-that has been failing since Tuesday looks exactly like one that has not run yet
-until someone looks. Making the failure arrive on its own is
-[issue #23](https://github.com/surdy/saneha/issues/23).
+Not something to remember to do: a failed run says so itself, in the journal and
+in the `ops` channel. See "When a backup fails" below for what that looks like
+and how much of it is proven.
 
 A good run says `wrote /backups/saneha-<date>.db, <n> bytes, integrity_check ok`
 and then lists what is on satyanas. A bad one leaves the unit failed, so it also
@@ -262,6 +278,138 @@ ssh admin@satyanas 'ls -la /mnt/pool/container-volumes/saneha/backups/'
 ```
 
 To run one now, out of band: `sudo systemctl start saneha-backup.service`.
+
+### When a backup fails
+
+`saneha-backup.container` carries `OnFailure=saneha-backup-failed.service`, so a
+failed run starts the reporter and the reporter does two things, in this order:
+
+1. `logger -p user.err` — the failure is in the host's own journal before
+   anything that can fail has been tried. This is the half that still works when
+   saneha is down, DNS is wrong, or the server is the thing that broke.
+2. Posts into the `ops` channel on `https://saneha.clusterfault.com` as
+   `backup@quadhost`: `@all saneha backup failed on quadhost: see journalctl -u
+   saneha-backup`, followed by the last fifteen journal lines of the failed run.
+   It creates the channel and joins the identity first if they are not there, so
+   the first failure this host ever reports needs nothing set up by hand.
+
+If the server refuses any of that, the reporter says which request got which
+status and exits non-zero — so a delivery that did not happen leaves a second
+failed unit rather than nothing at all. It has no `OnFailure=` of its own: a
+reporter reporting its own failure to the server that just refused it is a loop.
+
+The journal tail travels inside a code fence. That is not formatting: the server
+reads every `@word` in a body as a recipient and refuses the whole message when
+one of them names nobody, so an unfenced ` @foo` in a mount error would throw
+away the only notification the failure gets. Fenced blocks address nobody, and
+the `@all` in the headline sits outside the fence where it still counts.
+
+```sh
+ssh core@192.168.16.169 'sudo journalctl -t saneha-backup-failed -n 20 --no-pager'
+ssh core@192.168.16.169 'sudo systemctl start saneha-backup-failed.service'   # by hand
+saneha read ops                                                               # after the deploy bump
+```
+
+**Join `ops` from your laptop, once.** `@all` means every participant in the
+channel and nothing more, and the only participant is `backup@quadhost` — so
+until a person is on the roster, the failure is addressed to the machine that
+sent it. `saneha read ops` needs that join too: reading is something a
+participant does.
+
+```sh
+export SANEHA_URL=https://saneha.clusterfault.com
+saneha join ops --as surdy     # once per laptop; a resume is free after that
+saneha read ops
+saneha wait ops                # optional, and the actual point: be told, not check
+```
+
+This needs `POST /channels/{channel}/participants`, so it waits on the same
+deploy bump the notifier's posting half does ([issue
+#25](https://github.com/surdy/saneha/issues/25)).
+
+**Half of this is proven and half is waiting on a deploy.** Proven on quadhost:
+the `OnFailure=` wiring fires (`systemctl show saneha-backup.service -p
+OnFailure`, and a throwaway unit made to fail on purpose was watched starting
+it — the real backup unit was not touched to test this), the `user.err` line
+reaches the journal, and the channel is created (`201`, then `409` on the run
+after). Not yet proven: the message itself. The image currently deployed
+predates `POST /channels/{channel}/participants` and `POST
+/channels/{channel}/messages`, and answers `404` to both, which is exactly what
+the reporter prints today. Once the deploy bump lands, run
+`systemctl start saneha-backup-failed.service` once by hand and check the
+message arrived in `ops`.
+
+### Snapshots on satyanas
+
+The copies are written over NFS by a container running as root, onto an export
+with `maproot=root`. That is the same shape as every other container volume on
+satyanas and is fine for what it is, but it means anything running as root on
+quadhost — a mistake in `saneha-backup.sh`, or ransomware that got onto the host
+— can delete all fourteen copies of a database that has no other backup.
+
+A periodic ZFS snapshot task closes that. Snapshots live on satyanas, are
+read-only, and are not writable or reachable through the NFS export (`snapdir`
+is `hidden`, and a snapshot cannot be destroyed by an NFS client at all).
+Deleting every copy over NFS leaves every one of them in yesterday's snapshot.
+
+| | |
+|---|---|
+| Dataset | `pool/container-volumes/saneha`, `recursive: false` |
+| Schedule | daily at 21:00 `America/Los_Angeles` — 04:00 UTC, half an hour after the 03:30 UTC backup |
+| Retention | 30 days |
+| Naming | `auto-%Y-%m-%d_%H-%M` |
+
+**The two names disagree by a day, and neither is wrong.** Snapshots are named
+in satyanas' own time zone and the copies inside them are stamped in UTC by
+`date -u`, so `auto-2026-09-04_21-00` was taken at 04:00 UTC on the 5th and the
+newest copy in it is `saneha-2026-09-05.db`. Read the snapshot name as "the
+evening of", and check what is in one rather than inferring it. Nor is every
+snapshot guaranteed to hold that night's copy: the timer is `Persistent=`, so a
+run missed while quadhost was down happens at the next boot and lands in
+whichever snapshot comes after it.
+
+It is a TrueNAS periodic snapshot task, so it is managed there and not from this
+repo — Storage → Snapshots → Periodic Snapshot Tasks, or:
+
+```sh
+ssh admin@satyanas 'midclt call pool.snapshottask.query'          # the task and its last run
+ssh admin@satyanas 'zfs list -t snapshot -r pool/container-volumes/saneha'
+ssh admin@satyanas 'midclt call pool.snapshottask.run 1'          # take one now
+```
+
+Getting something back out of a snapshot, easiest first:
+
+```sh
+# 1. One file, read straight out of the snapshot. Nothing is mounted, nothing
+#    changes, and this is what you want almost every time.
+ssh admin@satyanas 'ls /mnt/pool/container-volumes/saneha/.zfs/snapshot/'
+ssh admin@satyanas 'ls /mnt/pool/container-volumes/saneha/.zfs/snapshot/auto-2026-09-04_21-00/backups/'
+ssh admin@satyanas '
+  cp /mnt/pool/container-volumes/saneha/.zfs/snapshot/auto-2026-09-04_21-00/backups/saneha-2026-09-05.db \
+     /mnt/pool/container-volumes/saneha/backups/'
+# then restore it below, as if the nightly run had written it
+
+# 2. The whole dataset as it was, side by side with the live one. Use this to
+#    compare, or when you want several files back.
+ssh admin@satyanas '
+  zfs clone pool/container-volumes/saneha@auto-2026-09-04_21-00 \
+            pool/container-volumes/saneha-recover
+  ls /mnt/pool/container-volumes/saneha-recover/backups'
+# and when finished with it — a clone holds its snapshot alive until it is gone
+ssh admin@satyanas 'zfs destroy pool/container-volumes/saneha-recover'
+```
+
+Rolling the dataset back is the last resort, not the first:
+
+```sh
+ssh admin@satyanas 'zfs rollback -r pool/container-volumes/saneha@auto-2026-09-04_21-00'
+```
+
+`zfs rollback` **destroys every snapshot and every file newer than the one named**,
+including copies taken since. It is right only when everything written after that
+snapshot is known to be wrong — a bulk deletion, or an encrypted share. If you
+want one database back, use the `cp` above; the copies are self-contained files
+and nothing needs the dataset to move.
 
 ### Restore
 
@@ -384,6 +532,15 @@ inherits it.
   unreachable — check the share is still there with
   `ssh admin@satyanas 'midclt call sharing.nfs.query'`, and that it still lists
   `192.168.16.169` as a permitted host.
+- **`saneha-backup-failed.service` failed** — the backup failed *and* the report
+  did not get through. The failure itself is still in the journal
+  (`journalctl -t saneha-backup-failed`), along with the status the server gave
+  each request. Until the deploy bump ([issue
+  #25](https://github.com/surdy/saneha/issues/25)) lands — and delete this
+  sentence when it does — a `404` on `/channels/ops/participants` or
+  `/channels/ops/messages` means only that the deployed image predates those
+  routes. After it, a `404` there means the `ops` channel or the participant is
+  gone; anything else means the server is down or the channel was closed.
 - **Certificate errors** — Caddy needs `CLOUDFLARE_API_TOKEN`, which lives in
   its own environment file on quadhost. The label in the unit references it as
   `{$$CLOUDFLARE_API_TOKEN}`; the double `$` is intentional, because Podman
