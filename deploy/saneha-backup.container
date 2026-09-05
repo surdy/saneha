@@ -4,6 +4,8 @@
 # alongside:  /etc/containers/systemd/saneha/saneha-backups.volume
 #             /etc/containers/systemd/saneha/saneha-backup.sh
 # and:        /etc/systemd/system/saneha-backup.timer
+#             /etc/systemd/system/saneha-backup-failed.service
+#             /usr/local/bin/saneha-backup-failed
 #
 # Quadlet has no timer of its own: it generates saneha-backup.service from this
 # file, and the plain systemd timer next to it is what fires it. Nothing else
@@ -18,6 +20,10 @@ After=network-online.target
 # Ordering only, never Requires: this unit must not be able to start or stop the
 # server it copies from.
 After=saneha.service
+# A failed backup that nobody hears about is a backup that has been failing
+# since Tuesday. Quadlet copies this [Unit] section into the service it
+# generates, so the failure starts the reporter next to this file.
+OnFailure=saneha-backup-failed.service
 
 [Container]
 # quadhost has no sqlite3 of its own, and the copy has to be taken with SQLite's
