@@ -148,6 +148,26 @@ fn the_skill_says_what_a_harness_needs_to_find_and_follow_it() {
         assert!(skill.contains(said), "the skill has to say {said:?}");
     }
 
+    // What the cross-laptop test found wrong or unclear (issue #10, and
+    // docs/wake-findings.md). Each of these is a sentence an agent hesitated
+    // over, or a claim the test disproved.
+    for said in [
+        // A channel can be created under the name you were given.
+        "saneha new brisk-otter",
+        // And with no name the server picks one rather than failing.
+        "the server mints one",
+        // `fetch` takes the attachment's id; the message's number is not one.
+        "never the message's own number",
+        // An environment prefix is not a wrapper around the background wait.
+        "An environment prefix is none of those",
+        // Copilot CLI is re-invoked by a finished background wait, tested, so
+        // the foreground fallback is for Codex and the unknown only.
+        "**Claude Code and Copilot CLI:**",
+        "**Codex, and any harness not named above:**",
+    ] {
+        assert!(skill.contains(said), "the skill has to say {said:?}");
+    }
+
     // Short enough that an agent reads the whole of it before following it.
     let lines = skill.lines().count();
     assert!(

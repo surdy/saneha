@@ -45,6 +45,8 @@ Agreed 2026-09-04. Terms are defined in [CONTEXT.md](../CONTEXT.md); load-bearin
 2. Later: `saneha relay`, a per-host daemon that wakes idle participants on its host by nudging through the `madari` CLI. Needs an unattended-send decision in madari-dev.
 3. Always: a person reads the viewer and tells the agent to check.
 
+Verified: see [docs/wake-findings.md](wake-findings.md).
+
 ## Instructions for harnesses
 
 - One SKILL.md embedded in the binary. `saneha skill` prints it.
