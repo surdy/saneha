@@ -90,8 +90,9 @@ const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 /// Never edit an entry that has shipped, only append.
 ///
 /// Migration 1 creates the channels table alone; it is deployed, so it is
-/// frozen. Migration 2 adds participants and the transcript, and migration 3
-/// the attachments. The forward-looking columns in migration 1 are the ones the
+/// frozen. Migration 2 adds participants and the transcript, migration 3 the
+/// attachments, and migration 4 makes a participant's working directory
+/// nullable. The forward-looking columns in migration 1 are the ones the
 /// channels table itself needs: `closed_at` for `saneha close`, and
 /// `last_message_id` as the per-channel allocator that makes message ids
 /// monotonic within a transcript. `AUTOINCREMENT` keeps a deleted channel's id
@@ -223,6 +224,36 @@ CREATE INDEX attachments_message ON attachments (channel_id, message_id);
 
 -- "What is still waiting to be bound", which is what the sweep asks.
 CREATE INDEX attachments_unbound ON attachments (created_at) WHERE message_id IS NULL;
+"#,
+    // A working directory is what a join happened to be run in, and a person
+    // joining from the viewer is in a browser and was run in nothing: the
+    // column was NOT NULL, so the page had to invent a directory to put there.
+    // It is nullable from here on, and a missing one is null rather than a
+    // word standing in for a path.
+    //
+    // SQLite cannot relax NOT NULL in place, and the table it holds is pointed
+    // at by two foreign keys, so the usual rebuild — copy into a new table,
+    // drop this one — is the one thing that must not happen here: a migration
+    // runs inside a transaction, `PRAGMA foreign_keys` cannot be turned off
+    // inside one, and the drop would take the recipient rows with it and null
+    // the author of every message. Adding a column, copying into it, dropping
+    // the old one and taking its name touches no other table, keeps the unique
+    // index on (channel_id, identity), and leaves every row where it is; the
+    // only visible change is that `cwd` is now the last column.
+    //
+    // The last statement takes the placeholder out of the rows that already
+    // carry it. A page that has joined stays joined — it looks at the
+    // participants before it joins again — so nothing else would ever clear
+    // the `viewer` those rows were written with, and the listing would go on
+    // reporting it as a working directory. Only the page wrote that word: the
+    // CLI records `current_dir()`, which is absolute, so `viewer` cannot be a
+    // directory anybody was really in.
+    r#"
+ALTER TABLE participants ADD COLUMN cwd_optional TEXT;
+UPDATE participants SET cwd_optional = cwd;
+ALTER TABLE participants DROP COLUMN cwd;
+ALTER TABLE participants RENAME COLUMN cwd_optional TO cwd;
+UPDATE participants SET cwd = NULL WHERE cwd = 'viewer';
 "#,
 ];
 
@@ -567,8 +598,8 @@ impl Store {
         validate_participant_name(&request.name)?;
         validate_host(&request.host)?;
         validate_harness(&request.harness)?;
-        validate_recorded("a working directory", &request.cwd)?;
         for (what, value) in [
+            ("a working directory", &request.cwd),
             ("a harness session id", &request.session_id),
             ("a process start time", &request.pid_started_at),
             ("a Madari pane id", &request.madari_pane),
@@ -1820,7 +1851,10 @@ fn insert_participant(
 }
 
 /// Continues an existing participant. The name and the read cursor are what a
-/// resume is for, so they are the two columns left alone.
+/// resume is for, so they are the two columns left alone. Everything else is
+/// what the caller says about itself now, the working directory included: a
+/// resume from a caller that has none records none, because the column says
+/// where the last join was made from and not where some earlier one was.
 fn resume_participant(conn: &Connection, id: i64, request: &JoinRequest) -> Result<(), StoreError> {
     conn.execute(
         &format!(
@@ -2258,6 +2292,105 @@ mod tests {
             .record_attachment(&attachment, "notes.md", 8, "text/markdown")
             .expect("record");
         assert_eq!(recorded.filename, "notes.md");
+    }
+
+    #[test]
+    fn a_database_from_before_the_nullable_working_directory_is_brought_forward() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("saneha.db");
+
+        // A file as the saneha before migration 4 left it, with rows in every
+        // table the participants table is pointed at from: the migration must
+        // not cost a message its author or a mention its recipient.
+        let conn = Connection::open(&path).expect("open directly");
+        for migration in &MIGRATIONS[..3] {
+            conn.execute_batch(migration).expect("apply a migration");
+        }
+        conn.execute_batch(
+            "PRAGMA user_version = 3;
+             INSERT INTO channels (id, name, created_at, last_message_id)
+                 VALUES (1, 'quiet-heron', '2026-09-04T09:00:00Z', 1);
+             INSERT INTO participants
+                 (id, channel_id, identity, name, host, harness, cwd, joined_at)
+                 VALUES (1, 1, 'alpha@macbookpro', 'alpha', 'macbookpro', 'claude',
+                         '/repos/saneha', '2026-09-04T09:00:00Z'),
+                        (2, 1, 'surdy@web', 'surdy', 'web', 'web',
+                         'viewer', '2026-09-04T09:00:01Z');
+             INSERT INTO messages (channel_id, id, kind, from_participant, body, created_at)
+                 VALUES (1, 1, 'message', 1, 'hello', '2026-09-04T09:00:01Z');
+             INSERT INTO recipients (channel_id, message_id, participant_id) VALUES (1, 1, 1);",
+        )
+        .expect("fill the older database");
+        drop(conn);
+
+        let store = Store::open(&path).expect("open the older database");
+        let participants = store.list_participants("quiet-heron").expect("list");
+        assert_eq!(participants.len(), 2);
+        // The directory that was recorded is still recorded.
+        assert_eq!(
+            participants[0].cwd.as_deref(),
+            Some("/repos/saneha"),
+            "the working directory did not survive the migration"
+        );
+        // And the placeholder the page used to have to send is gone: that row
+        // never joins again, so this is the only chance to clear it.
+        assert_eq!(
+            participants[1].cwd, None,
+            "the viewer's placeholder is still being reported as a directory"
+        );
+
+        // What pointed at the participant still does.
+        let conn = store.conn();
+        let messages: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE from_participant = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count messages");
+        let recipients: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recipients", [], |row| row.get(0))
+            .expect("count recipients");
+        assert_eq!((messages, recipients), (1, 1));
+
+        // And the unique index came through with the column it never named:
+        // two rows for one identity in one channel are still refused.
+        let duplicate = conn.execute(
+            "INSERT INTO participants
+                 (channel_id, identity, name, host, harness, joined_at)
+             VALUES (1, 'alpha@macbookpro', 'alpha', 'macbookpro', 'claude', '2026-09-04T09:00:02Z')",
+            [],
+        );
+        assert!(
+            duplicate.is_err_and(|err| is_unique_violation(&err)),
+            "the unique index on (channel_id, identity) went with the rebuild"
+        );
+        drop(conn);
+
+        // A join with nothing to record now lands, which is what the whole
+        // migration is for. A new participant rather than that one resuming,
+        // so it is the insert that is asked.
+        let joined = store
+            .join("quiet-heron", &request_without_a_directory())
+            .expect("join without a working directory");
+        assert_eq!(joined.participant.cwd, None);
+    }
+
+    /// What the viewer sends: everything a browser knows about itself, which
+    /// does not include a working directory.
+    fn request_without_a_directory() -> JoinRequest {
+        JoinRequest {
+            name: "reviewer".to_string(),
+            host: "web".to_string(),
+            harness: "web".to_string(),
+            session_id: None,
+            pid: None,
+            pid_started_at: None,
+            cwd: None,
+            madari_pane: None,
+            same_host_session_live: false,
+            held_session_id: None,
+        }
     }
 
     #[test]

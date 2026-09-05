@@ -31,7 +31,7 @@ fn join(remote: &Remote, channel: &str, name: &str) -> String {
         session_id: None,
         pid: None,
         pid_started_at: None,
-        cwd: "/repos/saneha".to_string(),
+        cwd: Some("/repos/saneha".to_string()),
         madari_pane: None,
         same_host_session_live: false,
         held_session_id: None,
@@ -147,6 +147,71 @@ fn the_viewer_asks_nothing_of_the_internet() {
             rest = &rest[end..];
         }
     }
+}
+
+/// A person joining from a browser was run in no directory, so the page sends
+/// none rather than a word standing in for one.
+#[test]
+fn the_page_joins_without_a_working_directory() {
+    let server = TestServer::start();
+    let (_, page) = get(&server.url);
+    assert!(
+        !page.contains("cwd"),
+        "the viewer still has a working directory to send"
+    );
+}
+
+/// The rule the page reads for the person under, driven by Node over a DOM
+/// small enough to live in `tests/read_rule.js`: visible, scrolled to the end
+/// and settled for a couple of seconds is one call to the cursor route, and a
+/// hidden tab, a reader scrolled back into history and somebody who has not
+/// joined are none. What the page draws is a matter for a browser and is
+/// verified by hand; which requests it makes is not.
+///
+/// On a laptop without Node this is skipped rather than failed: it is not a
+/// dependency of this crate, and the rule is verifiable by hand against a
+/// server. In CI it is a failure, because a runner that quietly stopped
+/// shipping Node would otherwise leave the rule untested and the suite green.
+#[test]
+fn the_page_reads_for_the_person_only_under_the_rule() {
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/read_rule.js");
+    let page = concat!(env!("CARGO_MANIFEST_DIR"), "/web/index.html");
+    let output = match std::process::Command::new("node")
+        .arg(script)
+        .arg(page)
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "there is no node on this runner, so the page's read rule was not driven"
+            );
+            eprintln!("skipped: no node, so the page's read rule was not driven");
+            return;
+        }
+        Err(err) => panic!("running node: {err}"),
+    };
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The page is the whole viewer and is carried in the binary, so its size is
+/// something to be held to rather than noticed later. 40 KB is roughly twice
+/// what it needs today: room to grow, and small enough that a phone on a
+/// tailnet has it at once.
+#[test]
+fn the_page_stays_inside_its_budget() {
+    const BUDGET: usize = 40 * 1024;
+    let size = saneha::server::VIEWER.len();
+    assert!(
+        size <= BUDGET,
+        "the viewer is {size} bytes, over its {BUDGET}: take something out before adding more"
+    );
 }
 
 /// A poll with nothing to wait for is the fetch it always was.

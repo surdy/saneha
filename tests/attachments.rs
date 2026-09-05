@@ -33,7 +33,7 @@ fn join(remote: &Remote, channel: &str, name: &str) -> String {
         session_id: None,
         pid: None,
         pid_started_at: None,
-        cwd: "/repos/saneha".to_string(),
+        cwd: Some("/repos/saneha".to_string()),
         madari_pane: None,
         same_host_session_live: false,
         held_session_id: None,
