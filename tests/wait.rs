@@ -542,8 +542,10 @@ fn closing_a_channel_ends_a_wait_already_in_progress() {
     close(&remote, "brisk-otter");
     let ended = waiter.finish();
     ended.exited(4);
+    // The hold is a minute, so a few seconds — which covers starting the
+    // process that closes it — is the notifier and not the hold running out.
     assert!(
-        closed.elapsed() < Duration::from_secs(1),
+        closed.elapsed() < Duration::from_secs(3),
         "the wait took {:?} to notice a close",
         closed.elapsed()
     );

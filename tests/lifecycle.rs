@@ -24,9 +24,13 @@ const PATIENCE: Duration = Duration::from_secs(5);
 const SETTLE: Duration = Duration::from_millis(600);
 
 /// What "promptly" means for a waiter that was woken by a verb rather than by
-/// its own hold running out. The hold is a minute; anything inside a second is
-/// the notifier.
-const PROMPTLY: Duration = Duration::from_secs(1);
+/// its own hold running out.
+///
+/// It is measured from before the verb runs, so it covers starting that
+/// process as well as the wake itself; the hold it is being told apart from is
+/// a whole minute, so a couple of seconds is both far under that and enough
+/// slack for a loaded machine.
+const PROMPTLY: Duration = Duration::from_secs(3);
 
 /// This machine as the binary under test sees it, which is the host half of
 /// every identity a subcommand claims here.
