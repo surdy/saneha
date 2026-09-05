@@ -90,8 +90,11 @@ pub struct Participant {
     /// pid and a start time together are not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_started_at: Option<String>,
-    /// The working directory the last join was made from.
-    pub cwd: String,
+    /// The working directory the last join was made from, when the caller had
+    /// one to record. A person joining from the viewer is in a browser and has
+    /// none, so this is null rather than a stand-in for a directory.
+    #[serde(default)]
+    pub cwd: Option<String>,
     /// The Madari pane a future relay would nudge. Recorded, unused in v1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub madari_pane: Option<String>,
@@ -119,7 +122,10 @@ pub struct JoinRequest {
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_started_at: Option<String>,
-    pub cwd: String,
+    /// Optional: a caller with no working directory to record — the viewer —
+    /// leaves it out, and the participant's is null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub madari_pane: Option<String>,
     /// The caller's answer to the one question the server cannot ask: is the

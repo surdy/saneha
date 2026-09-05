@@ -626,7 +626,7 @@ fn join(args: JoinArgs, me: &IdentityArgs) -> Result<()> {
             session_id: session_id.clone(),
             pid,
             pid_started_at: pid_started_at.clone(),
-            cwd: cwd.clone(),
+            cwd: Some(cwd.clone()),
             madari_pane: None,
             same_host_session_live: held
                 .as_ref()
@@ -1517,7 +1517,7 @@ mod tests {
             session_id: session_id.map(str::to_string),
             pid,
             pid_started_at,
-            cwd: "/repos/saneha".to_string(),
+            cwd: Some("/repos/saneha".to_string()),
             madari_pane: None,
             away: false,
             read_cursor: 0,

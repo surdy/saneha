@@ -59,7 +59,7 @@ fn request(name: &str, harness: &str) -> JoinRequest {
         session_id: None,
         pid: None,
         pid_started_at: None,
-        cwd: "/repos/saneha".to_string(),
+        cwd: Some("/repos/saneha".to_string()),
         madari_pane: None,
         same_host_session_live: false,
         held_session_id: None,
@@ -794,6 +794,75 @@ fn a_join_is_written_into_the_transcript() {
         )
         .expect("last_message_id");
     assert_eq!(last, 3);
+}
+
+/// The viewer is a browser: it has no working directory to record, so it joins
+/// without the field at all, and nothing invents a placeholder for it. What
+/// the CLI sends from a real directory is `participants_are_listed`.
+#[test]
+fn a_join_without_a_working_directory_records_none() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+
+    // The field left out of the body altogether, which is what the page sends
+    // and what an older client that never learnt about it would send too.
+    let (status, body) = server.raw(
+        "POST",
+        "/channels/brisk-otter/participants",
+        br#"{"name":"surdy","host":"web","harness":"web"}"#,
+    );
+    assert_eq!(status, 201, "{body}");
+    let joined: serde_json::Value = serde_json::from_str(&body).expect("the join answers JSON");
+    assert_eq!(joined["identity"], serde_json::json!("surdy@web"));
+    assert_eq!(
+        joined["participant"]["cwd"],
+        serde_json::Value::Null,
+        "a working directory was invented for a caller that has none"
+    );
+
+    // And one that does have a directory still records it, over the same
+    // route, in the same channel.
+    let with_one = server
+        .remote()
+        .join("brisk-otter", &request("agent", "claude"))
+        .expect("join with a working directory");
+    let JoinAnswer::Granted(with_one) = with_one else {
+        panic!("the join was refused as stale");
+    };
+    assert_eq!(with_one.participant.cwd.as_deref(), Some("/repos/saneha"));
+
+    // On the way out: null for the one, the path for the other.
+    let listing = server.run(&["participants", "brisk-otter", "--json"]);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout_of("saneha participants --json", &listing))
+            .expect("--json prints JSON");
+    let participants = parsed["participants"].as_array().expect("participants");
+    assert_eq!(participants.len(), 2);
+    assert_eq!(participants[0]["cwd"], serde_json::Value::Null);
+    assert_eq!(
+        participants[1]["cwd"],
+        serde_json::json!("/repos/saneha"),
+        "{parsed}"
+    );
+
+    // The table names a participant, where it is and what it runs in; a
+    // directory is not one of its columns, so a missing one shows as nothing
+    // at all rather than as a hole in a row.
+    let table = stdout_of(
+        "saneha participants",
+        &server.run(&["participants", "brisk-otter"]),
+    );
+    let lines: Vec<&str> = table.lines().collect();
+    assert_eq!(lines.len(), 3, "{table}");
+    assert!(lines[1].starts_with("surdy@web"), "{table}");
+    assert!(
+        lines[1].contains("web") && lines[1].contains("here"),
+        "{table}"
+    );
+    assert!(!table.contains("/repos/saneha"), "{table}");
 }
 
 #[test]
