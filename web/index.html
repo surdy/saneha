@@ -629,14 +629,21 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     ui.nameInput.select();
     return new Promise((done) => {
       ui.nameDialog.onclose = () => {
+        let took = false;
         if (ui.nameDialog.returnValue === "ok") {
           const name = slug(ui.nameInput.value);
           if (name) {
             state.name = name;
+            took = true;
             try { localStorage.setItem(NAME_KEY, name); } catch (ignored) { /* private window */ }
           }
         }
         showWho();
+        // The list is asked again as this person rather than as nobody: what
+        // it carries about a channel — where they have read to in it — is a
+        // different answer now, and it lights the badges as they watch rather
+        // than at the next tick half a minute later.
+        if (took) loadChannels();
         done(state.name);
       };
     });
