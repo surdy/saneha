@@ -215,18 +215,6 @@ tree, because a database copy from ten days ago still points at attachments
 deleted since. The restore below does not put attachments back either — copy
 them by hand if you need them.
 
-The order is what makes the copy consistent: the database is snapshotted
-**first** and `attachments/` is copied after it. An attachment's file is
-written and fsynced before its row exists and is never modified afterwards, so
-a database from before a file is consistent with the files from after it, and
-the other order is not.
-
-An attachment's file is fsynced, its directory is not, and SQLite runs at
-`synchronous = NORMAL`, so a power cut can lose the row while leaving the file,
-or lose a file that has no row yet. Neither loses an attachment a message
-already carries: a message is written after its files. What is left over is an
-orphan file, which the hourly sweep removes once it is more than an hour old.
-
 On satyanas the copies live in their own dataset, `pool/container-volumes/saneha`,
 exported over NFS to `192.168.16.169` only, `maproot=root` — the same shape as
 every other container volume there.
