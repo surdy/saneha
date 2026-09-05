@@ -279,11 +279,34 @@ status and exits non-zero — so a delivery that did not happen leaves a second
 failed unit rather than nothing at all. It has no `OnFailure=` of its own: a
 reporter reporting its own failure to the server that just refused it is a loop.
 
+The journal tail travels inside a code fence. That is not formatting: the server
+reads every `@word` in a body as a recipient and refuses the whole message when
+one of them names nobody, so an unfenced ` @foo` in a mount error would throw
+away the only notification the failure gets. Fenced blocks address nobody, and
+the `@all` in the headline sits outside the fence where it still counts.
+
 ```sh
 ssh core@192.168.16.169 'sudo journalctl -t saneha-backup-failed -n 20 --no-pager'
 ssh core@192.168.16.169 'sudo systemctl start saneha-backup-failed.service'   # by hand
 saneha read ops                                                               # after the deploy bump
 ```
+
+**Join `ops` from your laptop, once.** `@all` means every participant in the
+channel and nothing more, and the only participant is `backup@quadhost` — so
+until a person is on the roster, the failure is addressed to the machine that
+sent it. `saneha read ops` needs that join too: reading is something a
+participant does.
+
+```sh
+export SANEHA_URL=https://saneha.clusterfault.com
+saneha join ops --as surdy     # once per laptop; a resume is free after that
+saneha read ops
+saneha wait ops                # optional, and the actual point: be told, not check
+```
+
+This needs `POST /channels/{channel}/participants`, so it waits on the same
+deploy bump the notifier's posting half does ([issue
+#25](https://github.com/surdy/saneha/issues/25)).
 
 **Half of this is proven and half is waiting on a deploy.** Proven on quadhost:
 the `OnFailure=` wiring fires (`systemctl show saneha-backup.service -p
@@ -313,9 +336,18 @@ Deleting every copy over NFS leaves every one of them in yesterday's snapshot.
 | | |
 |---|---|
 | Dataset | `pool/container-volumes/saneha`, `recursive: false` |
-| Schedule | daily at 21:00 `America/Los_Angeles` — after the 03:30 UTC backup, so each snapshot has that night's copy in it |
+| Schedule | daily at 21:00 `America/Los_Angeles` — 04:00 UTC, half an hour after the 03:30 UTC backup |
 | Retention | 30 days |
 | Naming | `auto-%Y-%m-%d_%H-%M` |
+
+**The two names disagree by a day, and neither is wrong.** Snapshots are named
+in satyanas' own time zone and the copies inside them are stamped in UTC by
+`date -u`, so `auto-2026-09-04_21-00` was taken at 04:00 UTC on the 5th and the
+newest copy in it is `saneha-2026-09-05.db`. Read the snapshot name as "the
+evening of", and check what is in one rather than inferring it. Nor is every
+snapshot guaranteed to hold that night's copy: the timer is `Persistent=`, so a
+run missed while quadhost was down happens at the next boot and lands in
+whichever snapshot comes after it.
 
 It is a TrueNAS periodic snapshot task, so it is managed there and not from this
 repo — Storage → Snapshots → Periodic Snapshot Tasks, or:
@@ -332,8 +364,9 @@ Getting something back out of a snapshot, easiest first:
 # 1. One file, read straight out of the snapshot. Nothing is mounted, nothing
 #    changes, and this is what you want almost every time.
 ssh admin@satyanas 'ls /mnt/pool/container-volumes/saneha/.zfs/snapshot/'
+ssh admin@satyanas 'ls /mnt/pool/container-volumes/saneha/.zfs/snapshot/auto-2026-09-04_21-00/backups/'
 ssh admin@satyanas '
-  cp /mnt/pool/container-volumes/saneha/.zfs/snapshot/auto-2026-09-04_21-00/backups/saneha-2026-09-04.db \
+  cp /mnt/pool/container-volumes/saneha/.zfs/snapshot/auto-2026-09-04_21-00/backups/saneha-2026-09-05.db \
      /mnt/pool/container-volumes/saneha/backups/'
 # then restore it below, as if the nightly run had written it
 
@@ -483,10 +516,12 @@ inherits it.
 - **`saneha-backup-failed.service` failed** — the backup failed *and* the report
   did not get through. The failure itself is still in the journal
   (`journalctl -t saneha-backup-failed`), along with the status the server gave
-  each request. A `404` on `/channels/ops/participants` or
-  `/channels/ops/messages` means the deployed image predates those routes and
-  the deploy bump has not landed; anything else means the server is down or the
-  `ops` channel was closed.
+  each request. Until the deploy bump ([issue
+  #25](https://github.com/surdy/saneha/issues/25)) lands — and delete this
+  sentence when it does — a `404` on `/channels/ops/participants` or
+  `/channels/ops/messages` means only that the deployed image predates those
+  routes. After it, a `404` there means the `ops` channel or the participant is
+  gone; anything else means the server is down or the channel was closed.
 - **Certificate errors** — Caddy needs `CLOUDFLARE_API_TOKEN`, which lives in
   its own environment file on quadhost. The label in the unit references it as
   `{$$CLOUDFLARE_API_TOKEN}`; the double `$` is intentional, because Podman

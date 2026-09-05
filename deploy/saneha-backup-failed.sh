@@ -20,6 +20,11 @@ set -uo pipefail
 SERVER="${SANEHA_URL:-https://saneha.clusterfault.com}"
 CHANNEL="ops"
 NAME="backup"
+# `quadhost` on purpose, even though this box answers `hostname` with
+# `hass.clusterfault.com` and `saneha` run here would derive `@hass`. The
+# identity names the role and the machine as people talk about it, and the
+# server only asks that a host be a slug. The two names for one box coexist:
+# nothing but this unit ever claims `backup@quadhost`.
 HOST="quadhost"
 IDENTITY="${NAME}@${HOST}"
 WATCHED="saneha-backup.service"
@@ -34,10 +39,20 @@ logger -p user.err -t saneha-backup-failed -- "$HEADLINE"
 # The last lines of the run that failed, so the message says what happened and
 # not only that something did. Capped well under MAX_BODY (64 KiB): the point is
 # the first error, not the whole run.
+#
+# The tail goes inside a code fence, and this is not cosmetic. The server reads
+# every `@word` in a body as a recipient (src/mention.rs) and refuses the whole
+# message when one of them names nobody, so a single ` @foo` in a podman or
+# mount error would throw away the only notification of a failed backup. Fenced
+# blocks are skipped by that scanner. The fence is five backticks because a
+# fence is closed only by a line of nothing but as many backticks again, and
+# journal output does not produce one. The `@all` headline stays outside it,
+# because that mention is the one that has to count.
+FENCE='`````'
 tail="$(journalctl -u "$WATCHED" -n 15 --no-pager -o short-iso 2>/dev/null | tail -c 4000)"
 body="$HEADLINE"
 if [ -n "$tail" ]; then
-    body="${HEADLINE}"$'\n\n'"last lines of ${WATCHED}:"$'\n'"${tail}"
+    body="${HEADLINE}"$'\n\n'"last lines of ${WATCHED}:"$'\n'"${FENCE}"$'\n'"${tail}"$'\n'"${FENCE}"
 fi
 
 # curl's exit code says whether the request happened at all; the status code
@@ -48,7 +63,12 @@ post() {
     local path="$1" payload="$2" what="$3"
     shift 3
     local response rc status output accepted
+    # This unit does not run again on its own (Restart=no, and the only thing
+    # that starts it is a backup that already failed), so a blip on the way to
+    # the server would be the end of the notification. Two retries cost nothing
+    # and cover a server that is restarting as this runs.
     response="$(curl --silent --show-error --max-time 20 \
+        --retry 2 --retry-connrefused \
         --write-out $'\n%{http_code}' \
         --header 'Content-Type: application/json' \
         --data-binary "$payload" \
