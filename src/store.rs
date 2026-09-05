@@ -616,6 +616,25 @@ impl Store {
                 rusqlite::params![channel_id, message_id, recipient],
             )?;
         }
+
+        // A sender that had read everything up to this point stays caught up.
+        // Nobody has to be told what they just said: without this a `read`
+        // echoes the message back to whoever wrote it, and a `wait` wakes on
+        // it, so the skill loop — wait, read, reply, wait — would wake itself
+        // once per reply and never idle.
+        //
+        // The condition is the whole of it: `read_cursor = ?2 - 1` is true
+        // only when the cursor was on the message before this one, which is
+        // what "nothing unread" means at this instant. A sender that was
+        // already behind is left exactly where it is, so what it had not read
+        // is still unread and its own message arrives in that backlog like
+        // anything else.
+        tx.execute(
+            "UPDATE participants SET read_cursor = ?2
+              WHERE id = ?1 AND read_cursor = ?2 - 1",
+            rusqlite::params![from_id, message_id],
+        )?;
+
         tx.commit()?;
 
         // Everything the message is made of was in hand before it was written,
@@ -658,6 +677,60 @@ impl Store {
             after,
             limit.min(MAX_MESSAGE_LIMIT),
         )
+    }
+
+    /// What a participant has not read yet, and the state of the channel it is
+    /// in. This is the one question `wait` asks, and it asks it over and over,
+    /// so it is one call rather than three.
+    ///
+    /// `mentions` keeps only the messages that wake this participant, by the
+    /// rule in [`Message::wakes`]. The filter runs over a page at a time and
+    /// moves on to the next page while a full one filters down to nothing, so
+    /// a thousand messages between other people still leave the one addressed
+    /// to this participant found rather than sitting behind a page boundary.
+    ///
+    /// Nothing here writes: waiting never moves a read cursor (ADR-0004), and
+    /// this is what makes a wait that ends in a read, rather than a wait that
+    /// swallows what it was waiting for.
+    pub fn unread(
+        &self,
+        channel: &str,
+        identity: &str,
+        mentions: bool,
+        limit: usize,
+    ) -> Result<(Vec<Message>, ChannelState), StoreError> {
+        let limit = limit.clamp(1, MAX_MESSAGE_LIMIT);
+        let conn = self.conn();
+        let (channel_id, state) = channel_and_state(&conn, channel)?;
+        let cursor: i64 = conn
+            .query_row(
+                "SELECT read_cursor FROM participants WHERE channel_id = ?1 AND identity = ?2",
+                rusqlite::params![channel_id, identity],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotAParticipant {
+                channel: channel.to_string(),
+                identity: identity.to_string(),
+            })?;
+
+        let mut after = cursor;
+        loop {
+            let page = read_messages(&conn, channel, channel_id, after, limit)?;
+            let more = page.len() == limit;
+            let last = page.last().map(|message| message.id);
+            let kept: Vec<Message> = if mentions {
+                page.into_iter()
+                    .filter(|message| message.wakes(identity))
+                    .collect()
+            } else {
+                page
+            };
+            match last {
+                Some(last) if kept.is_empty() && more => after = last,
+                _ => return Ok((kept, state)),
+            }
+        }
     }
 
     /// Moves a participant's read cursor to `read_cursor` and returns the
@@ -895,6 +968,24 @@ fn channel_id(conn: &Connection, channel: &str) -> Result<i64, StoreError> {
     .ok_or_else(|| StoreError::NoSuchChannel(channel.to_string()))
 }
 
+/// The row id of a channel and the state it is in, for the verbs that read
+/// rather than write. A closed channel is not refused here: it can still be
+/// read to the end, and a waiter is told it closed rather than told off.
+fn channel_and_state(conn: &Connection, channel: &str) -> Result<(i64, ChannelState), StoreError> {
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, state FROM channels WHERE name = ?1",
+            [channel],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (id, state) = row.ok_or_else(|| StoreError::NoSuchChannel(channel.to_string()))?;
+    let state = state
+        .parse()
+        .map_err(|_| StoreError::UnknownChannelState(state))?;
+    Ok((id, state))
+}
+
 /// The row id of a channel that is still open, for the verbs that add to a
 /// transcript. `refusal` finishes the sentence a closed channel is refused
 /// with, because joining and sending are refused for the same reason and read
@@ -904,21 +995,12 @@ fn open_channel_id(
     channel: &str,
     refusal: &'static str,
 ) -> Result<i64, StoreError> {
-    let row: Option<(i64, String)> = conn
-        .query_row(
-            "SELECT id, state FROM channels WHERE name = ?1",
-            [channel],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let (id, state) = row.ok_or_else(|| StoreError::NoSuchChannel(channel.to_string()))?;
-    match state.parse::<ChannelState>() {
-        Ok(ChannelState::Open) => Ok(id),
-        Ok(ChannelState::Closed) => Err(StoreError::ChannelClosed {
+    match channel_and_state(conn, channel)? {
+        (id, ChannelState::Open) => Ok(id),
+        (_, ChannelState::Closed) => Err(StoreError::ChannelClosed {
             channel: channel.to_string(),
             refusal,
         }),
-        Err(_) => Err(StoreError::UnknownChannelState(state)),
     }
 }
 

@@ -215,6 +215,37 @@ pub struct Message {
     pub created_at: String,
 }
 
+impl Message {
+    /// Whether this message wakes a participant waiting with `--mentions`.
+    ///
+    /// The rule is the one the scope states: what is addressed to me, or what
+    /// is addressed to everyone. `@all` is expanded to explicit recipients when
+    /// the message is written, so "everyone" here means a broadcast, which is a
+    /// message written with no recipients at all.
+    ///
+    /// System messages are decided by kind rather than by recipients, which
+    /// they do not have. A `close` always wakes: the channel being over is the
+    /// one thing a waiter must not sleep through, and it is what its exit code
+    /// says. A `join` or a `leave` does not: a participant that asked to be
+    /// woken only for what is addressed to it did not ask to be woken because
+    /// somebody arrived, and it will see the arrival in its next `read`.
+    /// Whether `identity` is who wrote this. A system message was written by
+    /// nobody, so it is never anyone's own.
+    pub fn written_by(&self, identity: &str) -> bool {
+        self.from.as_deref() == Some(identity)
+    }
+
+    pub fn wakes(&self, identity: &str) -> bool {
+        match self.kind {
+            MessageKind::Close => true,
+            MessageKind::Join | MessageKind::Leave => false,
+            MessageKind::Message => {
+                self.recipients.is_empty() || self.recipients.iter().any(|to| to == identity)
+            }
+        }
+    }
+}
+
 /// The body of `POST /channels/{name}/messages`. Recipients come from the
 /// mentions in the body and from `to`, which holds what `--to` was given:
 /// `bob`, `bob@quadhost` or `all`, with or without a leading `@`.
@@ -245,6 +276,54 @@ pub struct MessageQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
 }
+
+/// The query of `GET /channels/{name}/participants/{identity}/wait`: hold this
+/// request open until something this participant has not read arrives, the
+/// channel closes, or `hold` seconds pass.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WaitQuery {
+    /// Wake only for what this participant is addressed by, as
+    /// [`Message::wakes`] decides it. Absent is false.
+    #[serde(default)]
+    pub mentions: bool,
+    /// How long the server may hold this request open, in seconds, capped at
+    /// [`MAX_HOLD`]. Absent is the cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<u64>,
+}
+
+/// The body of a 200 from the wait route: what arrived, and the state of the
+/// channel it arrived in.
+///
+/// The state is here because a waiter has two questions and one answer to read
+/// them from: "is there anything for me" and "is this channel over". A closed
+/// channel answers with the last of the transcript and `closed`, and the
+/// waiter prints what it got and stops waiting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Waited {
+    pub messages: Vec<Message>,
+    pub channel_state: ChannelState,
+}
+
+/// The longest the server holds one wait request open before answering `204`
+/// and letting the caller ask again.
+///
+/// A minute sits under the idle timeout of any reverse proxy this is likely to
+/// sit behind, so a held request is never cut by something in the middle that
+/// thinks it has gone quiet. The caller re-issues until its own `--timeout`,
+/// so what a person sees is still one blocking command.
+pub const MAX_HOLD: u64 = 60;
+
+/// How long `saneha wait` blocks when `--timeout` does not say: an hour, long
+/// enough that a participant left waiting overnight is woken by the message
+/// rather than by its own clock.
+pub const DEFAULT_WAIT_TIMEOUT: u64 = 3600;
+
+/// What a held request is ended with when the server is stopping. It comes
+/// back as a `503` with `retry` set, because there is nothing wrong with the
+/// request: the server will take it again when it is back.
+pub const STOPPING: &str =
+    "the saneha server is stopping; this wait ended early and can be started again";
 
 /// How many messages one fetch returns when the caller does not say.
 pub const DEFAULT_MESSAGE_LIMIT: usize = 500;
@@ -291,8 +370,55 @@ pub struct CursorUpdate {
 pub struct ApiError {
     pub error: String,
     /// Set when the request failed on something that has since changed and is
-    /// worth looking at again: a join whose view of a participant went stale.
-    /// Nothing else asks a caller to try twice.
+    /// worth looking at again: a join whose view of a participant went stale,
+    /// or a wait ended early because the server is stopping.
     #[serde(default)]
     pub retry: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(kind: MessageKind, recipients: &[&str]) -> Message {
+        Message {
+            id: 7,
+            channel: "brisk-otter".to_string(),
+            kind,
+            from: Some("alice@macbookpro".to_string()),
+            about: None,
+            recipients: recipients.iter().map(|to| (*to).to_string()).collect(),
+            body: "the tests pass".to_string(),
+            created_at: "2026-09-04T09:00:00Z".to_string(),
+        }
+    }
+
+    const ME: &str = "bob@quadhost";
+
+    #[test]
+    fn a_message_addressed_to_me_wakes_me() {
+        assert!(message(MessageKind::Message, &[ME]).wakes(ME));
+        assert!(message(MessageKind::Message, &["alice@macbookpro", ME]).wakes(ME));
+    }
+
+    #[test]
+    fn a_broadcast_is_addressed_to_everyone_including_me() {
+        assert!(message(MessageKind::Message, &[]).wakes(ME));
+    }
+
+    #[test]
+    fn a_message_addressed_to_somebody_else_does_not_wake_me() {
+        assert!(!message(MessageKind::Message, &["carol@quadhost"]).wakes(ME));
+        // The same name on another host is a different participant, and so is
+        // a name this one is only the beginning of.
+        assert!(!message(MessageKind::Message, &["bob@macbookpro"]).wakes(ME));
+        assert!(!message(MessageKind::Message, &["bobby@quadhost"]).wakes(ME));
+    }
+
+    #[test]
+    fn a_close_wakes_everyone_and_an_arrival_wakes_nobody() {
+        assert!(message(MessageKind::Close, &[]).wakes(ME));
+        assert!(!message(MessageKind::Join, &[]).wakes(ME));
+        assert!(!message(MessageKind::Leave, &[]).wakes(ME));
+    }
 }
