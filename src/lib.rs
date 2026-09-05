@@ -11,6 +11,7 @@ pub mod client;
 pub mod identity;
 pub mod mention;
 pub mod server;
+pub mod skill;
 pub mod slug;
 pub mod store;
 

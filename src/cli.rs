@@ -16,6 +16,7 @@ use crate::api::{
 use crate::client::{JoinAnswer, Remote, Waiting, URL_ENV};
 use crate::identity;
 use crate::server;
+use crate::skill;
 use crate::store::{self, Store};
 
 #[derive(Debug, Parser)]
@@ -61,6 +62,10 @@ pub enum Command {
     Close(CloseArgs),
     /// Delete a channel and everything in it
     Delete(DeleteArgs),
+    /// Print the skill that teaches an agent to use saneha
+    Skill,
+    /// Install that skill into every harness on this machine
+    Init(InitArgs),
 }
 
 #[derive(Debug, Args)]
@@ -355,6 +360,24 @@ pub struct WaitArgs {
     pub hold: Option<u64>,
 }
 
+#[derive(Debug, Args)]
+#[command(
+    after_help = "A harness is found by its own user-level skills directory already being \
+                  there: ~/.claude/skills for Claude Code, ~/.copilot/skills for Copilot CLI, \
+                  ~/.agents/skills for Codex. Only the saneha/ directory inside one is ever \
+                  created, and only a SKILL.md carrying saneha's own frontmatter marker is ever \
+                  written over. Anybody else's SKILL.md at that path is reported and left alone."
+)]
+pub struct InitArgs {
+    /// Say what would happen and write nothing
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Print the answer as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Parses the command line and runs it.
 pub fn run() -> Result<ExitCode> {
     execute(Cli::parse())
@@ -382,7 +405,87 @@ pub fn execute(cli: Cli) -> Result<ExitCode> {
         Command::Leave(args) => done(leave(args)),
         Command::Close(args) => done(close(args)),
         Command::Delete(args) => done(delete(args)),
+        Command::Skill => done(skill()),
+        Command::Init(args) => done(init(args)),
     }
+}
+
+/// Prints the skill an agent reads to learn saneha, exactly as the repository
+/// holds it. `saneha skill | pbcopy` and `saneha skill > SKILL.md` are both
+/// the point, so it goes through the same broken-pipe-safe write everything
+/// else does.
+fn skill() -> Result<()> {
+    write_out(skill::SKILL)
+}
+
+/// Installs the skill into the user-level skills directory of every harness on
+/// this host.
+///
+/// A failed write is an error whichever way the answer was asked for. The
+/// outcomes are printed first either way, because what did land is worth
+/// having even when something else did not; the exit code is decided at the
+/// end, after both output modes have said their piece.
+fn init(args: InitArgs) -> Result<()> {
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("HOME is not set, so there is no home directory to install into"))?;
+
+    let version = env!("CARGO_PKG_VERSION");
+    let outcomes = skill::install(&home, version, args.dry_run);
+
+    if args.json {
+        write_out(&format!("{}\n", serde_json::to_string_pretty(&outcomes)?))?;
+        return failures(&outcomes);
+    }
+
+    if outcomes.is_empty() {
+        return say(&format!(
+            "no harness found: none of {} is there, so nothing was installed",
+            skill::HARNESSES
+                .iter()
+                .map(|harness| format!("~/{}", harness.skills_dir))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    let width = outcomes
+        .iter()
+        .map(|outcome| outcome.action.word().len())
+        .max()
+        .unwrap_or_default();
+    let mut lines = String::new();
+    if args.dry_run {
+        lines.push_str("dry run: nothing was written\n");
+    }
+    for outcome in &outcomes {
+        lines.push_str(&format!(
+            "{:width$}  {}  ({})",
+            outcome.action.word(),
+            outcome.path.display(),
+            outcome.harness
+        ));
+        if let Some(because) = &outcome.because {
+            lines.push_str(&format!(" — {because}"));
+        }
+        lines.push('\n');
+    }
+    write_out(&lines)?;
+    failures(&outcomes)
+}
+
+/// The exit code an install earns: an error naming how many did not land, so
+/// that `--json` and the printed table agree about whether the run worked.
+fn failures(outcomes: &[skill::Outcome]) -> Result<()> {
+    let failed = outcomes
+        .iter()
+        .filter(|outcome| outcome.action == skill::Action::Failed)
+        .count();
+    if failed > 0 {
+        return Err(anyhow!("{} could not be written", plural(failed, "skill")));
+    }
+    Ok(())
 }
 
 fn serve(args: ServeArgs) -> Result<()> {
