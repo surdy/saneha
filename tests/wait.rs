@@ -618,3 +618,36 @@ fn health_counts_the_waits_being_held() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// A send and a close can both land before a wait next looks, and then one
+/// answer carries messages and `channel_state: closed` together. The messages
+/// are printed and the code is still 4: a skill that read the 0 would go back
+/// to waiting on a channel that has ended.
+#[test]
+fn messages_and_a_close_in_one_answer_are_printed_and_still_exit_four() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    channel(&remote, "brisk-otter");
+    let alice = join(&remote, "brisk-otter", "alice");
+    let bob = join(&remote, "brisk-otter", "bob");
+    catch_up(&remote, "brisk-otter", &bob);
+
+    // Both land while nobody is waiting, so the wait's first look answers with
+    // the message and the closed state at once rather than being woken by the
+    // first of them and finding the second next time round.
+    send(&remote, "brisk-otter", &alice, "the last word");
+    close(&remote, "brisk-otter");
+
+    let ended = Waiter::start(&server, &["wait", "brisk-otter", "--as", "bob"]).finish();
+    ended.exited(4);
+    assert!(
+        ended.printed.contains("the last word"),
+        "the message that arrived with the close was dropped: {:?}",
+        ended.printed
+    );
+    assert!(
+        ended.printed.contains("closed the channel"),
+        "the close itself was not printed: {:?}",
+        ended.printed
+    );
+}
