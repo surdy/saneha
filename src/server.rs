@@ -24,10 +24,10 @@ use tokio::net::TcpListener;
 use tokio::sync::{watch, Notify};
 
 use crate::api::{
-    ApiError, Attachment, Channel, ChannelDetail, ChannelList, ChannelState, CloseRequest, Closed,
-    CursorUpdate, DeleteQuery, Deleted, JoinRequest, Joined, Left, Message, MessageList,
-    MessageQuery, NewChannel, NewMessage, Participant, ParticipantList, WaitQuery, Waited,
-    DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT, MAX_BODY,
+    ApiError, Attachment, Channel, ChannelDetail, ChannelList, ChannelQuery, ChannelState,
+    CloseRequest, Closed, CursorUpdate, DeleteQuery, Deleted, JoinRequest, Joined, Left, Message,
+    MessageList, MessageQuery, NewChannel, NewMessage, Participant, ParticipantList, WaitQuery,
+    Waited, DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT, MAX_BODY,
     MAX_HOLD,
 };
 use crate::store::{PendingAttachment, Store, StoreError, UNBOUND_ATTACHMENT_TTL};
@@ -508,8 +508,16 @@ async fn create_channel(
     Ok((StatusCode::CREATED, Json(channel)))
 }
 
-async fn list_channels(State(serving): State<Arc<Serving>>) -> Result<Json<ChannelList>, Failure> {
-    let channels = serving.store.list_channels()?;
+/// Every channel, and — when `?as=<identity>` says whose — the read cursor
+/// that identity holds in each of them, so the viewer draws an unread badge
+/// per channel from one request rather than one per channel. It reads and
+/// nothing else: no join, no cursor moved, and an identity that has joined
+/// nothing is a listing of null cursors rather than an error.
+async fn list_channels(
+    State(serving): State<Arc<Serving>>,
+    ApiQuery(query): ApiQuery<ChannelQuery>,
+) -> Result<Json<ChannelList>, Failure> {
+    let channels = serving.store.list_channels(query.as_identity.as_deref())?;
     Ok(Json(ChannelList { channels }))
 }
 

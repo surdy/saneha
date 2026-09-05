@@ -49,6 +49,30 @@ pub struct Channel {
     /// close system message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<String>,
+    /// The id of the newest message in the transcript, and 0 when the
+    /// transcript is empty: the channel's own allocator, read rather than
+    /// counted. A fact about the channel, so it is here wherever a channel is
+    /// described, and it is what an unread count is measured from.
+    ///
+    /// Defaulted as well as serialised, so a client meeting a server that
+    /// predates the field reads 0 rather than failing the whole listing.
+    #[serde(default)]
+    pub newest_id: i64,
+    /// The read cursor of the identity `GET /channels?as=<identity>` asked
+    /// about, in this channel. Null when that identity has not joined this
+    /// one, and absent altogether when nobody was asked about: this is a read
+    /// of what ADR-0004 already stores and moves nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_cursor: Option<i64>,
+}
+
+/// The query of `GET /channels`. `as` names an identity whose read cursor
+/// every channel should carry, for a viewer drawing an unread badge per
+/// channel; without it the listing is the plain one it has always been.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChannelQuery {
+    #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+    pub as_identity: Option<String>,
 }
 
 /// The body of `POST /channels`. A missing name asks the server to mint one.

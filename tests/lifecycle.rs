@@ -771,7 +771,7 @@ fn a_closed_channel_can_still_be_deleted() {
         "the closed channel survived its own delete"
     );
     assert!(
-        remote.list_channels().expect("list").is_empty(),
+        remote.list_channels(None).expect("list").is_empty(),
         "the deleted channel is still listed"
     );
 }
