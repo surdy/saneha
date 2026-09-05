@@ -93,6 +93,10 @@ pub struct Participant {
     /// The working directory the last join was made from, when the caller had
     /// one to record. A person joining from the viewer is in a browser and has
     /// none, so this is null rather than a stand-in for a directory.
+    ///
+    /// Defaulted as well as optional: a client meeting a server that leaves
+    /// the field out altogether reads a participant with no directory, rather
+    /// than failing the whole listing over one field it did not get.
     #[serde(default)]
     pub cwd: Option<String>,
     /// The Madari pane a future relay would nudge. Recorded, unused in v1.

@@ -168,8 +168,10 @@ fn the_page_joins_without_a_working_directory() {
 /// joined are none. What the page draws is a matter for a browser and is
 /// verified by hand; which requests it makes is not.
 ///
-/// Skipped where there is no Node rather than failing: it is not a dependency
-/// of this crate, and this rule is also verifiable by hand against a server.
+/// On a laptop without Node this is skipped rather than failed: it is not a
+/// dependency of this crate, and the rule is verifiable by hand against a
+/// server. In CI it is a failure, because a runner that quietly stopped
+/// shipping Node would otherwise leave the rule untested and the suite green.
 #[test]
 fn the_page_reads_for_the_person_only_under_the_rule() {
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/read_rule.js");
@@ -181,6 +183,10 @@ fn the_page_reads_for_the_person_only_under_the_rule() {
     {
         Ok(output) => output,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "there is no node on this runner, so the page's read rule was not driven"
+            );
             eprintln!("skipped: no node, so the page's read rule was not driven");
             return;
         }
@@ -191,6 +197,20 @@ fn the_page_reads_for_the_person_only_under_the_rule() {
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The page is the whole viewer and is carried in the binary, so its size is
+/// something to be held to rather than noticed later. 40 KB is roughly twice
+/// what it needs today: room to grow, and small enough that a phone on a
+/// tailnet has it at once.
+#[test]
+fn the_page_stays_inside_its_budget() {
+    const BUDGET: usize = 40 * 1024;
+    let size = saneha::server::VIEWER.len();
+    assert!(
+        size <= BUDGET,
+        "the viewer is {size} bytes, over its {BUDGET}: take something out before adding more"
     );
 }
 

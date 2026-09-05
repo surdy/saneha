@@ -20,6 +20,7 @@ const fs = require("fs");
 const vm = require("vm");
 
 const CHANNEL = "brisk-otter";
+const OTHER = "quiet-heron";
 const ME = "surdy@web";
 const SETTLE = 2000; // what the page waits before it counts a message as read
 
@@ -95,7 +96,15 @@ function world(options) {
   const requests = [];
   const cursors = [];
   const later = (options.later || []).slice();
-  let messages = options.messages || [message(1, "alpha@macbookpro", "one")];
+  // What each channel holds. The one the page opens is longer than the other,
+  // so a read after a switch is to an id the page has already read past —
+  // which it makes anyway, because the id it has read to went with the
+  // channel it read it in.
+  const transcripts = {
+    [CHANNEL]: [1, 2, 3].map((id) => message(id, "alpha@macbookpro", "in " + CHANNEL)),
+    [OTHER]: [1, 2].map((id) => message(id, "alpha@macbookpro", "in " + OTHER))
+  };
+  let failCursor = options.failCursor || 0;
   let nextTimer = 1;
 
   const byId = (id) => {
@@ -125,14 +134,33 @@ function world(options) {
     text: () => Promise.resolve(JSON.stringify(body))
   });
 
+  /// The server refusing, in its own words, which is what `api` reads.
+  const refusal = () => Promise.resolve({
+    ok: false,
+    status: 500,
+    text: () => Promise.resolve(JSON.stringify({ error: "the cursor did not move" }))
+  });
+
+  /// Which channel a request is about, so a case can switch between two.
+  const about = (url) => (url.match(/^\/channels\/([^/?]+)/) || [])[1];
+
   function fetch(url, init) {
     requests.push({ url, init });
     if (url === "/channels") {
-      return json({ channels: [{ name: CHANNEL, state: "open", purpose: "" }] });
+      return json({
+        channels: [
+          { name: CHANNEL, state: "open", purpose: "" },
+          { name: OTHER, state: "open", purpose: "" }
+        ]
+      });
     }
     if (/\/cursor$/.test(url)) {
       const sent = JSON.parse(init.body);
-      cursors.push({ url, read_cursor: sent.read_cursor });
+      cursors.push({ url, channel: about(url), read_cursor: sent.read_cursor });
+      if (failCursor > 0) {
+        failCursor -= 1;
+        return refusal();
+      }
       return json(participant(ME, sent.read_cursor));
     }
     if (/\/messages\?.*hold=/.test(url)) {
@@ -141,20 +169,25 @@ function world(options) {
       // the follower parks for the rest of the case.
       if (!later.length) return new Promise(() => {});
       const arriving = later.shift();
-      messages = messages.concat([arriving]);
+      transcripts[about(url)] = transcripts[about(url)].concat([arriving]);
       return json({ messages: [arriving] });
     }
-    if (/\/messages\?/.test(url)) return json({ messages: messages });
+    if (/\/messages\?/.test(url)) return json({ messages: transcripts[about(url)] });
     if (/\/participants$/.test(url)) return json(people());
     if (/^\/channels\/[^/]+$/.test(url)) {
-      return json({ channel: { name: CHANNEL, state: "open", purpose: "", created_at: "2026-09-04T09:00:00Z" } });
+      return json({ channel: { name: about(url), state: "open", purpose: "", created_at: "2026-09-04T09:00:00Z" } });
     }
     throw new Error("the page asked for " + url + ", which this DOM knows nothing about");
   }
 
+  const listeners = {};
   const sandbox = {
     document,
-    window: { addEventListener() {} },
+    window: {
+      addEventListener(type, fn) {
+        (listeners[type] = listeners[type] || []).push(fn);
+      }
+    },
     location: { pathname: "/c/" + CHANNEL, reload() {} },
     history: { pushState() {} },
     localStorage: {
@@ -187,6 +220,17 @@ function world(options) {
     requests,
     cursors,
     el: byId,
+    /// The page taken to another channel, the way the back button takes it:
+    /// the path changes and `popstate` arrives.
+    switchTo(name) {
+      sandbox.location.pathname = "/c/" + name;
+      for (const fn of listeners.popstate || []) fn();
+    },
+    /// The transcript being scrolled, which is what re-arms a read for a
+    /// person who had scrolled away, or whose last one failed.
+    scroll() {
+      for (const fn of byId("transcript").listeners.scroll || []) fn();
+    },
     /// The read the page is waiting to make, if it is waiting to make one.
     /// There is at most one: a burst restarts the wait rather than adding to
     /// it, which is the debounce this asserts.
@@ -236,10 +280,10 @@ async function main() {
     "/channels/" + CHANNEL + "/participants/" + encodeURIComponent(ME) + "/cursor",
     "the read went somewhere else"
   );
-  assert.strictEqual(visible.cursors[0].read_cursor, 1, "the read was not to the newest message");
+  assert.strictEqual(visible.cursors[0].read_cursor, 3, "the read was not to the newest message");
   // And the person's own marker moves, like anyone else's.
   assert.ok(
-    visible.el("peopleList").innerHTML.includes("read #1"),
+    visible.el("peopleList").innerHTML.includes("read #3"),
     "the panel did not show the person's own cursor"
   );
   assert.ok(
@@ -278,9 +322,9 @@ async function main() {
   // another, each restarts the wait, and what is sent is the newest id once.
   const burst = await open({
     later: [
-      message(2, "alpha@macbookpro", "two"),
-      message(3, "alpha@macbookpro", "three"),
-      message(4, "alpha@macbookpro", "four")
+      message(4, "alpha@macbookpro", "four"),
+      message(5, "alpha@macbookpro", "five"),
+      message(6, "alpha@macbookpro", "six")
     ]
   });
   assert.strictEqual(burst.pendingReads().length, 1, "a burst left more than one read waiting");
@@ -288,14 +332,59 @@ async function main() {
   burst.fireRead();
   await burst.settle();
   assert.strictEqual(burst.cursors.length, 1, "a burst was more than one read");
-  assert.strictEqual(burst.cursors[0].read_cursor, 4, "the read was not to the newest message");
+  assert.strictEqual(burst.cursors[0].read_cursor, 6, "the read was not to the newest message");
 
   // And a cursor already there is not sent again: a page that settles with
   // nothing new to read says nothing.
-  const caughtUp = await open({ cursor: 1 });
+  const caughtUp = await open({ cursor: 3 });
   caughtUp.fireRead();
   await caughtUp.settle();
   assert.deepStrictEqual(caughtUp.cursors, [], "a cursor already at the newest message was sent again");
+
+  // A channel switch: a read is made in each, and what the page has read to
+  // in one is nothing to the other — the second channel is shorter, and is
+  // still read to its own end.
+  const switched = await open({});
+  switched.fireRead();
+  await switched.settle();
+  assert.strictEqual(switched.cursors.length, 1, "the read in the first channel was not made");
+  assert.strictEqual(switched.cursors[0].channel, CHANNEL);
+  switched.switchTo(OTHER);
+  await switched.settle();
+  assert.strictEqual(
+    switched.pendingReads().length,
+    1,
+    "the read waiting on the channel that was left is still waiting"
+  );
+  switched.fireRead();
+  await switched.settle();
+  assert.strictEqual(switched.cursors.length, 2, "the read in the channel switched to was not made");
+  assert.strictEqual(switched.cursors[1].channel, OTHER, "the read went to the channel that was left");
+  assert.strictEqual(
+    switched.cursors[1].read_cursor,
+    2,
+    "the id read in one channel was carried into another"
+  );
+
+  // A read the server refuses says nothing to the person and is not the last
+  // word: the next time the transcript settles, it is made again.
+  const refused = await open({ failCursor: 1 });
+  refused.fireRead();
+  await refused.settle();
+  assert.strictEqual(refused.cursors.length, 1, "the refused read was not made");
+  assert.ok(
+    !refused.el("transcript").innerHTML.includes("read to here"),
+    "a refused read drew a marker anyway"
+  );
+  refused.scroll();
+  refused.fireRead();
+  await refused.settle();
+  assert.strictEqual(refused.cursors.length, 2, "a refused read was never tried again");
+  assert.strictEqual(refused.cursors[1].read_cursor, 3, "the second try read something else");
+  assert.ok(
+    refused.el("transcript").innerHTML.includes("surdy has read to here"),
+    "the second try did not move the marker"
+  );
 
   console.log("the read rule holds: one read when it should, none when it should not");
 }

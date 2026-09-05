@@ -240,11 +240,20 @@ CREATE INDEX attachments_unbound ON attachments (created_at) WHERE message_id IS
     // the old one and taking its name touches no other table, keeps the unique
     // index on (channel_id, identity), and leaves every row where it is; the
     // only visible change is that `cwd` is now the last column.
+    //
+    // The last statement takes the placeholder out of the rows that already
+    // carry it. A page that has joined stays joined — it looks at the
+    // participants before it joins again — so nothing else would ever clear
+    // the `viewer` those rows were written with, and the listing would go on
+    // reporting it as a working directory. Only the page wrote that word: the
+    // CLI records `current_dir()`, which is absolute, so `viewer` cannot be a
+    // directory anybody was really in.
     r#"
 ALTER TABLE participants ADD COLUMN cwd_optional TEXT;
 UPDATE participants SET cwd_optional = cwd;
 ALTER TABLE participants DROP COLUMN cwd;
 ALTER TABLE participants RENAME COLUMN cwd_optional TO cwd;
+UPDATE participants SET cwd = NULL WHERE cwd = 'viewer';
 "#,
 ];
 
@@ -2304,7 +2313,9 @@ mod tests {
              INSERT INTO participants
                  (id, channel_id, identity, name, host, harness, cwd, joined_at)
                  VALUES (1, 1, 'alpha@macbookpro', 'alpha', 'macbookpro', 'claude',
-                         '/repos/saneha', '2026-09-04T09:00:00Z');
+                         '/repos/saneha', '2026-09-04T09:00:00Z'),
+                        (2, 1, 'surdy@web', 'surdy', 'web', 'web',
+                         'viewer', '2026-09-04T09:00:01Z');
              INSERT INTO messages (channel_id, id, kind, from_participant, body, created_at)
                  VALUES (1, 1, 'message', 1, 'hello', '2026-09-04T09:00:01Z');
              INSERT INTO recipients (channel_id, message_id, participant_id) VALUES (1, 1, 1);",
@@ -2314,12 +2325,18 @@ mod tests {
 
         let store = Store::open(&path).expect("open the older database");
         let participants = store.list_participants("quiet-heron").expect("list");
-        assert_eq!(participants.len(), 1);
+        assert_eq!(participants.len(), 2);
         // The directory that was recorded is still recorded.
         assert_eq!(
             participants[0].cwd.as_deref(),
             Some("/repos/saneha"),
             "the working directory did not survive the migration"
+        );
+        // And the placeholder the page used to have to send is gone: that row
+        // never joins again, so this is the only chance to clear it.
+        assert_eq!(
+            participants[1].cwd, None,
+            "the viewer's placeholder is still being reported as a directory"
         );
 
         // What pointed at the participant still does.
@@ -2351,7 +2368,8 @@ mod tests {
         drop(conn);
 
         // A join with nothing to record now lands, which is what the whole
-        // migration is for.
+        // migration is for. A new participant rather than that one resuming,
+        // so it is the insert that is asked.
         let joined = store
             .join("quiet-heron", &request_without_a_directory())
             .expect("join without a working directory");
@@ -2362,7 +2380,7 @@ mod tests {
     /// does not include a working directory.
     fn request_without_a_directory() -> JoinRequest {
         JoinRequest {
-            name: "surdy".to_string(),
+            name: "reviewer".to_string(),
             host: "web".to_string(),
             harness: "web".to_string(),
             session_id: None,

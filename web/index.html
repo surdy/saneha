@@ -336,8 +336,8 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   const HOLD = 55;             // seconds the server may hold a poll open
   const FIRST_BACKOFF = 1000;  // how long the first retry after a failure waits
   const BACKOFF_MAX = 30000;   // and the longest a run of them ever waits
-  // How long the newest message sits on a visible, scrolled-to-end screen
-  // before it counts as read, and the slack in "to the end".
+  // How long the newest message sits on a visible, scrolled-to-end screen to
+  // count as read, and the slack in "to the end".
   const SETTLE = 2000;
   const AT_END = 60;
   // How often the channel list is re-fetched when no channel is open and so
@@ -671,8 +671,7 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     if (follow) box.scrollTop = box.scrollHeight;
   }
 
-  /// Whether the transcript is scrolled to its end, within the slack that
-  /// keeps a rounding error from reading as scrolled up.
+  /// Whether the transcript is scrolled to its end, within a little slack.
   function atEnd() {
     const box = ui.transcript;
     return box.scrollHeight - box.scrollTop - box.clientHeight < AT_END;
@@ -885,15 +884,15 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
       state.messages.push(message);
       state.lastId = message.id;
     }
-    // A new newest message starts its seconds on screen again: a burst is
-    // read once, at the end of it.
+    // A new newest message starts its seconds on screen again: a burst is one
+    // read, at the end of it.
     if (state.lastId !== before) scheduleRead();
   }
 
   // ---- reading for the person ---------------------------------------------
 
   /// Starts the wait before this page reads for the person, restarting one
-  /// already running.
+  /// already waiting.
   function scheduleRead() {
     clearTimeout(state.readTimer);
     state.readTimer = setTimeout(readToEnd, SETTLE);
@@ -903,9 +902,8 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   /// the tab is visible, the transcript is scrolled to its end, and the newest
   /// message has been there for SETTLE. Only a read moves a cursor (ADR-0004),
   /// and this is a person having read what was in front of them, over the
-  /// route `saneha read` calls. So: nothing for a hidden tab, nothing for a
-  /// reader scrolled back into history, and nothing for somebody who has not
-  /// joined — opening the page announces nobody, and no row is no cursor.
+  /// route `saneha read` calls. So nothing for a hidden tab, nothing for a
+  /// reader scrolled back, nothing for somebody who has not joined.
   async function readToEnd() {
     state.readTimer = null;
     const channel = state.current;
@@ -925,7 +923,7 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
       if (!moved || channel !== state.current) return;
       // The poll brings this back anyway — the server wakes a channel for a
       // cursor — but drawing it now moves the person's own marker as they
-      // watch, like anyone else's.
+      // watch.
       const at = state.participants.findIndex((person) => person.identity === me);
       if (at >= 0) state.participants[at] = moved;
       draw();
@@ -1017,8 +1015,8 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     else nextGeneration();
   });
 
-  // The other half of the read rule: scrolling back into history stops the
-  // reading while they are there, and coming back starts it again.
+  // The other half of the read rule: scrolling back stops the reading while
+  // they are back there, and returning to the end starts it again.
   ui.transcript.addEventListener("scroll", scheduleRead, { passive: true });
 
   window.addEventListener("popstate", () => {
