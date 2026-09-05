@@ -4,7 +4,7 @@
 //! `SANEHA_URL`, makes one request, and turns anything that goes wrong into a
 //! single line a person can act on.
 
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -30,6 +30,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 const MAX_ERROR_BODY: usize = 200;
+
+/// How many more times a request a signal interrupted is made before the
+/// interruption is reported as a server that cannot be reached.
+const INTERRUPTED_RETRIES: usize = 5;
 
 /// How much longer than the hold it asked for a wait request will sit there
 /// before it decides the answer is not coming. The server answers at the hold
@@ -125,9 +129,7 @@ impl Remote {
             purpose: purpose.map(str::to_string),
         };
         let response = self.check(
-            self.agent
-                .post(self.url("/channels"))
-                .send_json(&body)
+            retrying(|| self.agent.post(self.url("/channels")).send_json(&body))
                 .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "channel")
@@ -136,9 +138,7 @@ impl Remote {
     /// Every channel the server knows about.
     pub fn list_channels(&self) -> Result<Vec<Channel>> {
         let response = self.check(
-            self.agent
-                .get(self.url("/channels"))
-                .call()
+            retrying(|| self.agent.get(self.url("/channels")).call())
                 .map_err(|err| self.unreachable(&err))?,
         )?;
         let list: ChannelList = read_json(response, "channel list")?;
@@ -149,10 +149,12 @@ impl Remote {
     /// told to go ahead.
     pub fn channel_detail(&self, channel: &str) -> Result<ChannelDetail> {
         let response = self.check(
-            self.agent
-                .get(self.url(&format!("/channels/{channel}")))
-                .call()
-                .map_err(|err| self.unreachable(&err))?,
+            retrying(|| {
+                self.agent
+                    .get(self.url(&format!("/channels/{channel}")))
+                    .call()
+            })
+            .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "channel")
     }
@@ -161,10 +163,12 @@ impl Remote {
     /// what comes back says whether this was the call that closed it.
     pub fn close_channel(&self, channel: &str, by: &str) -> Result<Closed> {
         let response = self.check(
-            self.agent
-                .post(self.url(&format!("/channels/{channel}/close")))
-                .send_json(&CloseRequest { by: by.to_string() })
-                .map_err(|err| self.unreachable(&err))?,
+            retrying(|| {
+                self.agent
+                    .post(self.url(&format!("/channels/{channel}/close")))
+                    .send_json(&CloseRequest { by: by.to_string() })
+            })
+            .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "close")
     }
@@ -174,10 +178,12 @@ impl Remote {
     /// deletion must not be decided by something that went missing.
     pub fn delete_channel(&self, channel: &str) -> Result<Deleted> {
         let response = self.check(
-            self.agent
-                .delete(self.url(&format!("/channels/{channel}?confirm=true")))
-                .call()
-                .map_err(|err| self.unreachable(&err))?,
+            retrying(|| {
+                self.agent
+                    .delete(self.url(&format!("/channels/{channel}?confirm=true")))
+                    .call()
+            })
+            .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "deletion")
     }
@@ -186,12 +192,14 @@ impl Remote {
     /// back says whether this was the call that did it.
     pub fn leave(&self, channel: &str, identity: &str) -> Result<Left> {
         let response = self.check(
-            self.agent
-                .post(self.url(&format!(
-                    "/channels/{channel}/participants/{identity}/leave"
-                )))
-                .send_empty()
-                .map_err(|err| self.unreachable(&err))?,
+            retrying(|| {
+                self.agent
+                    .post(self.url(&format!(
+                        "/channels/{channel}/participants/{identity}/leave"
+                    )))
+                    .send_empty()
+            })
+            .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "leave")
     }
@@ -200,11 +208,12 @@ impl Remote {
     /// `Stale` when the participant the request was reasoned about changed
     /// hands in between and the caller should look again.
     pub fn join(&self, channel: &str, request: &JoinRequest) -> Result<JoinAnswer> {
-        let response = self
-            .agent
-            .post(self.url(&format!("/channels/{channel}/participants")))
-            .send_json(request)
-            .map_err(|err| self.unreachable(&err))?;
+        let response = retrying(|| {
+            self.agent
+                .post(self.url(&format!("/channels/{channel}/participants")))
+                .send_json(request)
+        })
+        .map_err(|err| self.unreachable(&err))?;
         if response.status().is_success() {
             return Ok(JoinAnswer::Granted(Box::new(read_json(response, "join")?)));
         }
@@ -219,10 +228,12 @@ impl Remote {
     /// Everyone who has joined a channel.
     pub fn list_participants(&self, channel: &str) -> Result<Vec<Participant>> {
         let response = self.check(
-            self.agent
-                .get(self.url(&format!("/channels/{channel}/participants")))
-                .call()
-                .map_err(|err| self.unreachable(&err))?,
+            retrying(|| {
+                self.agent
+                    .get(self.url(&format!("/channels/{channel}/participants")))
+                    .call()
+            })
+            .map_err(|err| self.unreachable(&err))?,
         )?;
         let list: ParticipantList = read_json(response, "participant list")?;
         Ok(list.participants)
@@ -232,11 +243,12 @@ impl Remote {
     /// here. An unknown channel reads as `None` too: the join that follows is
     /// what reports it, in the server's own words.
     pub fn participant(&self, channel: &str, identity: &str) -> Result<Option<Participant>> {
-        let response = self
-            .agent
-            .get(self.url(&format!("/channels/{channel}/participants/{identity}")))
-            .call()
-            .map_err(|err| self.unreachable(&err))?;
+        let response = retrying(|| {
+            self.agent
+                .get(self.url(&format!("/channels/{channel}/participants/{identity}")))
+                .call()
+        })
+        .map_err(|err| self.unreachable(&err))?;
         if response.status().as_u16() == 404 {
             return Ok(None);
         }
@@ -249,10 +261,12 @@ impl Remote {
     /// is the message as the transcript now holds it.
     pub fn send_message(&self, channel: &str, message: &NewMessage) -> Result<Message> {
         let response = self.check(
-            self.agent
-                .post(self.url(&format!("/channels/{channel}/messages")))
-                .send_json(message)
-                .map_err(|err| self.unreachable(&err))?,
+            retrying(|| {
+                self.agent
+                    .post(self.url(&format!("/channels/{channel}/messages")))
+                    .send_json(message)
+            })
+            .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "message")
     }
@@ -260,12 +274,14 @@ impl Remote {
     /// One page of a transcript: at most `limit` messages after `after`.
     pub fn messages(&self, channel: &str, after: i64, limit: usize) -> Result<Vec<Message>> {
         let response = self.check(
-            self.agent
-                .get(self.url(&format!(
-                    "/channels/{channel}/messages?after={after}&limit={limit}"
-                )))
-                .call()
-                .map_err(|err| self.unreachable(&err))?,
+            retrying(|| {
+                self.agent
+                    .get(self.url(&format!(
+                        "/channels/{channel}/messages?after={after}&limit={limit}"
+                    )))
+                    .call()
+            })
+            .map_err(|err| self.unreachable(&err))?,
         )?;
         let list: MessageList = read_json(response, "message list")?;
         Ok(list.messages)
@@ -310,14 +326,14 @@ impl Remote {
         let url = self.url(&format!(
             "/channels/{channel}/participants/{identity}/wait?mentions={mentions}&hold={hold}"
         ));
-        let response = match self
-            .agent
-            .get(url)
-            .config()
-            .timeout_global(Some(Duration::from_secs(hold) + WAIT_MARGIN))
-            .build()
-            .call()
-        {
+        let response = match retrying(|| {
+            self.agent
+                .get(url.as_str())
+                .config()
+                .timeout_global(Some(Duration::from_secs(hold) + WAIT_MARGIN))
+                .build()
+                .call()
+        }) {
             Ok(response) => response,
             Err(err) => {
                 let unreachable = self.unreachable(&err);
@@ -369,12 +385,14 @@ impl Remote {
         read_cursor: i64,
     ) -> Result<Participant> {
         let response = self.check(
-            self.agent
-                .post(self.url(&format!(
-                    "/channels/{channel}/participants/{identity}/cursor"
-                )))
-                .send_json(&CursorUpdate { read_cursor })
-                .map_err(|err| self.unreachable(&err))?,
+            retrying(|| {
+                self.agent
+                    .post(self.url(&format!(
+                        "/channels/{channel}/participants/{identity}/cursor"
+                    )))
+                    .send_json(&CursorUpdate { read_cursor })
+            })
+            .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "participant")
     }
@@ -406,20 +424,26 @@ impl Remote {
         let mut reading =
             std::fs::File::open(file).with_context(|| format!("could not open {shown}"))?;
         let response = self.check(
-            self.agent
-                .post(self.url(&format!("/channels/{channel}/attachments")))
-                .config()
-                .timeout_global(Some(ATTACHMENT_TIMEOUT))
-                .build()
-                // Percent-encoded, because a header value carries ASCII and a
-                // filename is written in whatever language it was named in.
-                .header(FILENAME_HEADER, encode_filename(&filename))
-                .header("content-type", content_type_of(&filename))
-                // The size is known, so the request is length-delimited and
-                // the server can refuse an oversize one before reading it.
-                .header("content-length", size.to_string())
-                .send(SendBody::from_reader(&mut reading))
-                .map_err(|err| self.unreachable(&err))?,
+            retrying(|| {
+                // An upload that is made again is made from the beginning of
+                // the file, wherever the interrupted attempt left the reader.
+                reading.rewind().map_err(ureq::Error::Io)?;
+                self.agent
+                    .post(self.url(&format!("/channels/{channel}/attachments")))
+                    .config()
+                    .timeout_global(Some(ATTACHMENT_TIMEOUT))
+                    .build()
+                    // Percent-encoded, because a header value carries ASCII and
+                    // a filename is written in whatever language it was named
+                    // in.
+                    .header(FILENAME_HEADER, encode_filename(&filename))
+                    .header("content-type", content_type_of(&filename))
+                    // The size is known, so the request is length-delimited and
+                    // the server can refuse an oversize one before reading it.
+                    .header("content-length", size.to_string())
+                    .send(SendBody::from_reader(&mut reading))
+            })
+            .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "attachment")
     }
@@ -429,13 +453,15 @@ impl Remote {
     /// they go before any of them arrive.
     pub fn fetch_attachment(&self, channel: &str, id: &str) -> Result<Fetched> {
         let response = self.check(
-            self.agent
-                .get(self.url(&format!("/channels/{channel}/attachments/{id}")))
-                .config()
-                .timeout_global(Some(ATTACHMENT_TIMEOUT))
-                .build()
-                .call()
-                .map_err(|err| self.unreachable(&err))?,
+            retrying(|| {
+                self.agent
+                    .get(self.url(&format!("/channels/{channel}/attachments/{id}")))
+                    .config()
+                    .timeout_global(Some(ATTACHMENT_TIMEOUT))
+                    .build()
+                    .call()
+            })
+            .map_err(|err| self.unreachable(&err))?,
         )?;
 
         // The server sanitises what it stores, and this sanitises what it
@@ -621,6 +647,34 @@ fn server_message(mut response: Response<Body>) -> (String, bool) {
     )
 }
 
+/// Makes a request, and makes it again when a signal interrupted it.
+///
+/// A connect, a send, or a read that a signal lands on comes back as `EINTR`,
+/// which ureq does not retry on its own: without this a stray `SIGCHLD` on a
+/// busy machine reads as a saneha server that is not there. There is nothing
+/// wrong with such a request, so it goes again straight away — a bounded
+/// number of times, so a machine being signalled steadily still ends in an
+/// answer rather than a loop.
+///
+/// `attempt` is the whole request, from connect to response, so a request is
+/// only ever made again when no response came back at all. Nothing else is
+/// retried: every other error is the server's answer or a real failure to
+/// reach it, and is reported in the same words as before.
+fn retrying<T>(mut attempt: impl FnMut() -> Result<T, ureq::Error>) -> Result<T, ureq::Error> {
+    for _ in 0..INTERRUPTED_RETRIES {
+        match attempt() {
+            Err(err) if interrupted(&err) => continue,
+            outcome => return outcome,
+        }
+    }
+    attempt()
+}
+
+/// Whether this is a signal arriving mid-syscall and nothing else.
+fn interrupted(err: &ureq::Error) -> bool {
+    matches!(err, ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::Interrupted)
+}
+
 /// One line saying why the request never got an answer. ureq's own Display
 /// prefixes the transport kind, which is noise next to the address we name.
 fn describe(err: &ureq::Error) -> String {
@@ -685,6 +739,86 @@ mod tests {
             filename_from(&plain).as_deref(),
             Some("a; filename*=UTF-8''elsewhere.sh")
         );
+    }
+
+    /// A request that fails with `kind` `failures` times over and then
+    /// answers with the number of attempts it took.
+    fn flaky(
+        failures: usize,
+        kind: std::io::ErrorKind,
+    ) -> impl FnMut() -> Result<usize, ureq::Error> {
+        let mut attempts = 0;
+        move || {
+            attempts += 1;
+            if attempts <= failures {
+                Err(ureq::Error::Io(std::io::Error::new(kind, "under test")))
+            } else {
+                Ok(attempts)
+            }
+        }
+    }
+
+    #[test]
+    fn a_signal_during_a_request_is_not_a_server_that_is_not_there() {
+        use std::io::ErrorKind::Interrupted;
+
+        // A request interrupted on the way out goes again, and the answer is
+        // the one the server gave rather than the interruption.
+        assert_eq!(retrying(flaky(0, Interrupted)).expect("first try"), 1);
+        assert_eq!(retrying(flaky(1, Interrupted)).expect("second try"), 2);
+        assert_eq!(
+            retrying(flaky(INTERRUPTED_RETRIES, Interrupted)).expect("the last try in the budget"),
+            INTERRUPTED_RETRIES + 1
+        );
+    }
+
+    #[test]
+    fn asking_again_runs_out() {
+        // A machine being signalled steadily ends in the error of the day
+        // rather than in a loop, and stops after the bound.
+        let mut attempts = 0;
+        let err = retrying(|| -> Result<usize, ureq::Error> {
+            attempts += 1;
+            Err(ureq::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Interrupted system call (os error 4)",
+            )))
+        })
+        .expect_err("the budget to run out");
+        assert_eq!(attempts, INTERRUPTED_RETRIES + 1);
+        assert!(interrupted(&err));
+
+        let remote = Remote::at("127.0.0.1:41905").expect("remote");
+        assert_eq!(
+            remote.unreachable(&err).to_string(),
+            "cannot reach the saneha server at http://127.0.0.1:41905 \
+             (Interrupted system call (os error 4))"
+        );
+    }
+
+    #[test]
+    fn nothing_but_a_signal_is_asked_again() {
+        // A refused connection is the server not being there, which asking
+        // again will not change: it is reported the first time, unchanged.
+        let refused = retrying(flaky(1, std::io::ErrorKind::ConnectionRefused))
+            .expect_err("a refusal to stand");
+        assert!(!interrupted(&refused));
+
+        let remote = Remote::at("127.0.0.1:41905").expect("remote");
+        assert!(remote
+            .unreachable(&refused)
+            .to_string()
+            .starts_with("cannot reach the saneha server at http://127.0.0.1:41905 ("));
+
+        // Nor is an error that never touched the transport at all.
+        let mut attempts = 0;
+        let bad = retrying(|| -> Result<usize, ureq::Error> {
+            attempts += 1;
+            Err(ureq::Error::BadUri("not a url".to_string()))
+        })
+        .expect_err("a bad address to stand");
+        assert_eq!(attempts, 1);
+        assert!(!interrupted(&bad));
     }
 
     #[test]
