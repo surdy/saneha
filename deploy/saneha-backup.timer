@@ -1,0 +1,26 @@
+# What actually runs the backup. Quadlet generates no timers, so this is a
+# plain systemd unit and does not live under /etc/containers/systemd.
+#
+# Install at: /etc/systemd/system/saneha-backup.timer
+# then:       sudo systemctl daemon-reload
+#             sudo systemctl enable --now saneha-backup.timer
+#
+# It fires saneha-backup.service, which Quadlet generates from
+# saneha-backup.container.
+
+[Unit]
+Description=Nightly saneha database backup to satyanas
+Documentation=https://github.com/surdy/saneha/blob/main/docs/deploy.md
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+# quadhost is not always up at 03:30. Persistent means a missed run happens at
+# the next boot instead of being skipped until tomorrow.
+Persistent=true
+# Nothing else on the host wakes at 03:30, but a backup is not urgent to the
+# minute and satyanas has other things to do.
+RandomizedDelaySec=10m
+Unit=saneha-backup.service
+
+[Install]
+WantedBy=timers.target

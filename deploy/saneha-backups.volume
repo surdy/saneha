@@ -1,0 +1,14 @@
+# Where the nightly database copies land.
+#
+# NFS from satyanas, the way every other stateful volume on quadhost is —
+# unlike saneha-data.volume, which stays local because SQLite's locking is not
+# safe over NFS. Nothing writes a live database here: the backup unit writes a
+# finished copy and then reads it back once, which NFS is fine for.
+#
+# Backing dataset: pool/container-volumes/saneha, exported to 192.168.16.169
+# only, maproot=root. The copies land in the backups/ subdirectory of it.
+[Volume]
+Driver=local
+Type=nfs
+Device=satyanas:/mnt/pool/container-volumes/saneha/backups
+Options=rw,noatime,nfsvers=4
