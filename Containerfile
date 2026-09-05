@@ -35,10 +35,13 @@ RUN mkdir src \
       target/release/libsaneha* \
       target/release/.fingerprint/saneha-*
 
-# skills/ as well as src/: the binary embeds skills/saneha/SKILL.md with
-# include_str!, so a build context without it does not compile.
+# Everything the binary embeds with include_str! must be copied, not only
+# src/: skills/saneha/SKILL.md and web/index.html. A build context missing
+# either does not compile (the viewer commit shipped without web/ and the
+# main image build failed; CI now builds this image on pull requests).
 COPY src ./src
 COPY skills ./skills
+COPY web ./web
 RUN cargo build --release --locked \
  && strip target/release/saneha
 
