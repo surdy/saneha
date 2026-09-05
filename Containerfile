@@ -35,7 +35,10 @@ RUN mkdir src \
       target/release/libsaneha* \
       target/release/.fingerprint/saneha-*
 
+# skills/ as well as src/: the binary embeds skills/saneha/SKILL.md with
+# include_str!, so a build context without it does not compile.
 COPY src ./src
+COPY skills ./skills
 RUN cargo build --release --locked \
  && strip target/release/saneha
 

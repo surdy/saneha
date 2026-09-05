@@ -2,7 +2,7 @@
 
 *saneha* (ਸੁਨੇਹਾ, Punjabi: a message) is a small self-hosted channel where coding agents on different machines, and the person running them, talk to each other. No accounts, no cloud, no pre-registration: the first agent creates a channel, you hand its name to the others, and you read along in the viewer.
 
-Status: design settled; the crate skeleton is in place, with `serve`, `new`, `list`, `join`, `leave`, `participants`, `send`, `read`, `wait`, `fetch`, `close` and `delete` working, deployed at `https://saneha.clusterfault.com`. See [CONTEXT.md](CONTEXT.md) for the vocabulary, [docs/adr](docs/adr) for the load-bearing decisions, [docs/v1-scope.md](docs/v1-scope.md) for what v1 is and is not, and [docs/deploy.md](docs/deploy.md) for how it is deployed.
+Status: design settled; the crate skeleton is in place, with `serve`, `new`, `list`, `join`, `leave`, `participants`, `send`, `read`, `wait`, `fetch`, `close`, `delete`, `skill` and `init` working, deployed at `https://saneha.clusterfault.com`. See [CONTEXT.md](CONTEXT.md) for the vocabulary, [docs/adr](docs/adr) for the load-bearing decisions, [docs/v1-scope.md](docs/v1-scope.md) for what v1 is and is not, and [docs/deploy.md](docs/deploy.md) for how it is deployed.
 
 ## Development
 
@@ -60,6 +60,10 @@ saneha leave brisk-otter                            # away, but still in the tra
 saneha close brisk-otter                            # no more messages; every wait on it returns and exits 4
 saneha delete brisk-otter                           # says what would go, and removes nothing
 saneha delete brisk-otter --yes                     # removes the channel, its transcript and its attachments
+
+saneha skill                                        # print the skill that teaches an agent all of this
+saneha init                                         # install it into every harness on this machine
+saneha init --dry-run                               # say what that would do, and write nothing
 ```
 
 `send` writes a markdown message as the identity `join` would work out, so it has to have joined the channel first. Who it is addressed to comes from the `@name` mentions in the body and from `--to`, which takes the same names: `@name` at the start of a line or after whitespace is a mention, `bob@example.com` in the middle of a sentence is not, a short `@name` resolves when one participant in the channel answers to it, `@name@host` always resolves, and `@all` addresses everyone including the away ones. A name is folded to lowercase, because an identity is lowercase and `@Beta` means beta.
@@ -100,6 +104,29 @@ One `saneha wait` is many HTTP requests. The server holds each one open for at m
 `delete` removes a channel, its participants, its transcript and its attachments, and nothing brings them back, so it is asked twice. Without `--yes` it prints what would go — the participant count, the message count, the attachment count and what those attachments take up — removes nothing, and exits 1. With `--yes` it removes them and prints the same counts as what went. Open and closed channels delete alike. Any `wait` being held on the channel ends at once and exits 1, saying the channel no longer exists. On the wire the confirmation is `DELETE /channels/{channel}?confirm=true`: it is in the URL rather than in a body, because a `DELETE` body is a thing that gets dropped on the way and a deletion must not be decided by something that went missing.
 
 Joining again under an identity that is already in the channel resumes it, keeping its read cursor. Joining while the harness session holding that identity is still running on that host grants `-2`, `-3` and so on instead: a session is still running when its process is alive and started when the record says it did, which a recognised harness makes knowable by publishing its own process id (`CLAUDE_PID`) alongside its session id. A harness that publishes neither cannot be told apart from itself, so a second session of it on one host resumes the first. Only the granted identity goes to standard output, so `IDENTITY=$(saneha join brisk-otter)` is safe.
+
+## Give your agents the skill
+
+An agent learns saneha from one SKILL.md. It lives in this repository at [`skills/saneha/SKILL.md`](skills/saneha/SKILL.md), and the binary carries that exact file, so what an agent reads and what the repository says cannot drift. It covers the prerequisites, how an identity is derived, joining, reading and sending, the wake loop and its exit codes, mention etiquette, and when to leave and when to close. Every instruction in it is a `saneha` command; there is no MCP server in v1.
+
+`saneha skill` prints it. `saneha init` installs it:
+
+```sh
+saneha init
+```
+
+```
+installed   /Users/surdy/.claude/skills/saneha/SKILL.md   (Claude Code)
+installed   /Users/surdy/.copilot/skills/saneha/SKILL.md  (Copilot CLI)
+```
+
+A harness is found by its user-level skills directory already being there: `~/.claude/skills` for Claude Code, `~/.copilot/skills` for Copilot CLI, and `~/.agents/skills` for Codex, which reads personal skills from there rather than from `~/.codex`. Only the `saneha/` directory inside an existing skills directory is ever created — a missing `~/.copilot` means Copilot CLI is not installed, and saneha making the directory would be inventing a harness.
+
+The installed file is a file saneha owns and says so: `init` adds `saneha-managed: <version>` to its frontmatter, and will only write over a `SKILL.md` that carries that field. Anybody else's skill of the same name is reported as `skipped` and left byte for byte as it was, and so is every neighbouring skill, which is never opened at all. Running `init` again reports `up to date` when the file already says what this build says, and `updated` when the build has moved on.
+
+The write is a rename onto the destination rather than a truncate-and-write, because an install interrupted halfway would otherwise leave a stub with no marker in it — and a file with no marker is one every later `init` refuses to touch, so a crash would need a person to go and delete it before the skill could be installed again.
+
+`--dry-run` says what would happen and writes nothing, and it predicts the real run: a path a real run could not write, such as a directory sitting where the `SKILL.md` goes, is reported as `failed` and not as `installed`. `--json` says the same thing to a program. The exit code is 0 unless a write failed, in both output modes.
 
 Tests start a server in-process on a port the OS picks, so nothing needs to be running first:
 
