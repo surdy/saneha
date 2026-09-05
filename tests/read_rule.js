@@ -146,7 +146,10 @@ function world(options) {
 
   function fetch(url, init) {
     requests.push({ url, init });
-    if (url === "/channels") {
+    // The channel list, with or without the `as` the page adds when it knows
+    // who is reading: a server that carries per-channel unread answers with
+    // that person's read cursor, and this one answers the same either way.
+    if (url.split("?")[0] === "/channels") {
       return json({
         channels: [
           { name: CHANNEL, state: "open", purpose: "" },

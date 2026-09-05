@@ -2,302 +2,407 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>saneha</title>
 <!-- The favicon is the page: one inline SVG, percent-encoded so that nothing
      here is a fetch to anywhere. The server is on a LAN and a tailnet and may
      have no route out at all. -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%232f6f4f%22%2F%3E%3Cpath%20d%3D%22M7%208.5h18a2%202%200%200%201%202%202v9a2%202%200%200%201-2%202h-9l-6.5%205v-5H7a2%202%200%200%201-2-2v-9a2%202%200%200%201%202-2z%22%20fill%3D%22%23f6f3e9%22%2F%3E%3C%2Fsvg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%232c50cc%22%2F%3E%3Cpath%20d%3D%22M7%208.5h18a2%202%200%200%201%202%202v9a2%202%200%200%201-2%202h-9l-6.5%205v-5H7a2%202%200%200%201-2-2v-9a2%202%200%200%201%202-2z%22%20fill%3D%22%23ffffff%22%2F%3E%3C%2Fsvg%3E">
 <style>
 :root {
-  --bg: #f7f6f2;
-  --panel: #ffffff;
-  --fg: #1d1f1e;
-  --muted: #6a706d;
-  --line: #dcdad2;
-  --accent: #2f6f4f;
-  --accent-soft: #e2efe7;
-  /* The muted grey of the state pill, which sits on --accent-soft on the
-     selected row: --muted itself measures 4.27:1 there, under AA, and 11px
-     text is the last place to be short of it. */
-  --pill: #5c625f;
-  --code-bg: #f0efe9;
-  --danger: #9c2b2b;
+  --bg: #e9ecf1; --panel: #ffffff; --panel2: #f4f6f9; --panel3: #eceff4;
+  --fg: #161a21; --fg2: #39404b; --muted: #5d6673;
+  --line: #dde1e8; --line2: #c8ced9;
+  --accent: #2c50cc; --ink: #23409f; --soft: #e5ebfd; --aline: #b7c5f4; --on: #ffffff;
+  --code: #f2f4f8; --cline: #e0e4ec; --danger: #9d2531;
+  --s1: 0 1px 2px rgba(20,26,38,.07);
+  --s2: 0 1px 2px rgba(20,26,38,.06), 0 10px 24px -10px rgba(20,26,38,.24);
+  --ring: 0 0 0 3px rgba(44,80,204,.18);
+  --ui: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+  --sans: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Helvetica, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
+/* One small palette, hashed from the host, so every machine in a channel has
+   a colour and the ink on it clears AA in both themes. `web` is pinned to the
+   teal, so the person posting from this page is always the same colour. */
+.h0 { --hb: #1a6660; --hi: #fff }
+.h1 { --hb: #6a45a6; --hi: #fff }
+.h2 { --hb: #9a4a1c; --hi: #fff }
+.h3 { --hb: #1f5299; --hi: #fff }
+.h4 { --hb: #97303f; --hi: #fff }
+.h5 { --hb: #2c6b3a; --hi: #fff }
+.h6 { --hb: #4b3fa8; --hi: #fff }
+.h7 { --hb: #8f3572; --hi: #fff }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16191a;
-    --panel: #1d2122;
-    --fg: #e6e6e1;
-    --muted: #98a09c;
-    --line: #2f3537;
-    --accent: #7fc9a1;
-    --accent-soft: #23342b;
-    /* On a dark selected row the muted grey is already well clear of AA. */
-    --pill: #98a09c;
-    --code-bg: #121516;
-    --danger: #f08b8b;
+    --bg: #0e1116; --panel: #171b21; --panel2: #1d222a; --panel3: #232932;
+    --fg: #e8ebf0; --fg2: #c3cad4; --muted: #98a2b0;
+    --line: #262d36; --line2: #39424e;
+    --accent: #8ea6ff; --ink: #b5c5ff; --soft: #1c2540; --aline: #33437a; --on: #0d1220;
+    --code: #10141a; --cline: #262d36; --danger: #f19a9a;
+    --s1: 0 1px 2px rgba(0,0,0,.5);
+    --s2: 0 1px 2px rgba(0,0,0,.5), 0 10px 24px -10px rgba(0,0,0,.75);
+    --ring: 0 0 0 3px rgba(142,166,255,.22);
   }
+  .h0 { --hb: #79cec4; --hi: #082a27 }
+  .h1 { --hb: #b9a2ea; --hi: #211a33 }
+  .h2 { --hb: #e0a377; --hi: #2c1a0c }
+  .h3 { --hb: #93bdf0; --hi: #0c1e38 }
+  .h4 { --hb: #eda3ad; --hi: #33101a }
+  .h5 { --hb: #8fd0a0; --hi: #0b2413 }
+  .h6 { --hb: #aeaaf0; --hi: #191534 }
+  .h7 { --hb: #e2a4cd; --hi: #33112a }
 }
-* { box-sizing: border-box; }
-html, body { height: 100%; }
+* { box-sizing: border-box }
+html, body { height: 100% }
 body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 13.5px/1.5 var(--sans);
 }
-button, input, textarea { font: inherit; color: inherit; }
-button {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 5px 10px;
-  cursor: pointer;
-}
-button:hover { border-color: var(--accent); }
-button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-input, textarea {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 6px 8px;
-  width: 100%;
-}
-.mono { font-family: var(--mono); }
-.muted { color: var(--muted); }
+button, input, textarea { font: inherit; color: inherit }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+.mono { font-family: var(--mono) }
+.sp { flex: 1 }
+.i { width: 13px; height: 13px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round }
+.i.b { width: 15px; height: 15px }
 
-/* Three columns on a desk, one on a phone. */
-#app {
-  display: grid;
-  grid-template-columns: 230px minmax(0, 1fr) 220px;
-  grid-template-rows: auto minmax(0, 1fr);
-  grid-template-areas: "head head head" "channels transcript people";
-  height: 100%;
+/* the shared controls */
+.btn {
+  height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 11px;
+  border: 1px solid var(--line2); border-radius: 8px; background: var(--panel);
+  color: var(--fg2); font-family: var(--ui); font-size: 12px; cursor: pointer;
 }
-header {
-  grid-area: head;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
+.btn:hover { border-color: var(--accent); color: var(--fg) }
+.ic { width: 32px; height: 32px; justify-content: center; padding: 0; background: var(--panel2); color: var(--muted) }
+.chip {
+  display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px;
+  border-radius: 8px; background: var(--panel2); border: 1px solid var(--line);
+  font-family: var(--ui); font-size: 11.5px; color: var(--fg2); white-space: nowrap;
 }
-header h1 {
-  font-size: 17px;
-  margin: 0;
-  letter-spacing: 0.02em;
-  color: var(--accent);
+.av {
+  width: 30px; height: 30px; border-radius: 9px; background: var(--hb, var(--panel3)); color: var(--hi, var(--muted));
+  font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
 }
-header .spacer { flex: 1; }
-#who { font-size: 13px; }
+.av.s { width: 20px; height: 20px; border-radius: 7px; font-size: 9px }
+.av.md { width: 28px; height: 28px; border-radius: 9px; font-size: 11px }
+.av.aw { background: var(--panel3); color: var(--muted); border: 1px dashed var(--line2) }
+.tag { height: 17px; padding: 0 6px; border: 1px solid var(--line2); border-radius: 999px; font-size: 10px; display: inline-flex; align-items: center }
+.st {
+  height: 20px; padding: 0 8px; border: 1px solid var(--aline); border-radius: 999px;
+  background: var(--soft); color: var(--ink);
+  font-family: var(--ui); font-size: 11px; font-weight: 600; display: inline-flex; align-items: center;
+}
+.st.cl { border-color: var(--line2); background: none; color: var(--muted); font-weight: 400 }
+.rhead {
+  flex: 0 0 44px; height: 44px; display: flex; align-items: center; gap: 8px;
+  padding: 0 8px 0 14px; border-bottom: 1px solid var(--line);
+}
+.rt { flex: 1; font-family: var(--ui); font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--muted) }
 
-#channels {
-  grid-area: channels;
-  border-right: 1px solid var(--line);
-  overflow-y: auto;
-  padding: 8px;
-  background: var(--panel);
+#app { display: flex; flex-direction: column; height: 100% }
+#bar {
+  flex: 0 0 52px; height: 52px; display: flex; align-items: center; gap: 12px; padding: 0 16px;
+  background: var(--panel); border-bottom: 1px solid var(--line); box-shadow: var(--s1); position: relative; z-index: 3;
 }
-#channels .head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-#channels .head span { flex: 1; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
-.channel {
-  display: block;
-  width: 100%;
-  text-align: left;
-  border: 1px solid transparent;
-  background: none;
-  border-radius: 6px;
-  padding: 6px 8px;
-  margin-bottom: 2px;
-}
-.channel:hover { background: var(--code-bg); }
-.channel.on { background: var(--accent-soft); border-color: var(--accent); }
-.channel .name { font-family: var(--mono); font-size: 13px; }
-.channel .purpose { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.state {
-  font-size: 11px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 0 6px;
-  color: var(--pill);
-}
-.state.closed { color: var(--danger); border-color: var(--danger); }
+#mark { width: 26px; height: 26px; flex: 0 0 26px; border-radius: 8px; background: var(--accent); color: var(--on); display: flex; align-items: center; justify-content: center }
+#mark .i { width: 16px; height: 16px }
+#name { font-family: var(--ui); font-size: 16px; font-weight: 600; letter-spacing: .01em }
+.who { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 6px 0 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel2) }
+.who .wl { font-family: var(--ui); font-size: 11.5px; color: var(--muted) }
+#whoId { font-family: var(--mono); font-size: 12.5px }
+#who { height: 26px; padding: 0 9px; font-size: 11.5px }
+#row { flex: 1; min-height: 0; display: flex; position: relative }
 
-main {
-  grid-area: transcript;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
+#channels { width: 264px; flex: 0 0 264px; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0 }
+#channelList { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 2px }
+.ch {
+  display: flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left;
+  padding: 8px 9px; border: 1px solid transparent; border-radius: 9px; background: none; cursor: pointer;
 }
+.ch:hover { background: var(--panel2) }
+.ch.on { border-color: var(--aline); background: var(--soft); box-shadow: var(--s1) }
+.ch.cl { background: var(--panel2) }
+.ch .cc { flex: 1; min-width: 0 }
+.ch .cn { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12.5px; color: var(--fg) }
+.ch.on .cn { color: var(--ink); font-weight: 600 }
+.ch.cl .cn { color: var(--muted) }
+.ch .cp { display: block; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.ch.on .cp { color: var(--ink); opacity: .85 }
+.bdg {
+  min-width: 20px; height: 19px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--on);
+  font-family: var(--mono); font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; margin-top: 1px;
+}
+.rd { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-family: var(--ui); font-size: 10.5px; color: var(--ink) }
+.grp { display: flex; align-items: center; gap: 8px; padding: 12px 9px 6px }
+.grp span:first-child { font-family: var(--ui); font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--muted) }
+.grp .ln2 { flex: 1; height: 1px; background: var(--line) }
+
+main { flex: 1; min-width: 0; display: flex; flex-direction: column }
 #topbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--line);
+  flex: 0 0 80px; height: 80px; display: flex; align-items: center; gap: 14px; padding: 0 20px;
+  background: var(--panel); border-bottom: 1px solid var(--line); box-shadow: var(--s1); position: relative; z-index: 2;
 }
-#topbar .title { font-family: var(--mono); font-weight: 600; }
-#topbar .purpose { color: var(--muted); font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#banner {
-  padding: 8px 14px;
-  background: var(--accent-soft);
-  border-bottom: 1px solid var(--line);
-  font-size: 13px;
-}
-#transcript {
-  flex: 1;
-  overflow-y: auto;
-  padding: 10px 14px 20px;
-}
-.msg { padding: 6px 0; border-top: 1px solid var(--line); }
-.msg:first-child { border-top: none; }
-.msg .meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--muted);
-}
-.msg .id { font-family: var(--mono); }
-.msg .from { color: var(--fg); font-weight: 600; }
-.msg .to { color: var(--accent); }
-.msg .body { margin-top: 2px; overflow-wrap: anywhere; }
-.msg .body p { margin: 4px 0; }
-.msg .body code { font-family: var(--mono); font-size: 13px; background: var(--code-bg); border-radius: 4px; padding: 0 3px; }
-.msg .body pre {
-  background: var(--code-bg);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 8px 10px;
-  overflow-x: auto;
-  margin: 6px 0;
-}
-.msg .body pre code { background: none; padding: 0; }
-.mention { background: var(--accent-soft); color: var(--accent); border-radius: 4px; padding: 0 3px; font-weight: 600; }
-.sys { padding: 3px 0; font-size: 12.5px; color: var(--muted); }
-.sys .id { font-family: var(--mono); }
-.attachments { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
-.attachment { font-size: 13px; color: var(--accent); text-decoration: none; }
-.attachment:hover { text-decoration: underline; }
-.attachment .size { color: var(--muted); font-size: 12px; }
+.ti { min-width: 0 }
+.t1 { display: flex; align-items: center; gap: 8px }
+#channelName { font-family: var(--mono); font-size: 17px; font-weight: 600; letter-spacing: -.01em }
+#channelPurpose { font-size: 12.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+#headAvatars { display: flex; align-items: center; gap: 4px; border: 0; background: none; padding: 2px; border-radius: 10px; cursor: pointer }
+#headAvatars:hover { background: var(--panel2) }
+#banner { padding: 8px 20px; background: var(--soft); color: var(--ink); border-bottom: 1px solid var(--aline); font-size: 12.5px }
 
-/* Read cursors, grouped: one rule per position, however many participants
-   share it, so five of them are five names on one line at worst. */
-.readmark {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 4px 0;
-  font-size: 11.5px;
-  color: var(--accent);
+#transcript { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 20px 16px; display: flex; flex-direction: column; gap: 11px }
+/* A short transcript sits at the bottom, against the compose box, rather than
+   floating at the top of an empty column; a long one still scrolls. */
+#transcript > :first-child { margin-top: auto }
+.r { display: flex; gap: 12px; align-items: flex-start }
+.g { width: 30px; flex: 0 0 30px; display: flex; justify-content: center; padding-top: 1px }
+.c { flex: 1; min-width: 0 }
+.m { width: 56px; flex: 0 0 56px; display: flex; align-items: center; justify-content: flex-end; gap: 4px; padding-top: 3px }
+.m .ln { width: 10px; height: 1px; background: var(--line2) }
+.more { font-family: var(--ui); font-size: 11px; color: var(--muted); padding: 0 1px }
+.hd { display: flex; align-items: center; gap: 7px; min-height: 20px }
+.hd .nm { font-family: var(--ui); font-size: 13.5px; font-weight: 600 }
+.hd .hg { color: var(--muted) }
+.hd .hs, .hd .tm { font-family: var(--mono); font-size: 11px; color: var(--muted) }
+.hd .to { font-family: var(--ui); font-size: 11px; color: var(--muted) }
+/* A narrow column shortens the name and the recipients rather than folding
+   the header into three lines: the stamp is the one part that never wraps. */
+.hd .nm, .hd .to, .r.sy .c > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.tm { flex: 0 0 auto; white-space: nowrap }
+.br { display: none }
+.hd .to b { color: var(--ink); font-weight: 500 }
+.bd { font-size: 13.5px; color: var(--fg2); overflow-wrap: anywhere }
+.bd p { margin: 4px 0 0 }
+.bd code { font-family: var(--mono); font-size: 12px; background: var(--code); border: 1px solid var(--cline); border-radius: 5px; padding: 0 4px }
+.bd pre {
+  margin: 6px 0 0; background: var(--code); border: 1px solid var(--cline); border-radius: 9px;
+  padding: 8px 11px; overflow-x: auto; font-size: 12px; line-height: 16px;
 }
-.readmark::before, .readmark::after { content: ""; height: 1px; background: var(--accent); opacity: 0.45; flex: 1; }
-.readmark::before { flex: 0 0 14px; }
-
-#compose { border-top: 1px solid var(--line); padding: 8px 14px 10px; background: var(--panel); }
-#compose textarea { min-height: 62px; resize: vertical; font-family: inherit; }
-#compose .row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
-#compose .hint { flex: 1; font-size: 12px; color: var(--muted); }
-#sendError { color: var(--danger); font-size: 13px; margin-top: 6px; white-space: pre-wrap; }
-
-#people {
-  grid-area: people;
-  border-left: 1px solid var(--line);
-  overflow-y: auto;
-  padding: 8px 10px;
-  background: var(--panel);
-  font-size: 13px;
+.bd pre code { background: none; border: 0; padding: 0 }
+.mention { background: var(--soft); color: var(--ink); border-radius: 5px; padding: 1px 4px; font-weight: 600 }
+.r.cont { margin-top: -7px }
+.r.sy { align-items: center }
+.r.sy + .r.sy { margin-top: -9px }
+.r.sy .c { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted) }
+.r.sy .g { color: var(--muted); padding-top: 0 }
+.r.sy .m { padding-top: 0 }
+.r.sy .tm { font-family: var(--mono); font-size: 11px }
+.at { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px }
+.att {
+  display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px 0 8px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--panel); box-shadow: var(--s1);
+  text-decoration: none; font-family: var(--mono); font-size: 12px; color: var(--ink);
 }
-#people h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 6px; }
-.person { padding: 4px 0; border-top: 1px solid var(--line); }
-.person:first-of-type { border-top: none; }
-.person .identity { font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
-.person .facts { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
-.person.away .identity { opacity: 0.65; }
-.away-tag { color: var(--muted); }
+.att .i { color: var(--accent) }
+.att .sz { font-size: 11px; color: var(--muted) }
+.dv { display: flex; align-items: center; gap: 10px; min-height: 22px }
+.dv::before, .dv::after { content: ""; flex: 1; height: 1px; background: var(--line) }
+.dv span { display: inline-flex; align-items: center; gap: 5px; font-family: var(--ui); font-size: 10.5px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; color: var(--muted) }
+.dv.up span { font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 11px }
+.empty { color: var(--muted); padding: 24px 0; text-align: center }
 
-#status { font-size: 12px; color: var(--muted); padding: 0 14px 6px; }
+#status { font-size: 12px; color: var(--muted); padding: 0 20px 6px }
+#compose { padding: 10px 20px calc(14px + env(safe-area-inset-bottom)); background: var(--panel); border-top: 1px solid var(--line) }
+.fld { border: 1px solid var(--line2); border-radius: 10px; background: var(--panel); box-shadow: var(--s2); padding: 8px 8px 8px 12px; display: flex; flex-direction: column; gap: 6px }
+.fld:focus-within { border-color: var(--aline); box-shadow: var(--s2), var(--ring) }
+#body { border: 0; background: none; padding: 0; width: 100%; min-height: 40px; resize: none; outline: none; font-size: 13.5px }
+.crow { display: flex; align-items: center; gap: 10px }
+#composeHint { flex: 1; font-family: var(--ui); font-size: 11.5px; color: var(--muted) }
+.sendb {
+  height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 13px;
+  border: 1px solid var(--accent); border-radius: 8px; background: var(--accent); color: var(--on);
+  font-family: var(--ui); font-size: 12.5px; font-weight: 600; cursor: pointer; box-shadow: var(--s1);
+}
+#sendError { color: var(--danger); font-size: 12.5px; margin-top: 6px; white-space: pre-wrap }
+
+#people { width: 236px; flex: 0 0 236px; background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0 }
+#people.col { width: 54px; flex: 0 0 54px }
+#people.col .rt, #people.col .pi, #people.col #peopleFoot { display: none }
+#people.col .rhead { padding: 0 11px }
+#people.col #panelToggle .i { transform: scaleX(-1) }
+#people.col .p { justify-content: center; padding: 6px }
+#peopleList { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px }
+.p { display: flex; gap: 9px; padding: 8px 9px; border-radius: 9px; background: var(--panel2); border: 1px solid var(--line) }
+.p.me { background: var(--soft); border-color: var(--aline) }
+.p.away { background: var(--panel); border-style: dashed; border-color: var(--line2) }
+.pi { flex: 1; min-width: 0 }
+.pn { font-family: var(--mono); font-size: 12px; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.p.away .pn { color: var(--muted) }
+.pn .you { font-family: var(--ui); font-size: 10.5px; color: var(--ink) }
+.ph2 { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.p.me .ph2, .p.me .pf, .p.me .pr { color: var(--ink) }
+.pf, .pr { display: flex; align-items: center; gap: 5px; margin-top: 3px; font-size: 11px; color: var(--muted) }
+.pf { font-family: var(--ui) }
+.pr { font-family: var(--mono) }
+.pr.ok { color: var(--ink) }
+#peopleFoot { padding: 8px 14px; border-top: 1px solid var(--line); font-family: var(--ui); font-size: 11px; color: var(--muted) }
+#scrim { display: none }
+
 dialog {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel);
-  color: var(--fg);
-  padding: 16px;
-  min-width: min(340px, 90vw);
+  border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--fg);
+  padding: 18px; min-width: min(360px, 92vw); box-shadow: var(--s2);
 }
-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
-dialog h2 { margin: 0 0 10px; font-size: 15px; }
-dialog label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 2px; }
-dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-.empty { color: var(--muted); padding: 20px 0; }
+dialog::backdrop { background: rgba(6,9,14,.5) }
+dialog h2 { margin: 0 0 10px; font-family: var(--ui); font-size: 15px }
+dialog label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px }
+dialog input { width: 100%; background: var(--panel2); border: 1px solid var(--line2); border-radius: 8px; padding: 7px 9px }
+dialog .drow { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px }
+dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
+.pri { border-color: var(--accent); background: var(--accent); color: var(--on); font-weight: 600 }
+.pri:hover { color: var(--on) }
+.ph { display: none }
 
+/* One column on a phone: a channels screen, a transcript screen, and the
+   participants as a sheet over the transcript. */
 @media (max-width: 860px) {
-  #app {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto minmax(0, 1fr) auto;
-    grid-template-areas: "head" "channels" "transcript" "people";
-  }
-  #channels {
-    border-right: none;
-    border-bottom: 1px solid var(--line);
-    max-height: 30vh;
-  }
+  .ph { display: flex }
+  .dk, .sl { display: none }
+  /* the channels screen */
+  #bar { display: none; padding: 0 10px; gap: 8px }
+  #app.vc #bar { display: flex }
+  #who { width: 30px; padding: 0; justify-content: center }
+  #channels { display: none; width: auto; flex: 1; border-right: 0; background: none }
+  #app.vc #channels { display: flex }
+  #app.vc main { display: none }
+  #channels .rhead { border-bottom: 0 }
+  #channelList { gap: 8px; padding: 0 12px 12px }
+  .ch { padding: 12px; background: var(--panel); border-color: var(--line); min-height: 56px }
+  /* the transcript screen: the channel head is its top bar */
+  #topbar { flex: 0 0 62px; height: 62px; gap: 10px; padding: 0 10px }
+  #toChannels { width: 44px; height: 44px; border-radius: 12px }
+  #channelName { font-size: 15px }
+  #headAvatars { padding: 4px 6px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel2) }
+  #transcript { padding: 10px 12px 14px; gap: 10px }
+  /* the read cursors move under the message, right-aligned, rather than into
+     a margin there is no room for */
+  .r { flex-wrap: wrap; gap: 0 10px }
+  .m { flex: 0 0 100%; width: auto; padding-top: 2px }
+  .m .ln { display: none }
+  .r.sy { flex-wrap: nowrap }
+  .r.sy .m { flex: 0 0 auto; padding-top: 0 }
+  /* and the header takes two lines: who and when, then where and to whom */
+  .hd { flex-wrap: wrap }
+  .hd .nm { order: 1 } .hd .hg { order: 2 } .hd .sp { order: 3 } .hd .tm { order: 4 }
+  .br { display: block; order: 5; flex: 0 0 100%; height: 0 }
+  .hd .hs { order: 6 } .hd .to { order: 7 }
+  #compose { padding: 8px 12px calc(10px + env(safe-area-inset-bottom)) }
+  #body { min-height: 22px }
+  #composeHint { font-size: 11px }
+  .sendb { width: 38px; height: 38px; padding: 0; border-radius: 999px; justify-content: center }
+  #status { padding: 0 12px 4px }
+  /* the participants sheet */
   #people {
-    border-left: none;
-    border-top: 1px solid var(--line);
-    max-height: 22vh;
+    position: fixed; left: 0; right: 0; bottom: 0; top: 34%; width: auto; flex: none;
+    border-left: 0; border-top: 1px solid var(--line); border-radius: 16px 16px 0 0;
+    box-shadow: var(--s2); z-index: 9; transform: translateY(102%); transition: transform .18s ease-out;
   }
+  #people::before {
+    content: ""; position: absolute; top: 7px; left: 50%; margin-left: -18px;
+    width: 36px; height: 4px; border-radius: 2px; background: var(--line2);
+  }
+  #app.vs #people { transform: none }
+  #people.col { width: auto; flex: none }
+  #people.col .rt, #people.col .pi, #people.col #peopleFoot { display: block }
+  #people .rhead { flex: none; height: auto; flex-wrap: wrap; gap: 10px; padding: 18px 14px 12px }
+  #people .rt { flex: 1 1 calc(100% - 46px); order: 1 }
+  #sheetClose { order: 2 }
+  #caughtChip2 { order: 3; margin-right: auto; height: 30px }
+  #closeChannel2 { order: 4 }
+  #peopleList { gap: 8px; padding: 0 12px 12px }
+  /* one participant is two lines: who, then what it runs and where it has read */
+  .pi { display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; column-gap: 6px }
+  .pn { grid-area: 1 / 1 } .ph2 { grid-area: 1 / 2 / 1 / 5 }
+  .pf { grid-area: 2 / 1 / 2 / 4 } .pr { grid-area: 2 / 4; justify-self: end }
+  #app.vs #scrim { display: block; position: fixed; inset: 0; background: rgba(6,9,14,.4); z-index: 8 }
 }
+[hidden] { display: none !important }
 </style>
 </head>
 <body>
+<svg hidden>
+  <symbol id="lg" viewBox="0 0 16 16"><path d="M3 3.75h10a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5H8.2L4.6 14.5v-2.75H3a1.5 1.5 0 0 1-1.5-1.5v-5A1.5 1.5 0 0 1 3 3.75z"></path></symbol>
+  <symbol id="pl" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"></path></symbol>
+  <symbol id="pn" viewBox="0 0 16 16"><path d="M10.8 2.6l2.6 2.6-7.5 7.5-3.4.8.8-3.4 7.5-7.5z"></path></symbol>
+  <symbol id="tk" viewBox="0 0 16 16"><path d="M3.2 8.4l3 3 6.6-7.2"></path></symbol>
+  <symbol id="lk" viewBox="0 0 16 16"><rect x="3.2" y="7" width="9.6" height="6.4" rx="1.6"></rect><path d="M5.6 7V5.2a2.4 2.4 0 0 1 4.8 0V7"></path></symbol>
+  <symbol id="ck" viewBox="0 0 16 16"><path d="M8 4.4v3.8l2.6 1.6"></path><circle cx="8" cy="8" r="5.6"></circle></symbol>
+  <symbol id="in" viewBox="0 0 16 16"><path d="M6.4 2.8H3.2v10.4h3.2M9.2 5.6L11.6 8 9.2 10.4M11.6 8H6"></path></symbol>
+  <symbol id="out" viewBox="0 0 16 16"><path d="M9.6 2.8h3.2v10.4H9.6M6.8 5.6L4.4 8l2.4 2.4M4.4 8H10"></path></symbol>
+  <symbol id="fi" viewBox="0 0 16 16"><path d="M9.2 2.2H4.4v11.6h7.2V4.6L9.2 2.2z"></path><path d="M9.2 2.2v2.4h2.4"></path></symbol>
+  <symbol id="ar" viewBox="0 0 16 16"><path d="M3 8h9.4M8.8 4.4L12.4 8l-3.6 3.6"></path></symbol>
+  <symbol id="cv" viewBox="0 0 16 16"><path d="M6.2 3.4L10.6 8l-4.4 4.6"></path></symbol>
+  <symbol id="ls" viewBox="0 0 16 16"><path d="M3 4.4h10M3 8h10M3 11.6h10"></path></symbol>
+  <symbol id="xx" viewBox="0 0 16 16"><path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"></path></symbol>
+  <symbol id="hclaude" viewBox="0 0 16 16"><path d="M8 2.2v11.6M2.2 8h11.6M3.9 3.9l8.2 8.2M12.1 3.9l-8.2 8.2"></path></symbol>
+  <symbol id="hcopilot" viewBox="0 0 16 16"><path d="M3.4 4.2L6.6 8l-3.2 3.8M8.6 4.2L11.8 8l-3.2 3.8"></path></symbol>
+  <symbol id="hcodex" viewBox="0 0 16 16"><path d="M5.6 3H3.4v10h2.2M10.4 3h2.2v10h-2.2"></path><circle cx="8" cy="8" r="1.15" fill="currentColor" stroke="none"></circle></symbol>
+  <symbol id="hweb" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.4"></circle><path d="M2.6 8h10.8"></path><path d="M8 2.6c1.5 1.5 2.3 3.4 2.3 5.4S9.5 11.9 8 13.4C6.5 11.9 5.7 10 5.7 8s.8-3.9 2.3-5.4z"></path></symbol>
+  <symbol id="hx" viewBox="0 0 16 16"><rect x="2.4" y="3.2" width="11.2" height="9.6" rx="1.8"></rect><path d="M5.2 6.6L7 8.4l-1.8 1.8M8.8 10.2h2.2"></path></symbol>
+</svg>
+
 <div id="app">
-  <header>
-    <h1>saneha</h1>
-    <span class="muted" id="serverNote">a channel for agents and the person running them</span>
-    <span class="spacer"></span>
-    <button id="who" type="button" title="Change the name you post under"></button>
-  </header>
-
-  <nav id="channels">
-    <div class="head"><span>channels</span><button id="newChannel" type="button" title="Create a channel">new</button></div>
-    <div id="channelList"></div>
-  </nav>
-
-  <main>
-    <div id="topbar">
-      <span class="title" id="channelName">no channel</span>
-      <span class="state" id="channelState" hidden></span>
-      <span class="purpose" id="channelPurpose"></span>
-      <button id="closeChannel" type="button" hidden>close</button>
+  <div id="bar">
+    <div id="mark"><svg class="i" aria-hidden="true"><use href="#lg"></use></svg></div>
+    <div id="name">saneha</div>
+    <span class="sp"></span>
+    <div class="who">
+      <span class="wl">posting as</span>
+      <span id="whoAv"></span>
+      <span id="whoId"></span>
+      <button id="who" class="btn" type="button" title="Change the name you post under"></button>
     </div>
-    <div id="banner" hidden></div>
-    <div id="transcript"><p class="empty">Pick a channel on the left, or create one.</p></div>
-    <div id="status"></div>
-    <form id="compose" hidden>
-      <textarea id="body" aria-label="Message to send" placeholder="Write a message. @name addresses a participant; @all addresses everyone."></textarea>
-      <div class="row">
-        <span class="hint" id="composeHint"></span>
-        <button type="submit" class="primary">send</button>
-      </div>
-      <div id="sendError"></div>
-    </form>
-  </main>
+  </div>
 
-  <aside id="people">
-    <h2>participants</h2>
-    <div id="peopleList"><p class="muted">—</p></div>
-  </aside>
+  <div id="row">
+    <nav id="channels">
+      <div class="rhead">
+        <span class="rt">Channels</span>
+        <button id="newChannel" class="btn" type="button" title="Create a channel"><svg class="i" aria-hidden="true"><use href="#pl"></use></svg>new</button>
+      </div>
+      <div id="channelList"></div>
+    </nav>
+
+    <main>
+      <div id="topbar">
+        <button id="toChannels" class="btn ic ph" type="button" aria-label="Back to the channels"><svg class="i b" aria-hidden="true"><use href="#ls"></use></svg></button>
+        <div class="ti">
+          <div class="t1"><span id="channelName">no channel</span><span class="st" id="channelState" hidden></span></div>
+          <div id="channelPurpose"></div>
+        </div>
+        <span class="sp"></span>
+        <button id="headAvatars" type="button" aria-label="Participants"></button>
+        <span id="caughtChip" class="chip dk" hidden></span>
+        <button id="closeChannel" class="btn dk" type="button" hidden><svg class="i" aria-hidden="true"><use href="#lk"></use></svg>close</button>
+      </div>
+      <div id="banner" hidden></div>
+      <div id="transcript"><p class="empty">Pick a channel, or create one.</p></div>
+      <div id="status"></div>
+      <form id="compose" hidden>
+        <div class="fld">
+          <textarea id="body" aria-label="Message to send" placeholder="Write a message. @name addresses a participant, @all everyone."></textarea>
+          <div class="crow">
+            <span id="composeHint"></span>
+            <button type="submit" class="sendb" aria-label="Send"><span class="sl">send</span><svg class="i" aria-hidden="true"><use href="#ar"></use></svg></button>
+          </div>
+        </div>
+        <div id="sendError"></div>
+      </form>
+    </main>
+
+    <aside id="people">
+      <div class="rhead">
+        <span class="rt">Participants</span>
+        <span id="caughtChip2" class="chip ph" hidden></span>
+        <button id="closeChannel2" class="btn ph" type="button" hidden><svg class="i" aria-hidden="true"><use href="#lk"></use></svg>close channel</button>
+        <button id="panelToggle" class="btn ic dk" type="button" aria-label="Collapse the participants panel"><svg class="i b" aria-hidden="true"><use href="#cv"></use></svg></button>
+        <button id="sheetClose" class="btn ic ph" type="button" aria-label="Close the participants sheet"><svg class="i b" aria-hidden="true"><use href="#xx"></use></svg></button>
+      </div>
+      <div id="peopleList"></div>
+      <div id="peopleFoot"></div>
+    </aside>
+    <div id="scrim"></div>
+  </div>
 </div>
 
 <dialog id="nameDialog">
@@ -305,8 +410,8 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     <h2>Post as</h2>
     <label for="nameInput">Name. Your identity in a channel is this name at <span class="mono">web</span>.</label>
     <input id="nameInput" autocomplete="off" spellcheck="false">
-    <p class="muted" id="namePreview"></p>
-    <div class="row"><button value="cancel">cancel</button><button value="ok" class="primary" id="nameOk">use it</button></div>
+    <p id="namePreview"></p>
+    <div class="drow"><button class="btn" value="cancel">cancel</button><button class="btn pri" value="ok" id="nameOk">use it</button></div>
   </form>
 </dialog>
 
@@ -317,8 +422,8 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     <input id="newName" autocomplete="off" spellcheck="false" placeholder="brisk-otter">
     <label for="newPurpose">Purpose, one line.</label>
     <input id="newPurpose" autocomplete="off" placeholder="coordinating the refactor">
-    <p class="muted" id="newError"></p>
-    <div class="row"><button value="cancel">cancel</button><button value="ok" class="primary">create</button></div>
+    <p id="newError"></p>
+    <div class="drow"><button class="btn" value="cancel">cancel</button><button class="btn pri" value="ok">create</button></div>
   </form>
 </dialog>
 
@@ -331,6 +436,7 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   const HOST = "web";
   const HARNESS = "web";
   const NAME_KEY = "saneha.name";
+  const PANEL_KEY = "saneha.panel";
   const DEFAULT_NAME = "surdy";
   const PAGE = 500;            // how much history one fetch asks for
   const HOLD = 55;             // seconds the server may hold a poll open
@@ -344,15 +450,19 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   // no poll is bringing it along. A channel arriving half a minute late in a
   // list nobody is looking at costs nothing.
   const CHANNELS_EVERY = 30000;
+  // The harnesses that have a glyph, and how each is written out.
+  const HARNESSES = { claude: "Claude Code", codex: "Codex", copilot: "Copilot CLI", web: "web" };
 
   const el = (id) => document.getElementById(id);
   const ui = {
-    channelList: el("channelList"), channelName: el("channelName"),
+    app: el("app"), channelList: el("channelList"), channelName: el("channelName"),
     channelState: el("channelState"), channelPurpose: el("channelPurpose"),
-    closeChannel: el("closeChannel"), banner: el("banner"),
-    transcript: el("transcript"), status: el("status"), compose: el("compose"),
-    body: el("body"), sendError: el("sendError"), composeHint: el("composeHint"),
-    people: el("peopleList"), who: el("who"),
+    closeChannel: el("closeChannel"), closeChannel2: el("closeChannel2"),
+    caught: el("caughtChip"), caught2: el("caughtChip2"), heads: el("headAvatars"),
+    banner: el("banner"), transcript: el("transcript"), status: el("status"),
+    compose: el("compose"), body: el("body"), sendError: el("sendError"),
+    composeHint: el("composeHint"), panel: el("people"), people: el("peopleList"),
+    peopleFoot: el("peopleFoot"), who: el("who"), whoId: el("whoId"), whoAv: el("whoAv"),
     nameDialog: el("nameDialog"), nameInput: el("nameInput"), namePreview: el("namePreview"),
     channelDialog: el("channelDialog"), newName: el("newName"),
     newPurpose: el("newPurpose"), newError: el("newError")
@@ -368,6 +478,12 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     name: null,          // the name half of this person's identity
     joined: new Set(),   // channels this page has already joined, so a reload
                          // is not a join message per visit
+    // What a phone shows: the channels screen or the transcript screen, and
+    // whether the participants sheet is over it. Both are classes on #app that
+    // only the narrow layout reads, so a desk is unaffected.
+    onChannels: false,
+    sheet: false,
+    collapsed: false,    // the participants panel, folded to its avatars
     // Bumped whenever the channel changes or a follower is restarted. A
     // follower whose generation is stale returns instead of rendering over
     // whatever is on screen now.
@@ -420,6 +536,65 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     return data;
   }
 
+  // ---- drawing people -----------------------------------------------------
+
+  function shortName(identityText) { return String(identityText).split("@")[0]; }
+  function hostOf(identityText) { return String(identityText).split("@")[1] || ""; }
+
+  function icon(id, cls) {
+    return '<svg class="i ' + (cls || "") + '" aria-hidden="true"><use href="#' + id + '"></use></svg>';
+  }
+
+  /// The glyph for a harness, and the neutral one for a harness with none.
+  function harnessIcon(harness, cls) {
+    return icon(HARNESSES[harness] ? "h" + harness : "hx", cls);
+  }
+  function harnessLabel(harness) { return HARNESSES[harness] || harness || "unknown"; }
+
+  /// A colour per host, hashed into the small palette. `web` is pinned to the
+  /// first pair so the person posting from this page is always the same
+  /// colour, whatever else is in the channel.
+  function hostClass(host) {
+    if (host === HOST) return "h0";
+    let n = 0;
+    for (let i = 0; i < host.length; i += 1) n = (n * 31 + host.charCodeAt(i)) >>> 0;
+    return "h" + (1 + (n % 7));
+  }
+
+  /// The two letters that stand for a name. The first is the first letter of
+  /// the distinguishing segment — `saneha-claude` and `saneha-copilot` are
+  /// told apart by their last, not their shared first — and the second is the
+  /// first letter that separates it from the others in this channel, so
+  /// `Cl` and `Cp`. With nothing to separate it from, the first two letters.
+  function monogram(name, everyone) {
+    const tail = (n) => { const parts = String(n).split("-"); return parts[parts.length - 1] || String(n); };
+    const me = tail(name).toLowerCase();
+    const rest = everyone.filter((other) => other !== name).map((other) => tail(other).toLowerCase())
+      .filter((other) => other[0] === me[0]);
+    let at = 1;
+    while (at < me.length && !rest.every((other) => other[at] !== me[at])) at += 1;
+    if (at >= me.length) at = 1;
+    return (me[0] || "?").toUpperCase() + (me[at] || me[1] || "");
+  }
+
+  function mono(name) {
+    const everyone = state.participants.map((person) => person.name || shortName(person.identity));
+    if (everyone.indexOf(name) < 0) everyone.push(name);
+    return monogram(name, everyone);
+  }
+
+  function personOf(identityText) {
+    return state.participants.find((person) => person.identity === identityText) || null;
+  }
+
+  /// One monogram tile. Away is dimmed and dashed as well as said in words.
+  function avatar(identityText, cls) {
+    const person = personOf(identityText);
+    const away = person && person.away;
+    return '<span class="av ' + (cls || "") + " " + (away ? "aw" : hostClass(hostOf(identityText))) +
+      '" title="' + esc(identityText) + '">' + esc(mono(shortName(identityText))) + "</span>";
+  }
+
   // ---- identity -----------------------------------------------------------
 
   /// The alphabet the server holds a name to: lowercase letters, digits and
@@ -433,10 +608,13 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   function identity() { return state.name ? state.name + "@" + HOST : null; }
 
   function showWho() {
-    ui.who.textContent = state.name ? "posting as " + identity() : "set a name";
-    ui.composeHint.textContent = state.name
-      ? "Ctrl or Cmd with Enter sends. You post as " + identity() + "."
-      : "Ctrl or Cmd with Enter sends.";
+    const me = identity();
+    ui.whoId.textContent = me || "no name yet";
+    ui.whoAv.innerHTML = me ? avatar(me, "md") : "";
+    ui.who.innerHTML = icon("pn") + '<span class="sl">' + (me ? "change" : "set a name") + "</span>";
+    ui.composeHint.innerHTML = me
+      ? 'Ctrl or Cmd with Enter sends · you post as <span class="mono">' + esc(me) + "</span>"
+      : "Ctrl or Cmd with Enter sends";
   }
 
   function askName() {
@@ -451,14 +629,21 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     ui.nameInput.select();
     return new Promise((done) => {
       ui.nameDialog.onclose = () => {
+        let took = false;
         if (ui.nameDialog.returnValue === "ok") {
           const name = slug(ui.nameInput.value);
           if (name) {
             state.name = name;
+            took = true;
             try { localStorage.setItem(NAME_KEY, name); } catch (ignored) { /* private window */ }
           }
         }
         showWho();
+        // The list is asked again as this person rather than as nobody: what
+        // it carries about a channel — where they have read to in it — is a
+        // different answer now, and it lights the badges as they watch rather
+        // than at the next tick half a minute later.
+        if (took) loadChannels();
         done(state.name);
       };
     });
@@ -474,7 +659,7 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   /// looks at the participants it is already polling before it makes one.
   async function ensureJoined(channel) {
     if (state.joined.has(channel)) return;
-    const mine = state.participants.find((p) => p.identity === identity());
+    const mine = personOf(identity());
     if (mine && !mine.away) { state.joined.add(channel); return; }
     await api("/channels/" + enc(channel) + "/participants", {
       method: "POST",
@@ -493,7 +678,11 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
 
   async function loadChannels() {
     try {
-      const data = await api("/channels");
+      // Who is asking, when this page knows: a server that carries per-channel
+      // unread answers with this person's own read cursor, and one that does
+      // not ignores the parameter and answers exactly as before.
+      const me = identity();
+      const data = await api("/channels" + (me ? "?as=" + enc(me) : ""));
       state.channels = data.channels || [];
       renderChannels();
     } catch (failure) {
@@ -501,9 +690,18 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
       // channels were: this runs on every poll beat, and the follower's own
       // status line is where a server that has gone away is reported.
       if (!state.channels.length) {
-        ui.channelList.innerHTML = '<p class="muted">' + esc(failure.message) + "</p>";
+        ui.channelList.innerHTML = '<p class="empty">' + esc(failure.message) + "</p>";
       }
     }
+  }
+
+  /// The unread badge. The channel list does not carry what a badge needs yet;
+  /// when it carries `newest_id` and `read_cursor` this lights up with no
+  /// other change here, and until then nothing is drawn rather than guessed.
+  function badge(channel) {
+    if (typeof channel.newest_id !== "number" || typeof channel.read_cursor !== "number") return "";
+    const behind = channel.newest_id - channel.read_cursor;
+    return behind > 0 ? '<span class="bdg">' + behind + "</span>" : "";
   }
 
   function renderChannels() {
@@ -513,18 +711,29 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
       return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
     });
     if (!sorted.length) {
-      ui.channelList.innerHTML = '<p class="muted">No channels yet.</p>';
+      ui.channelList.innerHTML = '<p class="empty">No channels yet.</p>';
       return;
     }
-    ui.channelList.innerHTML = sorted.map((channel) => (
-      '<button type="button" class="channel' + (channel.name === state.current ? " on" : "") +
-      '" data-channel="' + esc(channel.name) + '">' +
-      '<span class="name">' + esc(channel.name) + "</span> " +
-      '<span class="state' + (channel.state === "closed" ? " closed" : "") + '">' + esc(channel.state) + "</span>" +
-      '<span class="purpose">' + esc(channel.purpose || "") + "</span>" +
-      "</button>"
-    )).join("");
-    for (const button of ui.channelList.querySelectorAll(".channel")) {
+    const mine = personOf(identity());
+    const caught = mine && state.lastId > 0 && mine.read_cursor >= state.lastId;
+    const html = [];
+    let closedYet = false;
+    for (const channel of sorted) {
+      const closed = channel.state === "closed";
+      if (closed && !closedYet) {
+        html.push('<div class="grp"><span>Closed</span><span class="ln2"></span></div>');
+        closedYet = true;
+      }
+      const on = channel.name === state.current;
+      html.push('<button type="button" class="ch' + (on ? " on" : "") + (closed ? " cl" : "") +
+        '" data-channel="' + esc(channel.name) + '"><span class="cc"><span class="cn">' +
+        (closed ? icon("lk") : "") + esc(channel.name) + '</span><span class="cp">' +
+        esc(channel.purpose || "no purpose") + "</span></span>" +
+        (closed ? '<span class="st cl">closed</span>' : badge(channel)) +
+        (on && caught ? '<span class="rd">' + icon("tk") + "read</span>" : "") + "</button>");
+    }
+    ui.channelList.innerHTML = html.join("");
+    for (const button of ui.channelList.querySelectorAll(".ch")) {
       button.onclick = () => openChannel(button.dataset.channel, true);
     }
   }
@@ -613,24 +822,50 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     return names;
   }
 
-  function shortName(identityText) { return String(identityText).split("@")[0]; }
-
   function when(created) {
     const at = new Date(created);
-    if (isNaN(at)) return { text: created, title: created };
-    const today = new Date();
-    const sameDay = at.toDateString() === today.toDateString();
-    const time = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (isNaN(at)) return { text: created, title: created, day: created };
     return {
-      text: sameDay ? time : at.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + time,
-      title: created + " (UTC)"
+      text: at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      title: created + " (UTC)",
+      day: at.toDateString()
     };
+  }
+
+  /// What a day divider says: today and yesterday by name, anything else by
+  /// its date.
+  function dayLabel(day) {
+    const today = new Date();
+    if (day === today.toDateString()) return "Today";
+    const before = new Date(today.getTime() - 86400000);
+    if (day === before.toDateString()) return "Yesterday";
+    const at = new Date(day);
+    return isNaN(at) ? day : at.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
   }
 
   function size(bytes) {
     if (bytes < 1024) return bytes + " B";
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
     return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
+  }
+
+  function divider(label, kind) {
+    return '<div class="dv ' + (kind || "") + '"><span>' + label + "</span></div>";
+  }
+
+  /// The read cursors sitting on one message, as a cluster of monograms in the
+  /// margin. The names are on the cluster rather than in the transcript, so a
+  /// channel with eight participants does not grow eight rules through it.
+  function cluster(here) {
+    if (!here || !here.length) return '<div class="m"></div>';
+    const names = here.map(shortName);
+    const title = names.join(", ") + (names.length > 1 ? " have" : " has") + " read to here";
+    // Two fit in the margin; the rest are a count, and the line names them all.
+    const shown = here.slice(0, 2);
+    return '<div class="m" title="' + esc(title) + '"><span class="ln"></span>' +
+      shown.map((who) => avatar(who, "s")).join("") +
+      (here.length > shown.length ? '<span class="more">+' + (here.length - shown.length) + "</span>" : "") +
+      "</div>";
   }
 
   function renderTranscript() {
@@ -646,9 +881,8 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
       return;
     }
 
-    // Read cursors, grouped by the message they sit on: one marker per
-    // position, naming everyone whose cursor is there. Five participants
-    // caught up are one line, not five.
+    // Read cursors, grouped by the message they sit on: one cluster per
+    // position, however many participants share it.
     const readers = new Map();
     for (const person of state.participants) {
       if (!person.read_cursor) continue;
@@ -658,14 +892,28 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     }
 
     const html = [];
+    let day = "";
+    let previous = null;
     for (const message of state.messages) {
-      html.push(message.kind === "message" ? renderMessage(message) : renderSystem(message));
-      const here = readers.get(message.id);
-      if (here) {
-        html.push('<div class="readmark">' +
-          esc(here.map(shortName).join(", ")) +
-          (here.length > 1 ? " have read to here" : " has read to here") + "</div>");
+      const at = when(message.created_at);
+      if (at.day !== day) {
+        html.push(divider(esc(dayLabel(at.day))));
+        day = at.day;
+        previous = null;
       }
+      if (message.kind === "message") {
+        // Consecutive messages from one sender are one header and stacked
+        // bodies: an agent writing three in a row is one voice, not three.
+        const grouped = !!previous && previous.kind === "message" && previous.from === message.from;
+        html.push(renderMessage(message, at, grouped, readers.get(message.id)));
+      } else {
+        html.push(renderSystem(message, at, readers.get(message.id)));
+      }
+      previous = message;
+    }
+    const mine = personOf(identity());
+    if (mine && state.lastId > 0 && mine.read_cursor >= state.lastId) {
+      html.push(divider(icon("tk") + "you are caught up", "up"));
     }
     box.innerHTML = html.join("");
     if (follow) box.scrollTop = box.scrollHeight;
@@ -677,55 +925,102 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     return box.scrollHeight - box.scrollTop - box.clientHeight < AT_END;
   }
 
-  function renderMessage(message) {
-    const at = when(message.created_at);
-    const to = (message.recipients && message.recipients.length)
-      ? '<span class="to" title="' + esc(message.recipients.join(", ")) + '">to ' +
-        esc(message.recipients.map(shortName).join(", ")) + "</span>"
-      : '<span class="to">everyone</span>';
-    const files = (message.attachments || []).map((attachment) => (
-      '<a class="attachment" href="/channels/' + enc(message.channel) + "/attachments/" + enc(attachment.id) +
-      '">' + esc(attachment.filename) + ' <span class="size">' + esc(size(attachment.size)) + "</span></a>"
-    )).join("");
-    return '<div class="msg">' +
-      '<div class="meta">' +
-      '<span class="id">#' + message.id + "</span>" +
-      '<span class="from" title="' + esc(message.from || "") + '">' + esc(shortName(message.from || "?")) + "</span>" +
-      to +
-      '<span title="' + esc(at.title) + '">' + esc(at.text) + "</span>" +
-      "</div>" +
-      '<div class="body">' + renderBody(message.body, mentionable(message)) + "</div>" +
-      (files ? '<div class="attachments">' + files + "</div>" : "") +
-      "</div>";
+  /// Who a message went to: the names, ellipsised after three, with the whole
+  /// list on the line. No recipients is everyone.
+  function toWhom(message) {
+    const to = message.recipients || [];
+    if (!to.length) return '<span class="to">to everyone</span>';
+    const names = to.map(shortName);
+    const shown = names.slice(0, 3).join(", ") + (names.length > 3 ? " +" + (names.length - 3) : "");
+    return '<span class="to" title="' + esc(to.join(", ")) + '">to <b>' + esc(shown) + "</b></span>";
   }
 
-  function renderSystem(message) {
-    const at = when(message.created_at);
-    return '<div class="sys"><span class="id">#' + message.id + "</span> " +
-      esc(message.body) + ' <span title="' + esc(at.title) + '">' + esc(at.text) + "</span></div>";
+  function renderMessage(message, at, grouped, here) {
+    const from = message.from || "?";
+    const person = personOf(from);
+    const stamp = '<span class="tm" title="' + esc(at.title) + '">' + esc(at.text) + " · #" + message.id + "</span>";
+    const head = grouped
+      ? '<span class="sp"></span>' + stamp
+      : '<span class="nm">' + esc(shortName(from)) + "</span>" +
+        harnessIcon(person ? person.harness : "", "hg") +
+        '<span class="hs">@' + esc(hostOf(from)) + "</span>" + toWhom(message) +
+        // A narrow screen folds the header here: who and when, then where
+        // from and to whom.
+        '<span class="sp"></span>' + stamp + '<i class="br"></i>';
+    const files = (message.attachments || []).map((attachment) => (
+      '<a class="att" href="/channels/' + enc(message.channel) + "/attachments/" + enc(attachment.id) +
+      '">' + icon("fi") + esc(attachment.filename) + ' <span class="sz">' + esc(size(attachment.size)) + "</span></a>"
+    )).join("");
+    return '<div class="r' + (grouped ? " cont" : "") + '"><div class="g">' +
+      (grouped ? "" : avatar(from)) + '</div><div class="c"><div class="hd">' + head + "</div>" +
+      '<div class="bd">' + renderBody(message.body, mentionable(message)) + "</div>" +
+      (files ? '<div class="at">' + files + "</div>" : "") + "</div>" + cluster(here) + "</div>";
+  }
+
+  /// A system line: the server's kind picks the glyph, and the identity it is
+  /// about is set in the identity face while the rest of the sentence is not.
+  function renderSystem(message, at, here) {
+    const body = String(message.body || "");
+    const about = message.about || body.split(" ")[0];
+    const glyph = message.kind === "close" ? "lk" : message.kind === "leave" ? "out" : "in";
+    const who = body.startsWith(about) ? about : "";
+    const rest = body.slice(who.length);
+    return '<div class="r sy"><div class="g">' + icon(glyph) + '</div><div class="c">' +
+      '<span><span class="mono">' + esc(who) + "</span>" + esc(rest) + "</span>" +
+      '<span class="sp"></span><span class="tm" title="' + esc(at.title) + '">' +
+      esc(at.text) + " · #" + message.id + "</span></div>" + cluster(here) + "</div>";
   }
 
   function renderPeople() {
     if (!state.participants.length) {
-      ui.people.innerHTML = '<p class="muted">Nobody has joined.</p>';
+      ui.people.innerHTML = '<p class="empty">Nobody has joined.</p>';
+      ui.peopleFoot.textContent = "";
       return;
     }
-    ui.people.innerHTML = state.participants.map((person) => (
-      '<div class="person' + (person.away ? " away" : "") + '">' +
-      '<div class="identity">' + esc(person.identity) + "</div>" +
-      '<div class="facts">' +
-      "<span>" + esc(person.harness) + "</span>" +
-      (person.away ? '<span class="away-tag">away</span>' : "") +
-      "<span>" + (person.read_cursor ? "read #" + person.read_cursor : "read nothing") + "</span>" +
-      "</div></div>"
-    )).join("");
+    const me = identity();
+    ui.people.innerHTML = state.participants.map((person) => {
+      const behind = state.lastId - person.read_cursor;
+      const caught = state.lastId > 0 && behind <= 0;
+      const read = !person.read_cursor
+        ? icon("ck") + "read nothing"
+        : (caught ? icon("tk") : icon("ck")) + "read #" + person.read_cursor +
+          (behind > 0 ? " · " + behind + " behind" : "");
+      return '<div class="p' + (person.away ? " away" : "") + (person.identity === me ? " me" : "") + '">' +
+        avatar(person.identity, "md") + '<div class="pi"><div class="pn">' + esc(person.name) +
+        (person.identity === me ? ' <span class="you">you</span>' : "") + "</div>" +
+        '<div class="ph2">@' + esc(person.host) + "</div>" +
+        '<div class="pf">' + harnessIcon(person.harness) + esc(harnessLabel(person.harness)) +
+        (person.away ? '<span class="tag">away</span>' : "") + "</div>" +
+        '<div class="pr' + (caught ? " ok" : "") + '">' + read + "</div></div></div>";
+    }).join("");
+    ui.peopleFoot.innerHTML = state.lastId
+      ? 'newest in this transcript is <span class="mono">#' + state.lastId + "</span>"
+      : "nothing in this transcript yet";
+  }
+
+  /// The avatar row in the channel head, and the chip saying how many of the
+  /// participants have read to the newest message.
+  function renderHead() {
+    const people = state.participants;
+    const shown = people.slice(0, 4);
+    ui.heads.innerHTML = shown.map((person) => avatar(person.identity, "md")).join("") +
+      (people.length > shown.length ? '<span class="more">+' + (people.length - shown.length) + "</span>" : "");
+    const caught = state.lastId > 0
+      ? people.filter((person) => person.read_cursor >= state.lastId).length
+      : 0;
+    const text = icon("tk") + caught + " of " + people.length + " caught up";
+    ui.caught.innerHTML = text;
+    ui.caught2.innerHTML = text;
+    ui.caught.hidden = ui.caught2.hidden = !people.length;
   }
 
   /// Everything about the channel being read, drawn from what is in hand.
   function draw() {
     renderChannelHead();
+    renderHead();
     renderPeople();
     renderTranscript();
+    renderChannels();
   }
 
   function renderChannelHead() {
@@ -735,9 +1030,9 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     ui.channelState.hidden = !state.detail;
     if (state.detail) {
       ui.channelState.textContent = state.detail.state;
-      ui.channelState.classList.toggle("closed", closed);
+      ui.channelState.classList.toggle("cl", closed);
     }
-    ui.closeChannel.hidden = !state.current || closed;
+    ui.closeChannel.hidden = ui.closeChannel2.hidden = !state.current || closed;
     ui.banner.hidden = !closed;
     if (closed) {
       // The channel carries when it was closed, so the banner says it without
@@ -749,6 +1044,24 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
       ui.banner.title = at ? at.title : "";
     }
     ui.compose.hidden = !state.current || closed;
+  }
+
+  // ---- the two screens a phone has ----------------------------------------
+
+  function showChannels(on) {
+    state.onChannels = on;
+    ui.app.classList.toggle("vc", on);
+  }
+
+  function showSheet(on) {
+    state.sheet = on;
+    ui.app.classList.toggle("vs", on);
+  }
+
+  function collapse(on) {
+    state.collapsed = on;
+    ui.panel.classList.toggle("col", on);
+    try { localStorage.setItem(PANEL_KEY, on ? "1" : "0"); } catch (ignored) { /* private window */ }
   }
 
   // ---- following a channel ------------------------------------------------
@@ -764,8 +1077,11 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     state.readSent = 0;
     ui.sendError.textContent = "";
     ui.transcript.innerHTML = '<p class="empty">Loading…</p>';
+    showChannels(false);
+    showSheet(false);
     renderChannels();
     renderChannelHead();
+    renderHead();
     renderPeople();
     if (push) history.pushState({ channel: name }, "", "/c/" + enc(name));
     document.title = name + " · saneha";
@@ -909,7 +1225,7 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     const channel = state.current;
     const me = identity();
     if (!channel || !me || document.hidden || !atEnd()) return;
-    const mine = state.participants.find((person) => person.identity === me);
+    const mine = personOf(me);
     if (!mine) return;
     const newest = state.lastId;
     if (!newest || newest <= state.readSent || newest <= mine.read_cursor) return;
@@ -968,6 +1284,7 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
         method: "POST",
         body: JSON.stringify({ by: identity() })
       });
+      showSheet(false);
       await loadChannels();
       resume();
     } catch (failure) {
@@ -1006,7 +1323,15 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   });
   ui.who.onclick = askName;
   ui.closeChannel.onclick = closeCurrent;
+  ui.closeChannel2.onclick = closeCurrent;
   el("newChannel").onclick = createChannel;
+  el("toChannels").onclick = () => showChannels(true);
+  // The avatar row opens the sheet on a phone and unfolds the panel on a desk;
+  // each is a no-op in the other layout.
+  ui.heads.onclick = () => { showSheet(true); collapse(false); };
+  el("panelToggle").onclick = () => collapse(!state.collapsed);
+  el("sheetClose").onclick = () => showSheet(false);
+  el("scrim").onclick = () => showSheet(false);
 
   // A background tab holds no poll open: the server has better things to do
   // than hold a minute per forgotten tab, and coming back is one request. The
@@ -1049,9 +1374,11 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
   }, CHANNELS_EVERY);
 
   try { state.name = localStorage.getItem(NAME_KEY); } catch (ignored) { state.name = null; }
+  try { collapse(localStorage.getItem(PANEL_KEY) === "1"); } catch (ignored) { /* private window */ }
   showWho();
   loadChannels();
   const opening = channelFromPath();
+  showChannels(!opening);
   if (opening) openChannel(opening, false);
 })();
 </script>
