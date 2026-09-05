@@ -615,49 +615,6 @@ pub struct ApiError {
 mod tests {
     use super::*;
 
-    fn message(kind: MessageKind, recipients: &[&str]) -> Message {
-        Message {
-            id: 7,
-            channel: "brisk-otter".to_string(),
-            kind,
-            from: Some("alice@macbookpro".to_string()),
-            about: None,
-            recipients: recipients.iter().map(|to| (*to).to_string()).collect(),
-            body: "the tests pass".to_string(),
-            attachments: Vec::new(),
-            created_at: "2026-09-04T09:00:00Z".to_string(),
-        }
-    }
-
-    const ME: &str = "bob@quadhost";
-
-    #[test]
-    fn a_message_addressed_to_me_wakes_me() {
-        assert!(message(MessageKind::Message, &[ME]).wakes(ME));
-        assert!(message(MessageKind::Message, &["alice@macbookpro", ME]).wakes(ME));
-    }
-
-    #[test]
-    fn a_broadcast_is_addressed_to_everyone_including_me() {
-        assert!(message(MessageKind::Message, &[]).wakes(ME));
-    }
-
-    #[test]
-    fn a_message_addressed_to_somebody_else_does_not_wake_me() {
-        assert!(!message(MessageKind::Message, &["carol@quadhost"]).wakes(ME));
-        // The same name on another host is a different participant, and so is
-        // a name this one is only the beginning of.
-        assert!(!message(MessageKind::Message, &["bob@macbookpro"]).wakes(ME));
-        assert!(!message(MessageKind::Message, &["bobby@quadhost"]).wakes(ME));
-    }
-
-    #[test]
-    fn a_close_wakes_everyone_and_an_arrival_wakes_nobody() {
-        assert!(message(MessageKind::Close, &[]).wakes(ME));
-        assert!(!message(MessageKind::Join, &[]).wakes(ME));
-        assert!(!message(MessageKind::Leave, &[]).wakes(ME));
-    }
-
     #[test]
     fn a_filename_is_the_basename_and_nothing_else() {
         assert_eq!(
@@ -745,5 +702,48 @@ mod tests {
         let long = format!("{}.md", "a".repeat(500));
         let cleaned = attachment_filename(&long).expect("a filename");
         assert_eq!(cleaned.chars().count(), MAX_FILENAME);
+    }
+
+    fn message(kind: MessageKind, recipients: &[&str]) -> Message {
+        Message {
+            id: 7,
+            channel: "brisk-otter".to_string(),
+            kind,
+            from: Some("alice@macbookpro".to_string()),
+            about: None,
+            recipients: recipients.iter().map(|to| (*to).to_string()).collect(),
+            body: "the tests pass".to_string(),
+            attachments: Vec::new(),
+            created_at: "2026-09-04T09:00:00Z".to_string(),
+        }
+    }
+
+    const ME: &str = "bob@quadhost";
+
+    #[test]
+    fn a_message_addressed_to_me_wakes_me() {
+        assert!(message(MessageKind::Message, &[ME]).wakes(ME));
+        assert!(message(MessageKind::Message, &["alice@macbookpro", ME]).wakes(ME));
+    }
+
+    #[test]
+    fn a_broadcast_is_addressed_to_everyone_including_me() {
+        assert!(message(MessageKind::Message, &[]).wakes(ME));
+    }
+
+    #[test]
+    fn a_message_addressed_to_somebody_else_does_not_wake_me() {
+        assert!(!message(MessageKind::Message, &["carol@quadhost"]).wakes(ME));
+        // The same name on another host is a different participant, and so is
+        // a name this one is only the beginning of.
+        assert!(!message(MessageKind::Message, &["bob@macbookpro"]).wakes(ME));
+        assert!(!message(MessageKind::Message, &["bobby@quadhost"]).wakes(ME));
+    }
+
+    #[test]
+    fn a_close_wakes_everyone_and_an_arrival_wakes_nobody() {
+        assert!(message(MessageKind::Close, &[]).wakes(ME));
+        assert!(!message(MessageKind::Join, &[]).wakes(ME));
+        assert!(!message(MessageKind::Leave, &[]).wakes(ME));
     }
 }

@@ -207,64 +207,6 @@ pub struct ReadArgs {
 }
 
 #[derive(Debug, Args)]
-#[command(
-    after_help = "Waiting never moves the read cursor, so whatever this printed is still unread \
-                  and `saneha read` is what takes it. A wait started when there is already \
-                  something unread returns at once. This is the wake a skill is built on: wait in \
-                  the background, and when it exits, read, reply, and wait again.\n\n\
-                  Exit codes:\n  \
-                  0  something arrived and was printed\n  \
-                  3  the timeout elapsed with nothing to print\n  \
-                  4  the channel is closed; anything that had arrived was printed first\n  \
-                  1  something went wrong: no such channel, not a participant, or the server \
-                  could not be reached"
-)]
-pub struct WaitArgs {
-    /// The channel to wait on; this identity must already have joined it
-    #[arg(value_name = "CHANNEL")]
-    pub channel: String,
-
-    /// Give up after this many seconds and exit 3
-    #[arg(
-        long,
-        value_name = "SECS",
-        default_value_t = DEFAULT_WAIT_TIMEOUT,
-        value_parser = clap::value_parser!(u64).range(1..),
-    )]
-    pub timeout: u64,
-
-    /// Wake only for messages addressed to this participant or to everyone,
-    /// and for the channel closing. A join or a leave is not a mention
-    #[arg(long)]
-    pub mentions: bool,
-
-    /// The name half of this identity, as `saneha join` works it out
-    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
-    pub as_name: Option<String>,
-
-    /// The harness to derive the name from, overriding what the environment says
-    #[arg(long, value_name = "ID")]
-    pub harness: Option<String>,
-
-    /// Print the messages as JSON
-    #[arg(long)]
-    pub json: bool,
-
-    /// How long one request may be held open by the server before it is
-    /// re-issued, in seconds. The default is the server's own cap and there is
-    /// no reason to set this outside a test, which is why it is a flag and not
-    /// an environment variable: nothing in a shell should be able to change
-    /// how a wait behaves without saying so on the command line.
-    #[arg(
-        long,
-        value_name = "SECS",
-        hide = true,
-        value_parser = clap::value_parser!(u64).range(1..),
-    )]
-    pub hold: Option<u64>,
-}
-
-#[derive(Debug, Args)]
 pub struct FetchArgs {
     /// The channel the attachment was sent to
     #[arg(value_name = "CHANNEL")]
@@ -353,6 +295,64 @@ pub struct DeleteArgs {
     /// Print the answer as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = "Waiting never moves the read cursor, so whatever this printed is still unread \
+                  and `saneha read` is what takes it. A wait started when there is already \
+                  something unread returns at once. This is the wake a skill is built on: wait in \
+                  the background, and when it exits, read, reply, and wait again.\n\n\
+                  Exit codes:\n  \
+                  0  something arrived and was printed\n  \
+                  3  the timeout elapsed with nothing to print\n  \
+                  4  the channel is closed; anything that had arrived was printed first\n  \
+                  1  something went wrong: no such channel, not a participant, or the server \
+                  could not be reached"
+)]
+pub struct WaitArgs {
+    /// The channel to wait on; this identity must already have joined it
+    #[arg(value_name = "CHANNEL")]
+    pub channel: String,
+
+    /// Give up after this many seconds and exit 3
+    #[arg(
+        long,
+        value_name = "SECS",
+        default_value_t = DEFAULT_WAIT_TIMEOUT,
+        value_parser = clap::value_parser!(u64).range(1..),
+    )]
+    pub timeout: u64,
+
+    /// Wake only for messages addressed to this participant or to everyone,
+    /// and for the channel closing. A join or a leave is not a mention
+    #[arg(long)]
+    pub mentions: bool,
+
+    /// The name half of this identity, as `saneha join` works it out
+    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
+    pub as_name: Option<String>,
+
+    /// The harness to derive the name from, overriding what the environment says
+    #[arg(long, value_name = "ID")]
+    pub harness: Option<String>,
+
+    /// Print the messages as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    /// How long one request may be held open by the server before it is
+    /// re-issued, in seconds. The default is the server's own cap and there is
+    /// no reason to set this outside a test, which is why it is a flag and not
+    /// an environment variable: nothing in a shell should be able to change
+    /// how a wait behaves without saying so on the command line.
+    #[arg(
+        long,
+        value_name = "SECS",
+        hide = true,
+        value_parser = clap::value_parser!(u64).range(1..),
+    )]
+    pub hold: Option<u64>,
 }
 
 /// Parses the command line and runs it.
@@ -745,126 +745,6 @@ fn read(args: ReadArgs) -> Result<()> {
     Ok(())
 }
 
-/// The timeout elapsed and there was nothing to print.
-const NOTHING_ARRIVED: u8 = 3;
-
-/// The channel is closed, so there is nothing more to wait for.
-const CHANNEL_CLOSED: u8 = 4;
-
-/// How long the server may go on being unreachable, or stopping, before a wait
-/// gives up on it and says so. Long enough to sit out a restart, short enough
-/// that a skill waiting on a server that is never coming back finds out.
-const RETRY_BUDGET: Duration = Duration::from_secs(30);
-
-/// How long a wait leaves the server alone after the first failed attempt,
-/// and the longest it will leave it alone after any of them. The gap doubles
-/// in between, so a server that is restarting is asked a handful of times
-/// rather than continuously.
-const FIRST_BACKOFF: Duration = Duration::from_millis(250);
-const LONGEST_BACKOFF: Duration = Duration::from_secs(2);
-
-/// Blocks until this participant has something unread, the channel closes, or
-/// the timeout elapses, and prints what arrived exactly as `read` prints it.
-///
-/// Nothing here advances a read cursor. A wait says what is there; a `read` is
-/// what takes it. That is the whole point of the verb: a skill waits in the
-/// background, and when the wait exits, reads, replies, and waits again.
-///
-/// One command, many requests. The server holds a request open for at most a
-/// minute so nothing in the middle of the network mistakes a wait for a dead
-/// connection, and answers `204` when that minute passes with nothing to say;
-/// this asks again until its own `--timeout`. A server that is stopping, or
-/// one that is not there at all, is the same kind of answer: worth asking
-/// again, for [`RETRY_BUDGET`], before it becomes an error.
-fn wait(args: WaitArgs) -> Result<ExitCode> {
-    let remote = Remote::from_env()?;
-    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
-    let identity = caller.identity();
-
-    // The same one request `read` makes, for the same three answers: the
-    // channel is there, this caller is in it, and here is the roster that
-    // recipients are printed short against.
-    let participants = remote.list_participants(&args.channel)?;
-    if !participants
-        .iter()
-        .any(|participant| participant.identity == identity)
-    {
-        return Err(anyhow!(crate::api::not_a_participant(
-            &args.channel,
-            &identity
-        )));
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(args.timeout);
-    let hold = args.hold.unwrap_or(MAX_HOLD).clamp(1, MAX_HOLD);
-    // When the server stopped answering, and the last thing it said.
-    let mut trouble: Option<(Instant, String)> = None;
-    let mut backoff = FIRST_BACKOFF;
-
-    loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return match trouble {
-                // A timeout that ran out while nobody was answering is the
-                // server being away, which is worth an error and the words to
-                // go with it, not a quiet "nothing arrived".
-                Some((_, said)) => Err(anyhow!(said)),
-                None => Ok(ExitCode::from(NOTHING_ARRIVED)),
-            };
-        }
-        // Never hold longer than there is left to wait. The server counts in
-        // whole seconds and will not take a hold of none, so the last one is
-        // a second rather than nothing at all.
-        let hold = hold.min(left.as_secs().max(1));
-
-        match remote.wait(&args.channel, &identity, args.mentions, hold)? {
-            Waiting::Arrived {
-                messages,
-                channel_state,
-            } => {
-                if args.json {
-                    // An array is all or nothing: half of one is not JSON.
-                    deliver(&format!("{}\n", serde_json::to_string_pretty(&messages)?))?;
-                } else {
-                    let _ = transcript(&messages, &participants, deliver)?;
-                }
-                return Ok(match channel_state {
-                    // Whatever had arrived was printed first: a closed channel
-                    // is the end of the transcript, not a reason to drop it.
-                    ChannelState::Closed => ExitCode::from(CHANNEL_CLOSED),
-                    ChannelState::Open => ExitCode::SUCCESS,
-                });
-            }
-            // The hold elapsed. Nothing is wrong, and nothing has been
-            // printed: ask again.
-            Waiting::Nothing => {
-                trouble = None;
-                backoff = FIRST_BACKOFF;
-            }
-            // The channel was deleted while this was held open. There is
-            // nothing to wait for and nothing to read, so it ends now rather
-            // than asking again until the timeout.
-            Waiting::Gone => {
-                return Err(anyhow!(
-                    "the channel {} no longer exists; it was deleted while this wait was open",
-                    args.channel
-                ))
-            }
-            Waiting::Later(message) => {
-                let since = trouble
-                    .as_ref()
-                    .map_or_else(Instant::now, |(since, _)| *since);
-                if since.elapsed() >= RETRY_BUDGET {
-                    return Err(anyhow!(message));
-                }
-                trouble = Some((since, message));
-                std::thread::sleep(backoff.min(left));
-                backoff = (backoff * 2).min(LONGEST_BACKOFF);
-            }
-        }
-    }
-}
-
 /// Downloads one attachment by id.
 ///
 /// It goes to `--out`, or to the name it was attached under, in the working
@@ -985,6 +865,126 @@ fn write_beside(fetched: crate::client::Fetched, landing: &std::path::Path) -> R
     file.sync_all()
         .with_context(|| format!("could not write {shown}"))?;
     Ok(size)
+}
+
+/// The timeout elapsed and there was nothing to print.
+const NOTHING_ARRIVED: u8 = 3;
+
+/// The channel is closed, so there is nothing more to wait for.
+const CHANNEL_CLOSED: u8 = 4;
+
+/// How long the server may go on being unreachable, or stopping, before a wait
+/// gives up on it and says so. Long enough to sit out a restart, short enough
+/// that a skill waiting on a server that is never coming back finds out.
+const RETRY_BUDGET: Duration = Duration::from_secs(30);
+
+/// How long a wait leaves the server alone after the first failed attempt,
+/// and the longest it will leave it alone after any of them. The gap doubles
+/// in between, so a server that is restarting is asked a handful of times
+/// rather than continuously.
+const FIRST_BACKOFF: Duration = Duration::from_millis(250);
+const LONGEST_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Blocks until this participant has something unread, the channel closes, or
+/// the timeout elapses, and prints what arrived exactly as `read` prints it.
+///
+/// Nothing here advances a read cursor. A wait says what is there; a `read` is
+/// what takes it. That is the whole point of the verb: a skill waits in the
+/// background, and when the wait exits, reads, replies, and waits again.
+///
+/// One command, many requests. The server holds a request open for at most a
+/// minute so nothing in the middle of the network mistakes a wait for a dead
+/// connection, and answers `204` when that minute passes with nothing to say;
+/// this asks again until its own `--timeout`. A server that is stopping, or
+/// one that is not there at all, is the same kind of answer: worth asking
+/// again, for [`RETRY_BUDGET`], before it becomes an error.
+fn wait(args: WaitArgs) -> Result<ExitCode> {
+    let remote = Remote::from_env()?;
+    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let identity = caller.identity();
+
+    // The same one request `read` makes, for the same three answers: the
+    // channel is there, this caller is in it, and here is the roster that
+    // recipients are printed short against.
+    let participants = remote.list_participants(&args.channel)?;
+    if !participants
+        .iter()
+        .any(|participant| participant.identity == identity)
+    {
+        return Err(anyhow!(crate::api::not_a_participant(
+            &args.channel,
+            &identity
+        )));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(args.timeout);
+    let hold = args.hold.unwrap_or(MAX_HOLD).clamp(1, MAX_HOLD);
+    // When the server stopped answering, and the last thing it said.
+    let mut trouble: Option<(Instant, String)> = None;
+    let mut backoff = FIRST_BACKOFF;
+
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return match trouble {
+                // A timeout that ran out while nobody was answering is the
+                // server being away, which is worth an error and the words to
+                // go with it, not a quiet "nothing arrived".
+                Some((_, said)) => Err(anyhow!(said)),
+                None => Ok(ExitCode::from(NOTHING_ARRIVED)),
+            };
+        }
+        // Never hold longer than there is left to wait. The server counts in
+        // whole seconds and will not take a hold of none, so the last one is
+        // a second rather than nothing at all.
+        let hold = hold.min(left.as_secs().max(1));
+
+        match remote.wait(&args.channel, &identity, args.mentions, hold)? {
+            Waiting::Arrived {
+                messages,
+                channel_state,
+            } => {
+                if args.json {
+                    // An array is all or nothing: half of one is not JSON.
+                    deliver(&format!("{}\n", serde_json::to_string_pretty(&messages)?))?;
+                } else {
+                    let _ = transcript(&messages, &participants, deliver)?;
+                }
+                return Ok(match channel_state {
+                    // Whatever had arrived was printed first: a closed channel
+                    // is the end of the transcript, not a reason to drop it.
+                    ChannelState::Closed => ExitCode::from(CHANNEL_CLOSED),
+                    ChannelState::Open => ExitCode::SUCCESS,
+                });
+            }
+            // The hold elapsed. Nothing is wrong, and nothing has been
+            // printed: ask again.
+            Waiting::Nothing => {
+                trouble = None;
+                backoff = FIRST_BACKOFF;
+            }
+            // The channel was deleted while this was held open. There is
+            // nothing to wait for and nothing to read, so it ends now rather
+            // than asking again until the timeout.
+            Waiting::Gone => {
+                return Err(anyhow!(
+                    "the channel {} no longer exists; it was deleted while this wait was open",
+                    args.channel
+                ))
+            }
+            Waiting::Later(message) => {
+                let since = trouble
+                    .as_ref()
+                    .map_or_else(Instant::now, |(since, _)| *since);
+                if since.elapsed() >= RETRY_BUDGET {
+                    return Err(anyhow!(message));
+                }
+                trouble = Some((since, message));
+                std::thread::sleep(backoff.min(left));
+                backoff = (backoff * 2).min(LONGEST_BACKOFF);
+            }
+        }
+    }
 }
 
 /// Declares this participant away.

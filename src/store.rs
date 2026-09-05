@@ -887,6 +887,16 @@ impl Store {
             )?;
         }
 
+        // The same file named twice is one attachment, not a refusal: the
+        // second mention asks for nothing the first did not already do.
+        let mut bound: Vec<Attachment> = Vec::new();
+        for id in attachments {
+            if bound.iter().any(|attachment| &attachment.id == id) {
+                continue;
+            }
+            bound.push(bind_attachment(&tx, channel, channel_id, id, message_id)?);
+        }
+
         // A sender that had read everything up to this point stays caught up.
         // Nobody has to be told what they just said: without this a `read`
         // echoes the message back to whoever wrote it, and a `wait` wakes on
@@ -905,15 +915,6 @@ impl Store {
             rusqlite::params![from_id, message_id],
         )?;
 
-        // The same file named twice is one attachment, not a refusal: the
-        // second mention asks for nothing the first did not already do.
-        let mut bound: Vec<Attachment> = Vec::new();
-        for id in attachments {
-            if bound.iter().any(|attachment| &attachment.id == id) {
-                continue;
-            }
-            bound.push(bind_attachment(&tx, channel, channel_id, id, message_id)?);
-        }
         tx.commit()?;
 
         // Everything the message is made of was in hand before it was written,

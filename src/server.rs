@@ -306,37 +306,20 @@ pub async fn run(listener: TcpListener, store: Arc<Store>) -> anyhow::Result<()>
         .into_future();
 
     let mut serve = std::pin::pin!(serve);
-    let served = tokio::select! {
-        served = &mut serve => Some(served),
+    tokio::select! {
+        served = &mut serve => {
+            sweeper.abort();
+            served?
+        }
         () = drain_limit(stopping) => {
+            sweeper.abort();
             say(&format!(
                 "saneha stopped with requests still in flight after {} seconds",
                 DRAIN_LIMIT.as_secs()
             ));
-            None
         }
-    };
-    // The sweep is the server's own housekeeping and nothing waits on it, so
-    // it stops with the server rather than holding the stop open.
-    sweeper.abort();
-    if let Some(served) = served {
-        served?;
     }
     Ok(())
-}
-
-/// Resolves [`DRAIN_LIMIT`] after the server has been asked to stop, and never
-/// before: a server that is still serving must not be raced by its own
-/// deadline.
-async fn drain_limit(mut stopping: watch::Receiver<bool>) {
-    while !*stopping.borrow_and_update() {
-        if stopping.changed().await.is_err() {
-            // Nothing left to be told by, so there is no shutdown to put a
-            // limit on.
-            std::future::pending::<()>().await;
-        }
-    }
-    tokio::time::sleep(DRAIN_LIMIT).await;
 }
 
 /// How often the unbound attachments are swept up.
@@ -364,6 +347,20 @@ fn sweep(store: &Store) {
         Ok(swept) => say(&format!("swept up {swept}")),
         Err(err) => say(&format!("could not sweep unbound attachments: {err}")),
     }
+}
+
+/// Resolves [`DRAIN_LIMIT`] after the server has been asked to stop, and never
+/// before: a server that is still serving must not be raced by its own
+/// deadline.
+async fn drain_limit(mut stopping: watch::Receiver<bool>) {
+    while !*stopping.borrow_and_update() {
+        if stopping.changed().await.is_err() {
+            // Nothing left to be told by, so there is no shutdown to put a
+            // limit on.
+            std::future::pending::<()>().await;
+        }
+    }
+    tokio::time::sleep(DRAIN_LIMIT).await;
 }
 
 /// Waits for the first signal that means stop, and says which one it was.
@@ -592,108 +589,6 @@ async fn send_message(
     Ok((StatusCode::CREATED, Json(message)))
 }
 
-/// One request, held open until this participant has something unread, the
-/// channel closes, or `hold` seconds pass.
-///
-/// Three answers: `200` with what arrived and the state of the channel, `204`
-/// when the hold elapsed with nothing to say, and `503` with `retry` when the
-/// server is stopping. The caller asks again after a `204`, which is how a
-/// hold short enough to survive a reverse proxy adds up to an hour of waiting.
-///
-/// The first look comes before anything is registered, because it is also what
-/// says the channel exists and this identity is in it: a name nobody has ever
-/// used must not leave a notifier behind on its way to a 404. After that the
-/// loop is register, look, sleep, and the order is what makes it safe — a
-/// `Notified` created before a `notify_waiters` is woken by it, so a message
-/// written between the look and the sleep is a wake this request finds rather
-/// than one it missed.
-///
-/// Nothing here holds the store's lock across an await: the look is one call
-/// that takes the lock, answers, and gives it back, so a wait costs the rest
-/// of the server nothing while it sits there.
-async fn wait(
-    State(serving): State<Arc<Serving>>,
-    Path((channel, identity)): Path<(String, String)>,
-    ApiQuery(query): ApiQuery<WaitQuery>,
-) -> Result<Response, Failure> {
-    let hold = Duration::from_secs(query.hold.unwrap_or(MAX_HOLD).clamp(1, MAX_HOLD));
-    let deadline = tokio::time::Instant::now() + hold;
-    let mut stopping = serving.stopping();
-
-    if *stopping.borrow_and_update() {
-        return Err(Failure::stopping());
-    }
-    // Costs one look that the loop below would make anyway, and buys a
-    // notifier map that only ever holds channels somebody may really be
-    // woken on.
-    if let Some(answer) = look(&serving, &channel, &identity, query.mentions)? {
-        return Ok(answer);
-    }
-    let notify = serving.waiters.on(&channel);
-
-    loop {
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if left.is_zero() {
-            return Ok(StatusCode::NO_CONTENT.into_response());
-        }
-
-        // Made before the look that follows it. A `Notified` is woken by any
-        // `notify_waiters` after the moment it was created, not after the
-        // moment it is first polled, so a message written between this look
-        // and the sleep below is a wake this request already holds.
-        let woken = notify.notified();
-        tokio::pin!(woken);
-
-        if *stopping.borrow_and_update() {
-            return Err(Failure::stopping());
-        }
-        if let Some(answer) = look(&serving, &channel, &identity, query.mentions)? {
-            return Ok(answer);
-        }
-
-        tokio::select! {
-            () = woken => {}
-            () = tokio::time::sleep(left) => return Ok(StatusCode::NO_CONTENT.into_response()),
-            _ = stopping.changed() => return Err(Failure::stopping()),
-        }
-    }
-}
-
-/// One look at what a waiting participant has not read: `Some` when that is
-/// an answer to give it, `None` when there is nothing to say yet.
-///
-/// The lock is taken and given back inside this call, so a waiter never holds
-/// it across an await.
-fn look(
-    serving: &Serving,
-    channel: &str,
-    identity: &str,
-    mentions: bool,
-) -> Result<Option<Response>, Failure> {
-    let (messages, state) =
-        serving
-            .store
-            .unread(channel, identity, mentions, DEFAULT_MESSAGE_LIMIT)?;
-
-    // Nobody is woken by their own message. A send leaves the sender caught up
-    // when it was caught up, so this only arises for a sender that was already
-    // behind: its own message sits in that backlog, is printed with the rest
-    // of it, and is not by itself a reason to have been woken. Without this
-    // the skill loop — wait, read, reply, wait — would wake itself once per
-    // reply and never idle.
-    let for_me = messages.iter().any(|message| !message.written_by(identity));
-    if !for_me && state == ChannelState::Open {
-        return Ok(None);
-    }
-    Ok(Some(
-        Json(Waited {
-            messages,
-            channel_state: state,
-        })
-        .into_response(),
-    ))
-}
-
 /// One file, uploaded before the message that will carry it.
 ///
 /// The body is the file itself: nothing wraps it, so nothing has to be parsed
@@ -916,6 +811,108 @@ fn declared_length(headers: &HeaderMap) -> Option<u64> {
 /// The longest content type the server will record. A media type is short;
 /// anything longer is not one.
 const MAX_CONTENT_TYPE: usize = 128;
+
+/// One request, held open until this participant has something unread, the
+/// channel closes, or `hold` seconds pass.
+///
+/// Three answers: `200` with what arrived and the state of the channel, `204`
+/// when the hold elapsed with nothing to say, and `503` with `retry` when the
+/// server is stopping. The caller asks again after a `204`, which is how a
+/// hold short enough to survive a reverse proxy adds up to an hour of waiting.
+///
+/// The first look comes before anything is registered, because it is also what
+/// says the channel exists and this identity is in it: a name nobody has ever
+/// used must not leave a notifier behind on its way to a 404. After that the
+/// loop is register, look, sleep, and the order is what makes it safe — a
+/// `Notified` created before a `notify_waiters` is woken by it, so a message
+/// written between the look and the sleep is a wake this request finds rather
+/// than one it missed.
+///
+/// Nothing here holds the store's lock across an await: the look is one call
+/// that takes the lock, answers, and gives it back, so a wait costs the rest
+/// of the server nothing while it sits there.
+async fn wait(
+    State(serving): State<Arc<Serving>>,
+    Path((channel, identity)): Path<(String, String)>,
+    ApiQuery(query): ApiQuery<WaitQuery>,
+) -> Result<Response, Failure> {
+    let hold = Duration::from_secs(query.hold.unwrap_or(MAX_HOLD).clamp(1, MAX_HOLD));
+    let deadline = tokio::time::Instant::now() + hold;
+    let mut stopping = serving.stopping();
+
+    if *stopping.borrow_and_update() {
+        return Err(Failure::stopping());
+    }
+    // Costs one look that the loop below would make anyway, and buys a
+    // notifier map that only ever holds channels somebody may really be
+    // woken on.
+    if let Some(answer) = look(&serving, &channel, &identity, query.mentions)? {
+        return Ok(answer);
+    }
+    let notify = serving.waiters.on(&channel);
+
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+
+        // Made before the look that follows it. A `Notified` is woken by any
+        // `notify_waiters` after the moment it was created, not after the
+        // moment it is first polled, so a message written between this look
+        // and the sleep below is a wake this request already holds.
+        let woken = notify.notified();
+        tokio::pin!(woken);
+
+        if *stopping.borrow_and_update() {
+            return Err(Failure::stopping());
+        }
+        if let Some(answer) = look(&serving, &channel, &identity, query.mentions)? {
+            return Ok(answer);
+        }
+
+        tokio::select! {
+            () = woken => {}
+            () = tokio::time::sleep(left) => return Ok(StatusCode::NO_CONTENT.into_response()),
+            _ = stopping.changed() => return Err(Failure::stopping()),
+        }
+    }
+}
+
+/// One look at what a waiting participant has not read: `Some` when that is
+/// an answer to give it, `None` when there is nothing to say yet.
+///
+/// The lock is taken and given back inside this call, so a waiter never holds
+/// it across an await.
+fn look(
+    serving: &Serving,
+    channel: &str,
+    identity: &str,
+    mentions: bool,
+) -> Result<Option<Response>, Failure> {
+    let (messages, state) =
+        serving
+            .store
+            .unread(channel, identity, mentions, DEFAULT_MESSAGE_LIMIT)?;
+
+    // Nobody is woken by their own message. A send leaves the sender caught up
+    // when it was caught up, so this only arises for a sender that was already
+    // behind: its own message sits in that backlog, is printed with the rest
+    // of it, and is not by itself a reason to have been woken. Without this
+    // the skill loop — wait, read, reply, wait — would wake itself once per
+    // reply and never idle.
+    let for_me = messages.iter().any(|message| !message.written_by(identity));
+    if !for_me && state == ChannelState::Open {
+        return Ok(None);
+    }
+    Ok(Some(
+        Json(Waited {
+            messages,
+            channel_state: state,
+        })
+        .into_response(),
+    ))
+}
 
 /// A page of a transcript. This moves nothing, so a caller that wants its read
 /// cursor advanced asks for that separately.
