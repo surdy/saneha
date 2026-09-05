@@ -33,6 +33,42 @@ use crate::store::{self, Store};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+
+    #[command(flatten)]
+    pub identity: IdentityArgs,
+}
+
+/// Who a command is, accepted wherever a command is.
+///
+/// These two are global, so `saneha --as reviewer read brisk-otter` and
+/// `saneha read brisk-otter --as reviewer` are the same command, and a verb
+/// with no participant behind it — `new`, `list`, `fetch`, `delete` — takes
+/// them and ignores them. A skill that was granted a name passes it to
+/// everything it runs rather than remembering which verbs have a caller
+/// (issue #32: they used to be per-verb, and the four that lacked them failed
+/// with a usage error).
+#[derive(Debug, Args, Clone, Default)]
+pub struct IdentityArgs {
+    /// The name half of this identity, as `saneha join` works it out
+    ///
+    /// Without it the name is derived from the repository this is run in and
+    /// the harness it is run under, as <repo-basename>-<harness>. Every
+    /// worktree of a repository derives the same name, so two live checkouts
+    /// are told apart by the suffix rather than by where they happen to sit.
+    /// `SANEHA_AS=<name> saneha ...` says the same thing.
+    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS", global = true)]
+    pub as_name: Option<String>,
+
+    /// The harness to record, overriding what the environment says
+    ///
+    /// A recognised harness publishes the id of the session in progress and
+    /// its own process id, which is how a later join tells a session that is
+    /// still running from one that has finished. A harness that publishes
+    /// neither cannot be told apart from itself, so a second session of it on
+    /// this host resumes the first rather than being granted a name of its
+    /// own. Only Claude Code is recognised so far.
+    #[arg(long, value_name = "ID", global = true)]
+    pub harness: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -112,25 +148,6 @@ pub struct JoinArgs {
     #[arg(value_name = "CHANNEL")]
     pub channel: String,
 
-    /// The name half of the identity to claim. Without it the name is derived
-    /// from the repository this is run in and the harness it is run under, as
-    /// <repo-basename>-<harness>. Every worktree of a repository derives the
-    /// same name, so two live checkouts are told apart by the suffix rather
-    /// than by where they happen to sit
-    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
-    pub as_name: Option<String>,
-
-    /// The harness to record, overriding what the environment says
-    ///
-    /// A recognised harness publishes the id of the session in progress and
-    /// its own process id, which is how a later join tells a session that is
-    /// still running from one that has finished. A harness that publishes
-    /// neither cannot be told apart from itself, so a second session of it on
-    /// this host resumes the first rather than being granted a name of its
-    /// own. Only Claude Code is recognised so far.
-    #[arg(long, value_name = "ID")]
-    pub harness: Option<String>,
-
     /// Print the granted identity as JSON
     #[arg(long)]
     pub json: bool,
@@ -171,14 +188,6 @@ pub struct SendArgs {
     #[arg(long = "file", value_name = "PATH")]
     pub file: Vec<PathBuf>,
 
-    /// The name half of this identity, as `saneha join` works it out
-    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
-    pub as_name: Option<String>,
-
-    /// The harness to derive the name from, overriding what the environment says
-    #[arg(long, value_name = "ID")]
-    pub harness: Option<String>,
-
     /// Print the message as JSON rather than only its id
     #[arg(long)]
     pub json: bool,
@@ -197,14 +206,6 @@ pub struct ReadArgs {
     /// Read everything after this message id without moving the read cursor
     #[arg(long, value_name = "ID")]
     pub since: Option<i64>,
-
-    /// The name half of this identity, as `saneha join` works it out
-    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
-    pub as_name: Option<String>,
-
-    /// The harness to derive the name from, overriding what the environment says
-    #[arg(long, value_name = "ID")]
-    pub harness: Option<String>,
 
     /// Print the messages as JSON
     #[arg(long)]
@@ -243,14 +244,6 @@ pub struct LeaveArgs {
     #[arg(value_name = "CHANNEL")]
     pub channel: String,
 
-    /// The name half of this identity, as `saneha join` works it out
-    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
-    pub as_name: Option<String>,
-
-    /// The harness to derive the name from, overriding what the environment says
-    #[arg(long, value_name = "ID")]
-    pub harness: Option<String>,
-
     /// Print the answer as JSON
     #[arg(long)]
     pub json: bool,
@@ -267,14 +260,6 @@ pub struct CloseArgs {
     /// The channel to close
     #[arg(value_name = "CHANNEL")]
     pub channel: String,
-
-    /// The name half of the identity closing it, as `saneha join` works it out
-    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
-    pub as_name: Option<String>,
-
-    /// The harness to derive the name from, overriding what the environment says
-    #[arg(long, value_name = "ID")]
-    pub harness: Option<String>,
 
     /// Print the answer as JSON
     #[arg(long)]
@@ -313,7 +298,8 @@ pub struct DeleteArgs {
                   3  the timeout elapsed with nothing to print\n  \
                   4  the channel is closed; anything that had arrived was printed first\n  \
                   1  something went wrong: no such channel, not a participant, or the server \
-                  could not be reached"
+                  could not be reached\n  \
+                  2  the command line was wrong"
 )]
 pub struct WaitArgs {
     /// The channel to wait on; this identity must already have joined it
@@ -333,14 +319,6 @@ pub struct WaitArgs {
     /// and for the channel closing. A join or a leave is not a mention
     #[arg(long)]
     pub mentions: bool,
-
-    /// The name half of this identity, as `saneha join` works it out
-    #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS")]
-    pub as_name: Option<String>,
-
-    /// The harness to derive the name from, overriding what the environment says
-    #[arg(long, value_name = "ID")]
-    pub harness: Option<String>,
 
     /// Print the messages as JSON
     #[arg(long)]
@@ -392,18 +370,19 @@ pub fn run() -> Result<ExitCode> {
 /// code is the answer rather than a consequence of it.
 pub fn execute(cli: Cli) -> Result<ExitCode> {
     let done = |result: Result<()>| result.map(|()| ExitCode::SUCCESS);
-    match cli.command {
+    let Cli { command, identity } = cli;
+    match command {
         Command::Serve(args) => done(serve(args)),
         Command::New(args) => done(new(args)),
         Command::List(args) => done(list(args)),
-        Command::Join(args) => done(join(args)),
+        Command::Join(args) => done(join(args, &identity)),
         Command::Participants(args) => done(participants(args)),
-        Command::Send(args) => done(send(args)),
-        Command::Read(args) => done(read(args)),
-        Command::Wait(args) => wait(args),
+        Command::Send(args) => done(send(args, &identity)),
+        Command::Read(args) => done(read(args, &identity)),
+        Command::Wait(args) => wait(args, &identity),
         Command::Fetch(args) => done(fetch(args)),
-        Command::Leave(args) => done(leave(args)),
-        Command::Close(args) => done(close(args)),
+        Command::Leave(args) => done(leave(args, &identity)),
+        Command::Close(args) => done(close(args, &identity)),
         Command::Delete(args) => done(delete(args)),
         Command::Skill => done(skill()),
         Command::Init(args) => done(init(args)),
@@ -565,8 +544,8 @@ impl Caller {
 
 /// The identity behind this command: `--as`, else `SANEHA_AS`, else the
 /// project and the harness, on this host.
-fn caller(as_name: Option<&str>, harness: Option<&str>) -> Result<Caller> {
-    let given_harness = trimmed(harness);
+fn caller(me: &IdentityArgs) -> Result<Caller> {
+    let given_harness = trimmed(me.harness.as_deref());
     let harness = match &given_harness {
         Some(given) => {
             store::validate_harness(given)?;
@@ -580,7 +559,7 @@ fn caller(as_name: Option<&str>, harness: Option<&str>) -> Result<Caller> {
     let host = identity::host(store::HOST.max);
     store::validate_host(&host)?;
 
-    let name = match trimmed(as_name) {
+    let name = match trimmed(me.as_name.as_deref()) {
         Some(given) => given,
         None => identity::derived_name(
             &identity::project_basename(),
@@ -614,10 +593,10 @@ const JOIN_ATTEMPTS: usize = 2;
 /// The probe and the join are two requests, so the participant can change
 /// hands in between. The request carries what the probe saw, the server
 /// refuses a join whose view has gone stale, and this looks again once.
-fn join(args: JoinArgs) -> Result<()> {
+fn join(args: JoinArgs, me: &IdentityArgs) -> Result<()> {
     let remote = Remote::from_env()?;
 
-    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let caller = caller(me)?;
     let Caller {
         name,
         host,
@@ -739,9 +718,9 @@ const BODY_FROM_STDIN: &str = "-";
 /// naming an attachment that does not exist yet would be a message the server
 /// has to refuse; the other way round, a send that fails leaves files nothing
 /// carries, and the server sweeps those up within the hour.
-fn send(args: SendArgs) -> Result<()> {
+fn send(args: SendArgs, me: &IdentityArgs) -> Result<()> {
     let remote = Remote::from_env()?;
-    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let caller = caller(me)?;
     let body = message_body(&args.body)?;
 
     let mut attachments = Vec::with_capacity(args.file.len());
@@ -807,9 +786,9 @@ fn message_body(words: &[String]) -> Result<String> {
 /// leave everything after the first message neither seen nor unread.
 /// Advancing last means the worst a crash, or a reader walking away, can cost
 /// is reading something twice.
-fn read(args: ReadArgs) -> Result<()> {
+fn read(args: ReadArgs, me: &IdentityArgs) -> Result<()> {
     let remote = Remote::from_env()?;
-    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let caller = caller(me)?;
     let identity = caller.identity();
 
     // One request answers three questions: does the channel exist, is this
@@ -1001,9 +980,9 @@ const LONGEST_BACKOFF: Duration = Duration::from_secs(2);
 /// this asks again until its own `--timeout`. A server that is stopping, or
 /// one that is not there at all, is the same kind of answer: worth asking
 /// again, for [`RETRY_BUDGET`], before it becomes an error.
-fn wait(args: WaitArgs) -> Result<ExitCode> {
+fn wait(args: WaitArgs, me: &IdentityArgs) -> Result<ExitCode> {
     let remote = Remote::from_env()?;
-    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let caller = caller(me)?;
     let identity = caller.identity();
 
     // The same one request `read` makes, for the same three answers: the
@@ -1097,9 +1076,9 @@ fn wait(args: WaitArgs) -> Result<ExitCode> {
 /// second of two. What is printed says which, because a skill running this in
 /// a cleanup step should be able to tell "I have just left" from "I had
 /// already left" without parsing a transcript.
-fn leave(args: LeaveArgs) -> Result<()> {
+fn leave(args: LeaveArgs, me: &IdentityArgs) -> Result<()> {
     let remote = Remote::from_env()?;
-    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let caller = caller(me)?;
     let left = remote.leave(&args.channel, &caller.identity())?;
 
     if args.json {
@@ -1125,9 +1104,9 @@ fn leave(args: LeaveArgs) -> Result<()> {
 /// not looked up: the scope says any participant or a person may close, so a
 /// caller that never joined closes just the same and is recorded in the
 /// transcript by name.
-fn close(args: CloseArgs) -> Result<()> {
+fn close(args: CloseArgs, me: &IdentityArgs) -> Result<()> {
     let remote = Remote::from_env()?;
-    let caller = caller(args.as_name.as_deref(), args.harness.as_deref())?;
+    let caller = caller(me)?;
     let closed = remote.close_channel(&args.channel, &caller.identity())?;
 
     if args.json {

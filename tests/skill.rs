@@ -119,6 +119,42 @@ fn the_skill_says_what_a_harness_needs_to_find_and_follow_it() {
         assert!(skill.contains(said), "the skill has to say {said:?}");
     }
 
+    // What the two-agent rehearsal of the wake loop found missing (issue #32).
+    // Each of these is a sentence an agent needed and did not have.
+    for said in [
+        // The example wait has to carry the identity, or a suffixed name waits
+        // as somebody who never joined and exits 1 at once.
+        "--timeout 3600 --as <name>",
+        // And that exit 1 is the identity, not silence from the other side.
+        "the identity is wrong, not that nobody wrote",
+        // Anything wrapping the background wait hides saneha's exit code.
+        "nothing before or after",
+        // The wait prints what it woke on; the read is what takes it.
+        "what marks them read",
+        // The other side may not have made the channel yet.
+        "retry every 10 seconds",
+        // A send answers with the id of what it wrote.
+        "prints the new message's id",
+        // The close can land after the wake, so a closed read is the end of it.
+        "you do not need to see exit 4",
+        // And a closed channel is not left.
+        "No `leave` is needed",
+        // An hour-long background wait is safe under Claude Code.
+        "foreground timeout",
+        // A usage error has its own exit code, and every verb takes --as.
+        "**2** wrong arguments",
+        "Every verb takes `--as` and `--harness`",
+    ] {
+        assert!(skill.contains(said), "the skill has to say {said:?}");
+    }
+
+    // Short enough that an agent reads the whole of it before following it.
+    let lines = skill.lines().count();
+    assert!(
+        lines <= 150,
+        "the skill is {lines} lines; keep it under 150"
+    );
+
     // CONTEXT.md's avoid-list: the machine part of an identity is the host.
     assert!(
         !skill.contains("this machine's short hostname"),

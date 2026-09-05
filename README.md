@@ -28,9 +28,9 @@ saneha list
 saneha list --json                                  # every subcommand that prints takes --json
 
 saneha join brisk-otter                             # prints the granted identity, such as saneha-claude@macbookpro
-saneha join brisk-otter --as reviewer               # or SANEHA_AS=reviewer
+saneha join brisk-otter --as reviewer               # or SANEHA_AS=reviewer, on any verb
 saneha join brisk-otter --harness codex             # when the harness is not recognised from the environment
-saneha participants brisk-otter                     # who is in the channel, and how far each has read
+saneha participants brisk-otter --as reviewer       # --as and --harness are global: every verb takes them
 
 saneha send brisk-otter "@reviewer the tests pass"  # prints the new message id
 saneha send brisk-otter "a quiet word" --to reviewer
@@ -66,7 +66,7 @@ saneha init                                         # install it into every harn
 saneha init --dry-run                               # say what that would do, and write nothing
 ```
 
-`send` writes a markdown message as the identity `join` would work out, so it has to have joined the channel first. Who it is addressed to comes from the `@name` mentions in the body and from `--to`, which takes the same names: `@name` at the start of a line or after whitespace is a mention, `bob@example.com` in the middle of a sentence is not, a short `@name` resolves when one participant in the channel answers to it, `@name@host` always resolves, and `@all` addresses everyone including the away ones. A name is folded to lowercase, because an identity is lowercase and `@Beta` means beta.
+`send` writes a markdown message as the identity `join` would work out, so it has to have joined the channel first. It prints the id of the message it wrote, and nothing else, so `ID=$(saneha send brisk-otter "…")` is safe; `--json` prints the whole message instead. Who it is addressed to comes from the `@name` mentions in the body and from `--to`, which takes the same names: `@name` at the start of a line or after whitespace is a mention, `bob@example.com` in the middle of a sentence is not, a short `@name` resolves when one participant in the channel answers to it, `@name@host` always resolves, and `@all` addresses everyone including the away ones. A name is folded to lowercase, because an identity is lowercase and `@Beta` means beta.
 
 Mentions are prose only. Code between agents is full of at-signs, so a fenced block and an inline code span are skipped whole, and `@types/node` is a package rather than a person: `@dataclass` inside a ```` ``` ```` block and `npm i @types/node` in a `` ` `` span both address nobody.
 
@@ -92,8 +92,13 @@ The exit code is the answer, so a skill can loop on it:
 | `3` | the timeout elapsed with nothing to print |
 | `4` | the channel is closed, so stop waiting. Anything that had arrived was printed first |
 | `1` | something went wrong: no such channel, not a participant, the channel was deleted while the wait was open, or the server could not be reached |
+| `2` | the command line was wrong; nothing was waited on |
+
+Every other verb answers with a code and not with a third state: `0` when it worked, `1` when it failed, and `2` when the arguments were wrong. `saneha delete` without `--yes` exits 1 on purpose, because it was asked to delete a channel and did not.
 
 One `saneha wait` is many HTTP requests. The server holds each one open for at most a minute, which sits under the idle timeout of any reverse proxy in front of it, and answers `204` when that minute passes with nothing to say; the command asks again until its own `--timeout`, so what a person sees is one blocking command. A server that is stopping ends its held waits at once and says so, and the command asks again for up to thirty seconds — across a restart, say — before giving up with the server's own words and exiting 1. How many of those requests the server is holding right now is on `GET /health` as `held_waits`, which is the one thing about a wait that is otherwise invisible from outside.
+
+`--as <name>` and `--harness <id>` are global options: every verb takes them, before or after the verb, and a verb with no participant behind it — `new`, `list`, `fetch`, `delete` — ignores them. `SANEHA_AS=<name> saneha …` says the same thing as `--as <name>`. A skill that was granted a suffixed name can therefore pass the same identity to everything it runs rather than remembering which verbs have a caller.
 
 `join` works out the identity itself. The host is the short hostname, lowercased. The name is `--as`, else `SANEHA_AS`, else the basename of the repository this is run in and the harness it is run under, as `<repo-basename>-<harness>`; every worktree of a repository derives the same name, because the name says which project is talking. Claude Code is recognised from `CLAUDECODE`; anything else is `unknown` until `--harness` says otherwise, and the CLI says so on standard error.
 
