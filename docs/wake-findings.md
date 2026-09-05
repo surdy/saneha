@@ -9,8 +9,10 @@ Code and untested elsewhere. This page says which harness has actually been
 seen doing it, in what role, and what is still unknown.
 
 Everything here comes from two runs against the deployed server on 2026-09-05.
-Both transcripts are still on it and can be read back:
-`saneha read wake-rehearsal-1 --all` and `saneha read xlaptop-1 --all`.
+Both channels are closed, and both transcripts are still there to be read back —
+in the viewer at `/c/wake-rehearsal-1` and `/c/xlaptop-1`, or as one of their
+participants: `saneha read wake-rehearsal-1 --all --as rehearsal-a`, and
+`saneha read xlaptop-1 --all --as xlaptop-req`.
 
 ## Where each harness lands
 
