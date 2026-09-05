@@ -10,22 +10,25 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use http_body_util::BodyExt;
 use tokio::net::TcpListener;
 use tokio::sync::{watch, Notify};
 
 use crate::api::{
-    ApiError, Channel, ChannelList, ChannelState, CursorUpdate, JoinRequest, Joined, Message,
-    MessageList, MessageQuery, NewChannel, NewMessage, Participant, ParticipantList, WaitQuery,
-    Waited, DEFAULT_MESSAGE_LIMIT, MAX_BODY, MAX_HOLD,
+    ApiError, Attachment, Channel, ChannelList, ChannelState, CursorUpdate, JoinRequest, Joined,
+    Message, MessageList, MessageQuery, NewChannel, NewMessage, Participant, ParticipantList,
+    WaitQuery, Waited, DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER,
+    MAX_ATTACHMENT, MAX_BODY, MAX_HOLD,
 };
-use crate::store::{Store, StoreError};
+use crate::store::{PendingAttachment, Store, StoreError, UNBOUND_ATTACHMENT_TTL};
 
 /// Where `saneha serve` listens unless told otherwise.
 pub const DEFAULT_BIND: &str = "127.0.0.1:7343";
@@ -196,6 +199,19 @@ fn routes() -> Router<Arc<Serving>> {
             "/channels/{channel}/messages",
             post(send_message).get(list_messages),
         )
+        // An upload is the one request whose body is meant to be large, and it
+        // is counted as it is written rather than held in memory, so the limit
+        // every other route wants is turned off here and [`MAX_ATTACHMENT`] is
+        // enforced by the handler. A route layer is applied inside the
+        // router's own, so this is the limit that stands for this route.
+        .route(
+            "/channels/{channel}/attachments",
+            post(upload_attachment).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/channels/{channel}/attachments/{id}",
+            get(download_attachment),
+        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
 }
 
@@ -253,6 +269,13 @@ where
 /// supervisor lost patience and sent SIGKILL. [`DRAIN_LIMIT`] is the backstop
 /// under all of it.
 pub async fn run(listener: TcpListener, store: Arc<Store>) -> anyhow::Result<()> {
+    // Once at the start, and then on the hour. A stop the server took part in
+    // finishes the uploads in flight, so what the start finds is what a kill
+    // left: a file part-written and never recorded, which the sweep's walk of
+    // the directories is what catches.
+    sweep(&store);
+    let sweeper = tokio::spawn(sweep_hourly(Arc::clone(&store)));
+
     let serving = Arc::new(Serving::new(store));
     let stopping = serving.stopping();
 
@@ -266,13 +289,46 @@ pub async fn run(listener: TcpListener, store: Arc<Store>) -> anyhow::Result<()>
 
     let mut serve = std::pin::pin!(serve);
     tokio::select! {
-        served = &mut serve => served?,
-        () = drain_limit(stopping) => say(&format!(
-            "saneha stopped with requests still in flight after {} seconds",
-            DRAIN_LIMIT.as_secs()
-        )),
+        served = &mut serve => {
+            sweeper.abort();
+            served?
+        }
+        () = drain_limit(stopping) => {
+            sweeper.abort();
+            say(&format!(
+                "saneha stopped with requests still in flight after {} seconds",
+                DRAIN_LIMIT.as_secs()
+            ));
+        }
     }
     Ok(())
+}
+
+/// How often the unbound attachments are swept up.
+const SWEEP_EVERY: Duration = Duration::from_secs(UNBOUND_ATTACHMENT_TTL as u64);
+
+/// The sweep, for as long as the server is serving.
+async fn sweep_hourly(store: Arc<Store>) {
+    let mut every = tokio::time::interval(SWEEP_EVERY);
+    // The first tick is immediate, and the start has just swept.
+    every.tick().await;
+    loop {
+        every.tick().await;
+        sweep(&store);
+    }
+}
+
+/// Removes the uploads nobody bound to a message and the files no row names,
+/// once they are old enough that nobody is coming back for them. A sweep that
+/// fails is worth saying out loud and nothing more: the next one is an hour
+/// away, and a server that stopped serving over a file it could not delete
+/// would be worse than the file.
+fn sweep(store: &Store) {
+    match store.sweep_unbound_attachments(UNBOUND_ATTACHMENT_TTL) {
+        Ok(swept) if swept.is_empty() => {}
+        Ok(swept) => say(&format!("swept up {swept}")),
+        Err(err) => say(&format!("could not sweep unbound attachments: {err}")),
+    }
 }
 
 /// Resolves [`DRAIN_LIMIT`] after the server has been asked to stop, and never
@@ -424,13 +480,240 @@ async fn send_message(
     Path(channel): Path<String>,
     ApiJson(body): ApiJson<NewMessage>,
 ) -> Result<(StatusCode, Json<Message>), Failure> {
-    let message = serving
-        .store
-        .send(&channel, &body.from, &body.body, &body.to)?;
+    let message = serving.store.send(
+        &channel,
+        &body.from,
+        &body.body,
+        &body.to,
+        &body.attachments,
+    )?;
     // After the write has committed, so everyone woken by it can see it.
     serving.waiters.wake(&channel);
     Ok((StatusCode::CREATED, Json(message)))
 }
+
+/// One file, uploaded before the message that will carry it.
+///
+/// The body is the file itself: nothing wraps it, so nothing has to be parsed
+/// back out of it, and it is written to its place as it arrives rather than
+/// held in memory. The name it had travels in `X-Saneha-Filename`, because a
+/// name is not part of a file's bytes.
+///
+/// What comes back is an attachment nothing carries yet. The send that names
+/// its id is what binds it; until then it is a file the sweep will remove.
+async fn upload_attachment(
+    State(serving): State<Arc<Serving>>,
+    Path(channel): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<(StatusCode, Json<Attachment>), Failure> {
+    let filename = filename_of(&headers)?;
+    let content_type = content_type_of(&headers);
+
+    // A caller that says up front how much it is about to send is told before
+    // it sends any of it.
+    if let Some(size) = declared_length(&headers) {
+        if size > MAX_ATTACHMENT {
+            return Err(StoreError::AttachmentTooLarge { size }.into());
+        }
+    }
+
+    let pending = serving.store.new_attachment(&channel)?;
+    let size = match write_body(&pending, body).await {
+        Ok(size) => size,
+        Err(failure) => {
+            // Nothing was recorded, so what is on disk is a file nothing can
+            // name. It goes now rather than waiting for the sweep.
+            let _ = tokio::fs::remove_file(&pending.path).await;
+            return Err(failure);
+        }
+    };
+    if size == 0 {
+        let _ = tokio::fs::remove_file(&pending.path).await;
+        return Err(StoreError::EmptyAttachment { filename }.into());
+    }
+
+    match serving
+        .store
+        .record_attachment(&pending, &filename, size, &content_type)
+    {
+        Ok(attachment) => Ok((StatusCode::CREATED, Json(attachment))),
+        Err(err) => {
+            // The bytes landed and the row did not, so there is a file no id
+            // will ever name and no sweep will ever find. It goes now.
+            let _ = tokio::fs::remove_file(&pending.path).await;
+            Err(err.into())
+        }
+    }
+}
+
+/// Writes the request body to the file the attachment was given, counting as
+/// it goes, and stopping the moment there is more of it than an attachment may
+/// be. Answers with how many bytes landed.
+async fn write_body(pending: &PendingAttachment, body: Body) -> Result<u64, Failure> {
+    use tokio::io::AsyncWriteExt;
+
+    let file = |doing: &'static str| {
+        let path = pending.path.clone();
+        move |source| {
+            Failure::from(StoreError::AttachmentFile {
+                doing,
+                path: path.clone(),
+                source,
+            })
+        }
+    };
+
+    let mut out = tokio::fs::File::create(&pending.path)
+        .await
+        .map_err(file("create"))?;
+    let mut written: u64 = 0;
+    let mut body = body;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|err| {
+            Failure::unreadable(
+                StatusCode::BAD_REQUEST,
+                format!("the upload stopped part-way through ({err})"),
+            )
+        })?;
+        let Ok(chunk) = frame.into_data() else {
+            // Trailers carry nothing this reads.
+            continue;
+        };
+        written += chunk.len() as u64;
+        if written > MAX_ATTACHMENT {
+            return Err(StoreError::AttachmentTooLarge { size: written }.into());
+        }
+        out.write_all(&chunk).await.map_err(file("write"))?;
+    }
+    // The bytes are the whole of the attachment, so they are on the disk
+    // before anything says the upload succeeded.
+    out.flush().await.map_err(file("write"))?;
+    out.sync_all().await.map_err(file("write"))?;
+    Ok(written)
+}
+
+/// One attachment, as the file it was uploaded as.
+async fn download_attachment(
+    State(serving): State<Arc<Serving>>,
+    Path((channel, id)): Path<(String, String)>,
+) -> Result<Response, Failure> {
+    let (attachment, path) = serving.store.attachment(&channel, &id)?;
+    // An attachment is capped at 25 MiB, so it is read whole rather than
+    // streamed: a body that streams would need a body type nothing else here
+    // has any use for.
+    let bytes = tokio::fs::read(&path).await.map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            // The row is there and the bytes are not: a restore that took the
+            // database without the files, or a file removed by hand. The
+            // caller is told what is true, and not where on this server it
+            // would have been.
+            StoreError::AttachmentGone {
+                channel: channel.clone(),
+                id: attachment.id.clone(),
+            }
+        } else {
+            StoreError::AttachmentFile {
+                doing: "read",
+                path,
+                source,
+            }
+        }
+    })?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, attachment.content_type),
+            (
+                header::CONTENT_DISPOSITION,
+                disposition_of(&attachment.filename),
+            ),
+            // The stored type is whatever the uploader said, and the viewer
+            // (issue #8) will serve this from its own origin: nothing here is
+            // to be sniffed into something a browser will run, and every
+            // attachment is a download rather than a page.
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// The `Content-Disposition` of a download: always an attachment, with the
+/// name twice.
+///
+/// `filename` is the old form and holds ASCII, so a name in any other script
+/// arrives there as underscores; `filename*` is RFC 8187 and holds the name
+/// itself, percent-encoded. Everything that reads one of them prefers the
+/// second when it is there, so both can be sent and the right one is used.
+fn disposition_of(filename: &str) -> String {
+    let ascii: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // The name was made safe on the way in, so it holds no quote to end this
+    // value early.
+    //
+    // `filename*` comes first, and is the only one of the two whose value can
+    // hold a `;` at all: a filename is allowed to contain one, and a reader
+    // scanning for `filename*=` without minding quotes would otherwise find
+    // one written inside the quoted `filename`. Such a reader is wrong, and
+    // this order means it is not wrong here.
+    format!(
+        "attachment; filename*=UTF-8''{}; filename=\"{ascii}\"",
+        crate::api::encode_filename(filename)
+    )
+}
+
+/// The name an upload gave its file, decoded and then made safe to store and
+/// to write out again.
+///
+/// The header is read as bytes rather than as a string: percent-encoding is
+/// what a caller is asked to send, and a caller that sent the name as it was
+/// written is still understood rather than told it sent nothing.
+fn filename_of(headers: &HeaderMap) -> Result<String, Failure> {
+    let given = headers
+        .get(FILENAME_HEADER)
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+        .unwrap_or_default();
+    let given = crate::api::decode_filename(&given);
+    crate::api::attachment_filename(&given)
+        .ok_or_else(|| StoreError::InvalidFilename { value: given }.into())
+}
+
+/// What the upload says the file is, or [`DEFAULT_CONTENT_TYPE`] when it says
+/// nothing, or says it in something that is not a header value.
+fn content_type_of(headers: &HeaderMap) -> String {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_CONTENT_TYPE
+                && value.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+        })
+        .unwrap_or(DEFAULT_CONTENT_TYPE)
+        .to_string()
+}
+
+/// How much a caller says it is about to send, when it says.
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// The longest content type the server will record. A media type is short;
+/// anything longer is not one.
+const MAX_CONTENT_TYPE: usize = 128;
 
 /// One request, held open until this participant has something unread, the
 /// channel closes, or `hold` seconds pass.
@@ -626,18 +909,28 @@ impl From<StoreError> for Failure {
             | StoreError::EmptyBody
             | StoreError::BodyTooLarge { .. }
             | StoreError::NoSuchRecipient { .. }
+            | StoreError::EmptyAttachment { .. }
+            | StoreError::InvalidFilename { .. }
             | StoreError::AmbiguousRecipient { .. } => StatusCode::BAD_REQUEST,
             StoreError::NoSuchChannel(_)
             | StoreError::NoSuchParticipant { .. }
+            | StoreError::NoSuchAttachment { .. }
             | StoreError::NotAParticipant { .. } => StatusCode::NOT_FOUND,
+            // Gone rather than not found: this id named something, and the
+            // difference is what tells a restore gone wrong from a typo.
+            StoreError::AttachmentGone { .. } => StatusCode::GONE,
             StoreError::ChannelExists(_)
             | StoreError::ChannelClosed { .. }
             | StoreError::ParticipantChanged { .. }
+            | StoreError::AttachmentBound { .. }
             | StoreError::SuffixExhausted { .. } => StatusCode::CONFLICT,
+            StoreError::AttachmentTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             StoreError::MintExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
             StoreError::NewerSchema { .. }
             | StoreError::UnknownChannelState(_)
             | StoreError::UnknownMessageKind(_)
+            | StoreError::NoAttachmentStore
+            | StoreError::AttachmentFile { .. }
             | StoreError::Sqlite(_)
             | StoreError::Open { .. }
             | StoreError::Directory { .. } => StatusCode::INTERNAL_SERVER_ERROR,

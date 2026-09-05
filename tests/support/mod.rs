@@ -69,10 +69,23 @@ impl TestServer {
         self.database.path().join("saneha.db")
     }
 
+    /// The directory the server keeps attachment files in, beside the
+    /// database.
+    pub fn attachments_path(&self) -> PathBuf {
+        self.database.path().join("attachments")
+    }
+
     /// A second connection to the server's database, for reading the
     /// transcript and for setting up state no verb can set up yet.
     pub fn database(&self) -> rusqlite::Connection {
         rusqlite::Connection::open(self.database_path()).expect("open the database directly")
+    }
+
+    /// A second store over the same database and the same files, for the
+    /// housekeeping no verb does yet: the sweep, and removing a channel's
+    /// files.
+    pub fn store(&self) -> Store {
+        Store::open(&self.database_path()).expect("open the store directly")
     }
 
     /// One raw HTTP/1.1 request, for the shapes no subcommand can make: a
@@ -84,19 +97,37 @@ impl TestServer {
     /// without reading the rest, and a single-threaded caller would be stuck
     /// writing into it.
     pub fn raw(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
+        self.raw_with(method, path, &[("content-type", "application/json")], body)
+    }
+
+    /// The same, with the headers spelled out: an upload carries its filename
+    /// in one, and a request that frames its own body says so in another.
+    /// `content-length` is added only when the headers do not settle the
+    /// framing themselves.
+    pub fn raw_with(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> (u16, String) {
         use std::io::{Read, Write};
         use std::net::TcpStream;
 
         let address = self.url.trim_start_matches("http://").to_string();
         let mut stream = TcpStream::connect(&address).expect("connect to the test server");
-        let head = format!(
-            "{method} {path} HTTP/1.1\r\n\
-             Host: {address}\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\r\n",
-            body.len()
-        );
+        let framed = headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("content-length")
+                || name.eq_ignore_ascii_case("transfer-encoding")
+        });
+        let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {address}\r\n");
+        for (name, value) in headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        if !framed {
+            head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        head.push_str("Connection: close\r\n\r\n");
         let payload = [head.as_bytes(), body].concat();
         let mut writer = stream.try_clone().expect("clone the socket");
         let writing = thread::spawn(move || {

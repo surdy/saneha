@@ -13,6 +13,7 @@ the units in [`deploy/`](../deploy).
 | Volume unit | `/etc/containers/systemd/saneha/saneha-data.volume` |
 | Port | container `7343`, published on `127.0.0.1:7343` |
 | Database | `/data/saneha.db` on the `systemd-saneha-data` volume |
+| Attachments | `/data/attachments/<channel id>/<attachment id>`, on the same volume |
 | Name | `saneha.clusterfault.com`, LAN `192.168.16.169`, tailnet `100.81.17.63` |
 | Backup | `saneha-backup.timer` nightly at 03:30 UTC, to satyanas |
 | Copies | `satyanas:/mnt/pool/container-volumes/saneha/backups`, 14 days |
@@ -147,6 +148,24 @@ leaves it on satyanas, where fourteen dated copies are kept. So a disk failure
 or an FCOS rebuild costs at most a day. Two things it is not: it is not
 continuous — anything written since the last run is gone — and both copies are
 in the same house.
+
+Attachments are on the same volume. Their bytes live in
+`/data/attachments/<channel id>/<attachment id>`, beside the database rather
+than inside it, so a copy of `saneha.db` alone is not a copy of the channel:
+the backup below copies that directory too, and a restore that puts back only
+the database leaves a transcript naming files that are not there.
+
+The order matters and the backup has it right: the database is copied first and
+`attachments/` after it. A file is written and fsynced before the row that
+names it exists, and is never modified afterwards, so a database from before a
+file is consistent with the files from after it. The other order is not.
+
+An attachment's file is fsynced, its directory is not, and SQLite runs at
+`synchronous = NORMAL`, so a power cut can lose a row while leaving its file,
+or lose a file that has no row yet. Neither loses an attachment a message
+already carries, because a message is written after its files. What is left
+over is an orphan file, which the server's hourly sweep removes once it is more
+than an hour old.
 
 ## Backup and restore
 
