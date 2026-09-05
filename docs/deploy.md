@@ -84,6 +84,47 @@ SIGTERM ([issue #15](https://github.com/surdy/saneha/issues/15)): install it
 only together with an image built from that fix or later, or every stop stalls
 for `TimeoutStopSec` and ends in SIGKILL.
 
+**If the image applies a migration, back up first and keep that copy.** A
+migration is a one-way door: once the new server has opened the live database
+and raised `user_version`, the old image refuses the file with `NewerSchema`, so
+rolling the image back means rolling the database back with it. The only thing
+that makes the bump reversible is a copy taken *before* the restart, and kept.
+
+```sh
+# 1. BEFORE the restart. This writes /backups/saneha-<date>.db, or
+#    /backups/saneha-<date>-<HHMMSS>.db if today's dated name is already taken.
+ssh core@192.168.16.169 'sudo systemctl start saneha-backup.service'
+ssh core@192.168.16.169 'sudo journalctl -u saneha-backup.service -n 20 --no-pager'
+
+# 2. Immediately, before anything else runs: rename that copy to
+#    saneha-pre-<what>-<date>.db. The prune matches only saneha- followed by a
+#    digit, so a saneha-pre-* name is exempt and this copy is never aged out.
+IMG=$(ssh core@192.168.16.169 \
+  'grep ^Image= /etc/containers/systemd/saneha/saneha-backup.container | cut -d= -f2-')
+ssh core@192.168.16.169 "sudo podman run --rm --network none --user 0:0 \
+  --entrypoint /bin/sh -v systemd-saneha-backups:/backups $IMG -c '
+    set -eux
+    mv /backups/saneha-<the name step 1 wrote> \
+       /backups/saneha-pre-<what>-<date>.db
+    ls -la /backups'"
+```
+
+`<what>` names the door you are going through — `migration4`, not `deploy` — so
+that a year later the name still says which schema the file is. The copy from
+the migration-4 deploy is the example, and is still on satyanas:
+`/backups/saneha-pre-migration4-2026-09-05.db`, `user_version = 3`, the file
+`sha-1ee3300` would be restored onto. That one had to be made by hand, because
+the run after it would have overwritten the dated name; the script no longer
+does that ([issue #40](https://github.com/surdy/saneha/issues/40)), but the
+rename is still the step that says *keep this one*, since a nightly copy ages
+out after fourteen days and a rollback copy must not.
+
+Write the resulting path into the PR that bumps `Image=`, under a **Rollback**
+heading, with the `user_version` you read back from it. A rollback copy nobody
+can name is not one. Then install below, and run the backup once more
+afterwards — that second run now leaves a second file rather than replacing the
+first.
+
 ```sh
 scp deploy/saneha.container deploy/saneha-data.volume core@192.168.16.169:/tmp/
 ssh core@192.168.16.169 '
@@ -177,8 +218,8 @@ than an hour old.
 | Unit | `/etc/containers/systemd/saneha/saneha-backup.container` |
 | Script | `/etc/containers/systemd/saneha/saneha-backup.sh` |
 | Volume unit | `/etc/containers/systemd/saneha/saneha-backups.volume` |
-| Copies | `satyanas:/mnt/pool/container-volumes/saneha/backups/saneha-YYYY-MM-DD.db` |
-| Retention | 14 days, pruned by the same run that writes |
+| Copies | `satyanas:/mnt/pool/container-volumes/saneha/backups/saneha-YYYY-MM-DD.db`, and `saneha-YYYY-MM-DD-HHMMSS.db` for the second and later run of a day |
+| Retention | 14 days, pruned by the same run that writes; `saneha-pre-*` copies are exempt |
 | On failure | `/etc/systemd/system/saneha-backup-failed.service`, running `/usr/local/bin/saneha-backup-failed` |
 | Snapshots | `pool/container-volumes/saneha`, daily 21:00 `America/Los_Angeles`, kept 30 days |
 
@@ -191,6 +232,21 @@ turns the copy back to rollback journalling so it is one self-contained file,
 runs `PRAGMA integrity_check` on it, copies `/data/attachments` if that
 directory exists, and prunes copies older than fourteen days. Anything that
 goes wrong exits non-zero, and the unit fails.
+
+**A copy is never overwritten.** The first run of a day writes
+`saneha-YYYY-MM-DD.db`; if that name is already taken, the run writes
+`saneha-YYYY-MM-DD-HHMMSS.db` instead — same date, plus the UTC time it started,
+so a second run of `2026-09-05` lands on `saneha-2026-09-05-032747.db`. Two runs
+on one day therefore leave two files. This matters because two runs on one day
+are not unusual: a schema-changing deploy takes one before the restart and one
+after, and until [issue
+#40](https://github.com/surdy/saneha/issues/40) the second destroyed the first.
+If even the timestamped name exists, the run fails rather than writing over it.
+
+The prune matches both shapes, so both age out after fourteen days. It matches
+neither `saneha-pre-restore-*` nor `saneha-pre-<what>-<date>.db`: both globs
+begin `saneha-` followed by a digit, and `p` is not a digit. Copies named that
+way are kept until someone deletes them by hand.
 
 Reading a WAL database from a read-only mount is the fiddly part, and it is
 worth knowing which case you are in before believing a failure:
@@ -453,8 +509,9 @@ curl https://saneha.clusterfault.com/channels
 ```
 
 The `saneha-pre-restore-*` copies are named differently from the nightly ones on
-purpose: the prune only matches `saneha-YYYY-MM-DD.db`, so nothing ages them out
-from under you. Delete them by hand once the restore has proved itself.
+purpose: the prune only matches `saneha-YYYY-MM-DD.db` and
+`saneha-YYYY-MM-DD-HHMMSS.db`, so nothing ages them out from under you. Delete
+them by hand once the restore has proved itself.
 
 Files written on the volume from inside a container come out labelled
 `container_file_t`, so nothing needs `restorecon` afterwards. The copy is in
