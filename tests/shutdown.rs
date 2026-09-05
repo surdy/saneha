@@ -214,8 +214,16 @@ fn a_held_transcript_poll_does_not_stall_the_stop() {
         )
     });
 
-    // Long enough that the request is being held rather than still being made.
-    std::thread::sleep(Duration::from_millis(600));
+    // The poll is really being held rather than still on its way: the server
+    // counts what it holds and says so on `/health`, so this is asked.
+    let deadline = Instant::now() + PATIENCE;
+    while !get(&address, "/health").contains("\"held_waits\":1") {
+        assert!(
+            Instant::now() < deadline,
+            "the server never held the transcript poll"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     let sent = Command::new("kill")
         .arg("-TERM")

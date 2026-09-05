@@ -694,7 +694,15 @@ dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
     }
     ui.closeChannel.hidden = !state.current || closed;
     ui.banner.hidden = !closed;
-    if (closed) ui.banner.textContent = "This channel is closed. It takes no more messages and is here to be read.";
+    if (closed) {
+      // The channel carries when it was closed, so the banner says it without
+      // hunting through the transcript for the close message.
+      const at = state.detail.closed_at ? when(state.detail.closed_at) : null;
+      ui.banner.textContent = at
+        ? "This channel was closed at " + at.text + ". It takes no more messages and is here to be read."
+        : "This channel is closed. It takes no more messages and is here to be read.";
+      ui.banner.title = at ? at.title : "";
+    }
     ui.compose.hidden = !state.current || closed;
   }
 

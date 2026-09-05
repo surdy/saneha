@@ -225,9 +225,11 @@ fn a_hold_ends_when_a_message_lands() {
             (Instant::now(), status, body)
         });
 
-        // Long enough that the request is being held rather than still being
-        // made, so what ends it is the send.
-        std::thread::sleep(Duration::from_millis(400));
+        // The poll is really being held, rather than still on its way: the
+        // server counts what it holds, so this is asked rather than slept out.
+        // Otherwise a send that landed first would be answered by the opening
+        // look and the wake would go untested.
+        server.wait_until_holding(1);
         let sent_at = Instant::now();
         remote
             .send_message(
@@ -272,7 +274,7 @@ fn a_close_ends_a_hold() {
     );
     std::thread::scope(|scope| {
         let held = scope.spawn(move || get(&url));
-        std::thread::sleep(Duration::from_millis(400));
+        server.wait_until_holding(1);
         remote
             .close_channel("brisk-otter", "surdy@web")
             .expect("close");
@@ -308,6 +310,42 @@ fn a_hold_that_hears_nothing_answers_204() {
     assert!(
         waited >= Duration::from_millis(800) && waited < PATIENCE,
         "a one second hold ended after {waited:?}"
+    );
+}
+
+/// A viewer following a channel is a request the server is holding open, and
+/// `held_waits` counts it alongside the per-participant waits: what that number
+/// answers is how much the server has in flight on purpose, and a tab left open
+/// on a quiet channel is part of it.
+#[test]
+fn a_held_poll_is_counted_and_then_is_not() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    remote
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create");
+    assert_eq!(server.held_waits(), 0, "the server started out holding one");
+
+    let url = format!(
+        "{}/channels/brisk-otter/messages?after=0&hold=1",
+        server.url
+    );
+    std::thread::scope(|scope| {
+        let held = scope.spawn(move || get(&url));
+        server.wait_until_holding(1);
+        let (status, _) = held.join().expect("the held poll");
+        assert_eq!(status, 204);
+    });
+
+    // The guard comes off with the request, however it ended.
+    let deadline = Instant::now() + PATIENCE;
+    while server.held_waits() > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        server.held_waits(),
+        0,
+        "a poll that ended was still counted as held"
     );
 }
 

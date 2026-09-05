@@ -127,8 +127,9 @@ impl Serving {
 #[derive(Default)]
 struct Waiters {
     channels: Mutex<HashMap<String, Arc<Notify>>>,
-    /// How many wait requests are being held open right now, across every
-    /// channel. Reported by `GET /health` as `held_waits`.
+    /// How many requests are being held open right now, across every channel:
+    /// the per-participant waits, and the transcript polls a viewer follows a
+    /// channel with. Reported by `GET /health` as `held_waits`.
     held: AtomicUsize,
 }
 
@@ -487,7 +488,8 @@ async fn viewer() -> Response {
 }
 
 /// Whether the server is up, and the one number about it that is not visible
-/// from anywhere else: how many wait requests it is holding open right now.
+/// from anywhere else: how many requests it is holding open right now, waits
+/// and viewer polls together.
 async fn health(State(serving): State<Arc<Serving>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
@@ -1021,7 +1023,10 @@ async fn list_messages(
     if let Some(answer) = page(&serving, &channel, after, limit)? {
         return Ok(answer);
     }
-    let notify = serving.waiters.on(&channel);
+    // Counted alongside the per-participant waits: a viewer following a
+    // channel is a request the server is holding open, and what `held_waits`
+    // answers is how many of those there are.
+    let held = serving.waiters.hold(&channel);
 
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1029,7 +1034,7 @@ async fn list_messages(
             return Ok(StatusCode::NO_CONTENT.into_response());
         }
 
-        let woken = notify.notified();
+        let woken = held.notify.notified();
         tokio::pin!(woken);
 
         if *stopping.borrow_and_update() {
