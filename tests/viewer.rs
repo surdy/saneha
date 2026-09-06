@@ -172,12 +172,14 @@ fn the_page_joins_without_a_working_directory() {
 /// dependency of this crate, and the rule is verifiable by hand against a
 /// server. In CI it is a failure, because a runner that quietly stopped
 /// shipping Node would otherwise leave the rule untested and the suite green.
-#[test]
-fn the_page_reads_for_the_person_only_under_the_rule() {
-    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/read_rule.js");
+/// One of the Node scripts beside this file, run over the page as it ships.
+/// What the page does in a browser is otherwise only checkable by hand, and
+/// these are the parts of it worth holding to between changes.
+fn drive(script: &str, what: &str) {
+    let script = format!("{}/tests/{script}", env!("CARGO_MANIFEST_DIR"));
     let page = concat!(env!("CARGO_MANIFEST_DIR"), "/web/index.html");
     let output = match std::process::Command::new("node")
-        .arg(script)
+        .arg(&script)
         .arg(page)
         .output()
     {
@@ -185,9 +187,9 @@ fn the_page_reads_for_the_person_only_under_the_rule() {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             assert!(
                 std::env::var_os("CI").is_none(),
-                "there is no node on this runner, so the page's read rule was not driven"
+                "there is no node on this runner, so {what} was not driven"
             );
-            eprintln!("skipped: no node, so the page's read rule was not driven");
+            eprintln!("skipped: no node, so {what} was not driven");
             return;
         }
         Err(err) => panic!("running node: {err}"),
@@ -200,21 +202,42 @@ fn the_page_reads_for_the_person_only_under_the_rule() {
     );
 }
 
+#[test]
+fn the_page_reads_for_the_person_only_under_the_rule() {
+    drive("read_rule.js", "the page's read rule");
+}
+
+/// The rail is what the page opens on and the part a browser was the only
+/// witness of: the hash in front of a name, the pinned group, unread as
+/// weight, the struck hash on a closed channel, the palette, and the purpose
+/// edited in place.
+#[test]
+fn the_rail_and_the_purpose_line_are_drawn_as_decided() {
+    drive("rail.js", "the rail and the purpose line");
+}
+
 /// The page is the whole viewer and is carried in the binary, so its size is
-/// something to be held to rather than noticed later. The budget is 72 KB: the
-/// visual redesign spent the 48 KB it inherited and about 17 KB more, and it is
-/// clear where — a light and a dark palette with a colour per host and a phone
-/// layout (17 KB of stylesheet, up from 5), a sprite of the harness, system and
-/// control glyphs the page draws inline (2 KB), and the drawing the layout
-/// needs: monograms, day dividers, grouped messages, read-cursor clusters, the
-/// caught-up counts, and the two screens and one sheet a phone has. What is
-/// left is a few KB of room for the next thing the page has to say, and the
-/// whole viewer is still one response a phone on a tailnet has at once, over a
-/// link that may have no route out. It is raised by the change that needs the
-/// room and not by the change that runs out of it.
+/// something to be held to rather than noticed later. The budget was 72 KB:
+/// the visual redesign spent the 48 KB it inherited and about 17 KB more on a
+/// light and a dark palette with a colour per host and a phone layout, a
+/// sprite of the glyphs the page draws inline, and the drawing the layout
+/// needs — monograms, day dividers, grouped messages, read-cursor clusters,
+/// the caught-up counts, and the two screens and one sheet a phone has.
+///
+/// It is 104 KB from here, and the 32 KB is four things that each needed room:
+/// the rail, which is its own surface with its own palette in both themes so
+/// the channels are never the colour of the transcript (12 KB of stylesheet,
+/// up from 17 to 29); pinning, which is a group, a row menu and a key in this
+/// browser's storage; the palette behind ⌘K, which filters the channel list
+/// the page is already holding; and the purpose, which is now edited in place
+/// against `PATCH /channels/{name}`. What is left is a few KB of room for the
+/// next thing the page has to say, and the whole viewer is still one response
+/// a phone on a tailnet has at once, over a link that may have no route out.
+/// It is raised by the change that needs the room and not by the change that
+/// runs out of it.
 #[test]
 fn the_page_stays_inside_its_budget() {
-    const BUDGET: usize = 72 * 1024;
+    const BUDGET: usize = 104 * 1024;
     let size = saneha::server::VIEWER.len();
     assert!(
         size <= BUDGET,

@@ -16,8 +16,8 @@ use crate::api::{
     attachment_filename, attachment_is_empty, attachment_too_large, decode_filename,
     encode_filename, ApiError, Attachment, Channel, ChannelDetail, ChannelList, ChannelState,
     CloseRequest, Closed, CursorUpdate, Deleted, JoinRequest, Joined, Left, Message, MessageList,
-    NewMessage, Participant, ParticipantList, Waited, DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT,
-    FILENAME_HEADER, MAX_ATTACHMENT,
+    NewMessage, Participant, ParticipantList, PurposeRequest, Waited, DEFAULT_CONTENT_TYPE,
+    DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT,
 };
 
 /// The environment variable that points every subcommand at the server.
@@ -181,6 +181,26 @@ impl Remote {
             .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "close")
+    }
+
+    /// Changes what a channel says it is for, as `by`. `None` clears it.
+    ///
+    /// Safe to make again: the same purpose set twice is the same channel, so
+    /// this goes through `retrying` like every other question that only ever
+    /// asks the same thing.
+    pub fn set_purpose(&self, channel: &str, by: &str, purpose: Option<&str>) -> Result<Channel> {
+        let response = self.check(
+            retrying(|| {
+                self.agent
+                    .patch(self.url(&format!("/channels/{channel}")))
+                    .send_json(&PurposeRequest {
+                        by: by.to_string(),
+                        purpose: purpose.map(str::to_string),
+                    })
+            })
+            .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "channel")
     }
 
     /// Removes a channel and everything in it. The confirmation is in the URL

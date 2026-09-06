@@ -872,6 +872,55 @@ impl Store {
         })
     }
 
+    /// Sets, changes or clears the purpose of an open channel.
+    ///
+    /// The purpose is the one line a channel is listed with, and until now it
+    /// was only ever written at creation, so a word got wrong there was wrong
+    /// for the life of the channel. This is the only field of a channel that
+    /// can be edited, which is why it is a `PATCH` of the channel rather than
+    /// a verb of its own: nothing else about the channel moves, no transcript
+    /// is written, and no waiter is woken.
+    ///
+    /// Nothing goes into the transcript, and that is a limit rather than a
+    /// choice. A `purpose` system message would need the `kind` CHECK on
+    /// `messages` widened, and widening a CHECK in SQLite means rebuilding the
+    /// table — which migration 4 already established this schema must not do,
+    /// because a migration runs in a transaction, `PRAGMA foreign_keys` cannot
+    /// be turned off inside one, and `messages` is pointed at by both
+    /// `recipients` and `attachments`. So a purpose change is a change to the
+    /// channel and not an event in it.
+    ///
+    /// An empty or blank purpose clears it, which is the shape `create` already
+    /// accepts. A purpose equal to the one already there writes nothing.
+    ///
+    /// A closed channel is refused: it is the record of a conversation that is
+    /// over, and what it says it was for is part of that record.
+    pub fn set_purpose(
+        &self,
+        channel: &str,
+        by: &str,
+        purpose: Option<&str>,
+    ) -> Result<Channel, StoreError> {
+        validate_identity(by)?;
+        let purpose = purpose.map(str::trim).filter(|p| !p.is_empty());
+        if let Some(purpose) = purpose {
+            validate_purpose(purpose)?;
+        }
+
+        let conn = self.conn();
+        let channel_id = open_channel_id(&conn, channel, "its purpose cannot be changed")?;
+        conn.execute(
+            "UPDATE channels SET purpose = ?2 WHERE id = ?1",
+            rusqlite::params![channel_id, purpose],
+        )?;
+        let row = conn.query_row(
+            &format!("SELECT {CHANNEL_COLUMNS} FROM channels WHERE id = ?1"),
+            [channel_id],
+            read_row,
+        )?;
+        build_channel(row)
+    }
+
     /// One channel and what it holds. This is what a delete asks before it is
     /// confirmed, so that what is about to go is said in numbers.
     pub fn channel_detail(&self, channel: &str) -> Result<ChannelDetail, StoreError> {

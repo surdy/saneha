@@ -42,12 +42,21 @@ function element(id) {
     scrollTop: 0,
     scrollHeight: 1000,
     clientHeight: 500,
-    classList: { toggle() {} },
+    disabled: false,
+    style: {},
+    classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
     listeners: {},
     addEventListener(type, fn) {
       (node.listeners[type] = node.listeners[type] || []).push(fn);
     },
     querySelectorAll: () => [],
+    querySelector: () => null,
+    // Nothing here has a size: the page asks for one to decide whether the
+    // rule it drew is on screen, and a box of zeros is an answer it handles.
+    getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }),
+    scrollIntoView() {},
+    append() {},
+    remove() {},
     showModal() {},
     close() {},
     select() {},
@@ -116,7 +125,14 @@ function world(options) {
     hidden: false,
     title: "",
     listeners: {},
+    activeElement: null,
     getElementById: byId,
+    // The page looks for a menu it might have left open and builds one when a
+    // row asks for it; neither happens under this rule, so both are answered
+    // with the least that will do.
+    querySelector: () => null,
+    createElement: () => element("made"),
+    body: { append() {} },
     addEventListener(type, fn) {
       (document.listeners[type] = document.listeners[type] || []).push(fn);
     }
@@ -194,9 +210,13 @@ function world(options) {
     location: { pathname: "/c/" + CHANNEL, reload() {} },
     history: { pushState() {} },
     localStorage: {
-      getItem: () => (options.name === null ? null : "surdy"),
+      // Keyed, because the page keeps more than the name here now and a name
+      // handed back for every key is not a shape any of them would be in.
+      getItem: (key) => (key === "saneha.name" && options.name !== null ? "surdy" : null),
       setItem() {}
     },
+    CSS: { escape: (text) => text },
+    navigator: {},
     fetch,
     AbortController,
     confirm: () => false,

@@ -21,6 +21,16 @@
   --ui: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
   --sans: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Helvetica, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  /* The rail is its own surface: the channels and the app bar are never the
+     colour of the transcript, so the eye knows which of the two it is in
+     without reading either. Ink — cool slate with a trace of the accent hue —
+     rather than the accent itself, which is wanted inside the transcript for
+     mentions and would be competing with itself out here. */
+  --rail: #202737; --rail2: #2b3346; --rail-fg: #e9ecf3; --rail-muted: #b6c0d1;
+  --rail-head: #98a4ba; --rail-line: #303a4c;
+  --rail-sel: #2c50cc; --rail-sel-fg: #ffffff; --rail-sel-sub: #c6d2ff;
+  --rail-badge: #4f70e8; --rail-badge-fg: #ffffff;
+  --rail-btn: #2e3749; --rail-btn-line: #3d4759;
 }
 /* One small palette, hashed from the host, so every machine in a channel has
    a colour and the ink on it clears AA in both themes. `web` is pinned to the
@@ -43,6 +53,14 @@
     --s1: 0 1px 2px rgba(0,0,0,.5);
     --s2: 0 1px 2px rgba(0,0,0,.5), 0 10px 24px -10px rgba(0,0,0,.75);
     --ring: 0 0 0 3px rgba(142,166,255,.22);
+    /* In the dark the rail goes UNDER the transcript rather than over it: the
+       sidebar is the darkest surface on the page, not a lighter one, so the
+       same separation reads the same way round. */
+    --rail: #090c11; --rail2: #151a22; --rail-fg: #dfe4ec; --rail-muted: #99a3b3;
+    --rail-head: #7a8494; --rail-line: #1a2029;
+    --rail-sel: #2b3c7d; --rail-sel-fg: #dee6ff; --rail-sel-sub: #9db0ec;
+    --rail-badge: #5f7cf0; --rail-badge-fg: #0b1020;
+    --rail-btn: #171d26; --rail-btn-line: #262e3a;
   }
   .h0 { --hb: #79cec4; --hi: #082a27 }
   .h1 { --hb: #b9a2ea; --hi: #211a33 }
@@ -102,41 +120,122 @@ button, input, textarea { font: inherit; color: inherit }
 
 #app { display: flex; flex-direction: column; height: 100% }
 #bar {
-  flex: 0 0 52px; height: 52px; display: flex; align-items: center; gap: 12px; padding: 0 16px;
-  background: var(--panel); border-bottom: 1px solid var(--line); box-shadow: var(--s1); position: relative; z-index: 3;
+  flex: 0 0 52px; height: 52px; display: flex; align-items: center; gap: 12px; padding: 0 14px 0 16px;
+  background: var(--rail); color: var(--rail-fg); border-bottom: 1px solid var(--rail-line);
+  position: relative; z-index: 3;
 }
-#mark { width: 26px; height: 26px; flex: 0 0 26px; border-radius: 8px; background: var(--accent); color: var(--on); display: flex; align-items: center; justify-content: center }
+#mark { width: 26px; height: 26px; flex: 0 0 26px; border-radius: 8px; background: var(--rail-sel); color: var(--rail-sel-fg); display: flex; align-items: center; justify-content: center }
 #mark .i { width: 16px; height: 16px }
 #name { font-family: var(--ui); font-size: 16px; font-weight: 600; letter-spacing: .01em }
-.who { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 6px 0 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel2) }
-.who .wl { font-family: var(--ui); font-size: 11.5px; color: var(--muted) }
+.who { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 6px 0 10px; border: 1px solid var(--rail-btn-line); border-radius: 9px; background: var(--rail-btn) }
+.who .wl { font-family: var(--ui); font-size: 11.5px; color: var(--rail-muted) }
 #whoId { font-family: var(--mono); font-size: 12.5px }
-#who { height: 26px; padding: 0 9px; font-size: 11.5px }
+#who { height: 26px; padding: 0 9px; font-size: 11.5px; background: none; border-color: var(--rail-btn-line); color: var(--rail-muted) }
+#who:hover { color: var(--rail-fg); border-color: var(--rail-muted) }
+/* jump to a channel: the whole channel list is already in hand, so this is a
+   filter over it rather than a search anybody has to answer */
+#jump {
+  display: flex; align-items: center; gap: 8px; height: 30px; width: min(300px, 30vw); padding: 0 10px;
+  border: 1px solid var(--rail-btn-line); border-radius: 8px; background: var(--rail-btn);
+  color: var(--rail-muted); font-family: var(--ui); font-size: 12px; cursor: pointer;
+}
+#jump:hover { border-color: var(--rail-muted); color: var(--rail-fg) }
+#jump .jt { flex: 1; text-align: left }
+#jump kbd { font-family: var(--mono); font-size: 11px; opacity: .75 }
 #row { flex: 1; min-height: 0; display: flex; position: relative }
 
-#channels { width: 264px; flex: 0 0 264px; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0 }
-#channelList { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 2px }
+#channels { width: 264px; flex: 0 0 264px; background: var(--rail); color: var(--rail-fg); display: flex; flex-direction: column; min-height: 0 }
+#channels .rhead { border-bottom: 0 }
+#channels .rt { color: var(--rail-head) }
+#channels .btn { border-color: var(--rail-btn-line); background: var(--rail-btn); color: var(--rail-fg) }
+#channels .btn:hover { border-color: var(--rail-muted) }
+#channelList { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px 8px; display: flex; flex-direction: column; gap: 1px }
 .ch {
-  display: flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left;
-  padding: 8px 9px; border: 1px solid transparent; border-radius: 9px; background: none; cursor: pointer;
+  display: flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left; position: relative;
+  padding: 6px 8px 6px 9px; border: 0; border-radius: 7px; background: none; cursor: pointer; color: inherit;
 }
-.ch:hover { background: var(--panel2) }
-.ch.on { border-color: var(--aline); background: var(--soft); box-shadow: var(--s1) }
-.ch.cl { background: var(--panel2) }
+.ch:hover, .ch.menu { background: var(--rail2) }
+.ch.on { background: var(--rail-sel) }
 .ch .cc { flex: 1; min-width: 0 }
-.ch .cn { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12.5px; color: var(--fg) }
-.ch.on .cn { color: var(--ink); font-weight: 600 }
-.ch.cl .cn { color: var(--muted) }
-.ch .cp { display: block; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-.ch.on .cp { color: var(--ink); opacity: .85 }
+/* the row is a div holding buttons, so the name is the button that opens it
+   and the handle beside it is a button of its own */
+.ch .op { display: block; width: 100%; min-width: 0; padding: 0; border: 0; background: none; color: inherit; text-align: left; cursor: pointer; font: inherit }
+/* the hash is the channel glyph: quieter than the name, and the one thing
+   that says "this is a channel" before the name is read */
+.ch .hs { flex: 0 0 auto; font-family: var(--mono); font-size: 12.5px; color: var(--rail-muted); line-height: 20px }
+.ch .cn { display: block; font-family: var(--mono); font-size: 12.5px; color: var(--rail-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+/* unread is weight, not only a badge: the list is scannable without reading it */
+.ch.un .cn, .ch.un .hs { color: var(--rail-fg); font-weight: 600 }
+.ch.on .cn { color: var(--rail-sel-fg); font-weight: 600 }
+.ch.on .hs { color: var(--rail-sel-sub) }
+.ch.cl { opacity: .62 }
+.ch.cl .i { color: var(--rail-muted) }
+.ch .cp { display: block; font-size: 11px; color: var(--rail-head); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px }
+.ch.on .cp { color: var(--rail-sel-sub) }
 .bdg {
-  min-width: 20px; height: 19px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--on);
+  min-width: 20px; height: 19px; padding: 0 6px; border-radius: 999px; background: var(--rail-badge); color: var(--rail-badge-fg);
   font-family: var(--mono); font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; margin-top: 1px;
 }
-.rd { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-family: var(--ui); font-size: 10.5px; color: var(--ink) }
-.grp { display: flex; align-items: center; gap: 8px; padding: 12px 9px 6px }
-.grp span:first-child { font-family: var(--ui); font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--muted) }
-.grp .ln2 { flex: 1; height: 1px; background: var(--line) }
+.ch.on .bdg { background: rgba(255,255,255,.22); color: var(--rail-sel-fg) }
+/* one handle per row, over the space the badge uses, on hover or focus */
+.more2 {
+  width: 26px; height: 26px; flex: 0 0 26px; display: none; align-items: center; justify-content: center;
+  border: 0; border-radius: 7px; background: var(--rail-btn); color: var(--rail-fg); cursor: pointer; padding: 0;
+}
+.ch:hover .more2, .ch.menu .more2, .more2:focus-visible { display: flex }
+.ch:hover .bdg, .ch.menu .bdg { display: none }
+.grp { display: flex; align-items: center; gap: 7px; padding: 11px 9px 5px }
+.grp span:first-of-type { font-family: var(--ui); font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--rail-head) }
+.grp .i { color: var(--rail-head) }
+.grp .ln2 { flex: 1; height: 1px; background: var(--rail-line) }
+#channels .empty { color: var(--rail-head) }
+
+/* the row menu, and the palette: both are panels floating over the page, so
+   they take the transcript's surface rather than the rail's */
+.pop {
+  position: fixed; z-index: 20; min-width: 190px; padding: 5px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--panel); box-shadow: var(--s2); display: flex; flex-direction: column; gap: 1px;
+}
+.mi {
+  display: flex; align-items: center; gap: 9px; width: 100%; height: 30px; padding: 0 9px; border: 0;
+  border-radius: 7px; background: none; color: var(--fg2); font-family: var(--ui); font-size: 12.5px;
+  text-align: left; cursor: pointer;
+}
+.mi:hover { background: var(--panel2) }
+.mi.dg { color: var(--danger) }
+.mi.dg:hover { background: var(--panel2) }
+.mi .sub { color: var(--muted); font-family: var(--mono); font-size: 11.5px }
+.msep { height: 1px; background: var(--line); margin: 4px 6px }
+
+#veil { position: fixed; inset: 0; z-index: 19 }
+#palette {
+  position: fixed; z-index: 20; top: 12vh; left: 50%; transform: translateX(-50%);
+  width: min(520px, 92vw); border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+  box-shadow: var(--s2); overflow: hidden; display: flex; flex-direction: column; max-height: 70vh;
+}
+#paletteInput {
+  height: 44px; flex: 0 0 44px; width: 100%; padding: 0 13px; border: 0; border-bottom: 1px solid var(--line);
+  background: none; font-family: var(--mono); font-size: 13.5px; outline: none;
+}
+#paletteList { flex: 1; min-height: 0; overflow-y: auto; padding: 5px; display: flex; flex-direction: column; gap: 1px }
+.pi2 {
+  display: flex; align-items: center; gap: 9px; width: 100%; height: 36px; padding: 0 9px; border: 0;
+  border-radius: 8px; background: none; text-align: left; cursor: pointer; color: var(--fg2);
+}
+.pi2[aria-selected="true"] { background: var(--soft); color: var(--ink) }
+.pi2 .pnm { flex: 0 0 auto; font-family: var(--mono); font-size: 13px }
+.pi2 .pnm .hs { color: var(--muted) }
+.pi2[aria-selected="true"] .pnm .hs { color: var(--ink); opacity: .6 }
+.pi2 mark { background: none; color: inherit; font-weight: 700; text-decoration: underline }
+.pi2 .pcp { flex: 1; min-width: 0; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.pi2[aria-selected="true"] .pcp { color: var(--ink); opacity: .8 }
+.pi2 .bdg { margin-top: 0; background: var(--accent); color: var(--on) }
+#paletteFoot {
+  flex: 0 0 32px; height: 32px; display: flex; align-items: center; gap: 14px; padding: 0 13px;
+  border-top: 1px solid var(--line); background: var(--panel2);
+  font-family: var(--ui); font-size: 11px; color: var(--muted);
+}
+#paletteEmpty { padding: 18px 0; text-align: center; color: var(--muted); font-size: 12.5px }
 
 main { flex: 1; min-width: 0; display: flex; flex-direction: column }
 #topbar {
@@ -146,11 +245,28 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column }
 .ti { min-width: 0 }
 .t1 { display: flex; align-items: center; gap: 8px }
 #channelName { font-family: var(--mono); font-size: 17px; font-weight: 600; letter-spacing: -.01em }
-#channelPurpose { font-size: 12.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+#channelName .hs { color: var(--muted); font-weight: 400 }
+#purposeRow { display: flex; align-items: center; gap: 6px; margin-top: 1px; min-width: 0 }
+#channelPurpose {
+  font: inherit; font-size: 12.5px; color: var(--muted); text-align: left; padding: 0;
+  border: 0; background: none; cursor: text; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#channelPurpose.none { color: var(--ink); font-family: var(--ui) }
+#purposeRow .pe { width: 20px; height: 20px; flex: 0 0 20px; visibility: hidden; padding: 0; border: 0; border-radius: 6px; background: var(--panel2); color: var(--muted); display: flex; align-items: center; justify-content: center; cursor: pointer }
+#purposeRow:hover .pe, #channelPurpose:focus-visible + .pe, .pe:focus-visible { visibility: visible }
+#purposeEdit { display: flex; align-items: center; gap: 8px; margin-top: 2px; min-width: 0 }
+#purposeInput {
+  flex: 1; min-width: 0; max-width: 420px; height: 28px; padding: 0 8px; border: 1px solid var(--aline);
+  border-radius: 7px; background: var(--panel); box-shadow: var(--ring); font-size: 12.5px; outline: none;
+}
+#purposeHint { font-family: var(--ui); font-size: 11px; color: var(--muted); white-space: nowrap }
+#purposeCount { font-family: var(--mono); font-size: 11px; color: var(--muted) }
+#purposeCount.over { color: var(--danger) }
 #headAvatars { display: flex; align-items: center; gap: 4px; border: 0; background: none; padding: 2px; border-radius: 10px; cursor: pointer }
 #headAvatars:hover { background: var(--panel2) }
 #banner { padding: 8px 20px; background: var(--soft); color: var(--ink); border-bottom: 1px solid var(--aline); font-size: 12.5px }
 
+#twrap { flex: 1; min-height: 0; display: flex; position: relative }
 #transcript { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 20px 16px; display: flex; flex-direction: column; gap: 11px }
 /* A short transcript sits at the bottom, against the compose box, rather than
    floating at the top of an empty column; a long one still scrolls. */
@@ -200,6 +316,23 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column }
 .dv::before, .dv::after { content: ""; flex: 1; height: 1px; background: var(--line) }
 .dv span { display: inline-flex; align-items: center; gap: 5px; font-family: var(--ui); font-size: 10.5px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; color: var(--muted) }
 .dv.up span { font-weight: 400; letter-spacing: 0; text-transform: none; font-size: 11px }
+/* where the reading stopped: the rule the newest messages sit under */
+.dv.new { gap: 10px }
+.dv.new::before { display: none }
+.dv.new::after { background: var(--aline) }
+.dv.new .nw {
+  height: 20px; padding: 0 9px; border-radius: 999px; background: var(--accent); color: var(--on);
+  font-family: var(--ui); font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  display: inline-flex; align-items: center; text-transform: uppercase;
+}
+.dv.new .at2 { font-family: var(--mono); font-size: 11px; color: var(--ink); order: 3 }
+#jumpNew {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 4;
+  display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 6px 0 12px; border: 0; border-radius: 999px;
+  background: var(--accent); color: var(--on); box-shadow: var(--s2);
+  font-family: var(--ui); font-size: 12px; font-weight: 600; cursor: pointer;
+}
+#jumpNew .rnd { display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 999px; background: rgba(255,255,255,.2) }
 .empty { color: var(--muted); padding: 24px 0; text-align: center }
 
 #status { font-size: 12px; color: var(--muted); padding: 0 20px 6px }
@@ -262,17 +395,36 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   #bar { display: none; padding: 0 10px; gap: 8px }
   #app.vc #bar { display: flex }
   #who { width: 30px; padding: 0; justify-content: center }
-  #channels { display: none; width: auto; flex: 1; border-right: 0; background: none }
+  /* the channels screen is the rail at full width: the tint does more work
+     here than anywhere, because it is the whole screen */
+  #channels { display: none; width: auto; flex: 1 }
   #app.vc #channels { display: flex }
   #app.vc main { display: none }
-  #channels .rhead { border-bottom: 0 }
-  #channelList { gap: 8px; padding: 0 12px 12px }
-  .ch { padding: 12px; background: var(--panel); border-color: var(--line); min-height: 56px }
-  /* the transcript screen: the channel head is its top bar */
-  #topbar { flex: 0 0 62px; height: 62px; gap: 10px; padding: 0 10px }
-  #toChannels { width: 44px; height: 44px; border-radius: 12px }
-  #channelName { font-size: 15px }
-  #headAvatars { padding: 4px 6px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel2) }
+  #app.vc { background: var(--rail) }
+  #channelList { gap: 6px; padding: 0 12px 12px }
+  .ch { padding: 10px 12px; border-radius: 12px; background: var(--rail2); min-height: 56px; align-items: center }
+  .ch.on { background: var(--rail-sel) }
+  .ch.cl { background: none; box-shadow: inset 0 0 0 1px var(--rail-line) }
+  .ch .hs, .ch .cn { font-size: 14.5px }
+  .ch .cp { font-size: 12px }
+  /* on a touch screen there is no hover to reveal a handle, so it is always
+     there — and 44px, which is why it is not the 26px the desk uses */
+  .more2 { display: flex; width: 44px; height: 44px; flex: 0 0 44px; background: none; color: var(--rail-muted) }
+  .ch:hover .bdg, .ch.menu .bdg { display: flex }
+  .grp { padding: 12px 4px 4px }
+  #jump { width: 40px; height: 40px; flex: 0 0 40px; padding: 0; justify-content: center; border-radius: 11px }
+  #jump .jt { display: none }
+  /* the transcript screen: the channel head is its top bar, on the rail too */
+  #topbar { flex: 0 0 62px; height: 62px; gap: 10px; padding: 0 10px; background: var(--rail); color: var(--rail-fg); border-bottom-color: var(--rail-line) }
+  #toChannels { width: 44px; height: 44px; border-radius: 12px; background: var(--rail-btn); border-color: var(--rail-btn-line); color: var(--rail-fg) }
+  #channelName { font-size: 15px; color: var(--rail-fg) }
+  #channelName .hs { color: var(--rail-muted) }
+  #topbar .st { border-color: var(--rail-btn-line); background: var(--rail-btn); color: var(--rail-muted) }
+  #topbar .st.cl { border-color: var(--rail-btn-line); color: var(--rail-muted) }
+  #channelPurpose { color: var(--rail-head) }
+  #channelPurpose.none { color: var(--rail-sel-sub) }
+  #purposeRow .pe { background: var(--rail-btn); color: var(--rail-muted); visibility: visible }
+  #headAvatars { padding: 4px 6px; border: 1px solid var(--rail-btn-line); border-radius: 13px; background: var(--rail-btn) }
   #transcript { padding: 10px 12px 14px; gap: 10px }
   /* the read cursors move under the message, right-aligned, rather than into
      a margin there is no room for */
@@ -315,6 +467,12 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   .pn { grid-area: 1 / 1 } .ph2 { grid-area: 1 / 2 / 1 / 5 }
   .pf { grid-area: 2 / 1 / 2 / 4 } .pr { grid-area: 2 / 4; justify-self: end }
   #app.vs #scrim { display: block; position: fixed; inset: 0; background: rgba(6,9,14,.4); z-index: 8 }
+  #palette { top: 0; left: 0; right: 0; transform: none; width: auto; max-height: 100%; height: 100%; border: 0; border-radius: 0 }
+  #paletteInput { height: 52px; flex: 0 0 52px }
+  .pi2 { height: 48px }
+  /* a menu opened from a row is a sheet at the bottom, where a thumb is */
+  .pop { left: 8px !important; right: 8px; top: auto !important; bottom: calc(8px + env(safe-area-inset-bottom)); min-width: 0 }
+  .mi { height: 46px; font-size: 14px }
 }
 [hidden] { display: none !important }
 </style>
@@ -325,7 +483,18 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   <symbol id="pl" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"></path></symbol>
   <symbol id="pn" viewBox="0 0 16 16"><path d="M10.8 2.6l2.6 2.6-7.5 7.5-3.4.8.8-3.4 7.5-7.5z"></path></symbol>
   <symbol id="tk" viewBox="0 0 16 16"><path d="M3.2 8.4l3 3 6.6-7.2"></path></symbol>
-  <symbol id="lk" viewBox="0 0 16 16"><rect x="3.2" y="7" width="9.6" height="6.4" rx="1.6"></rect><path d="M5.6 7V5.2a2.4 2.4 0 0 1 4.8 0V7"></path></symbol>
+  <!-- A closed channel is not a locked one. The padlock said private or no
+       entry, which saneha has no notion of: a closed transcript is completely
+       readable. The struck hash says the one true thing — this channel is no
+       longer live — in the glyph the rail now uses for a channel, and the
+       button that closes one carries the same mark. -->
+  <symbol id="sk" viewBox="0 0 16 16"><path d="M6.4 3.2L4.8 12.8M11.2 3.2L9.6 12.8M3.2 6.2h9.6M2.6 9.8h9.6"></path><path d="M13.4 2.6L2.6 13.4"></path></symbol>
+  <symbol id="pin" viewBox="0 0 16 16"><path d="M6.2 2.6h3.6l-.5 3.4 2.4 2.2v1.1H4.3V8.2l2.4-2.2-.5-3.4z"></path><path d="M8 9.3v4.1"></path></symbol>
+  <symbol id="pinf" viewBox="0 0 16 16"><path d="M6.2 2.6h3.6l-.5 3.4 2.4 2.2v1.1H4.3V8.2l2.4-2.2-.5-3.4z" fill="currentColor"></path><path d="M8 9.3v4.1"></path></symbol>
+  <symbol id="dots" viewBox="0 0 16 16"><circle cx="8" cy="3.6" r="1.15" fill="currentColor" stroke="none"></circle><circle cx="8" cy="8" r="1.15" fill="currentColor" stroke="none"></circle><circle cx="8" cy="12.4" r="1.15" fill="currentColor" stroke="none"></circle></symbol>
+  <symbol id="cp" viewBox="0 0 16 16"><rect x="5.4" y="5.4" width="8.2" height="8.2" rx="1.6"></rect><path d="M10.6 5.4V3.8a1.4 1.4 0 0 0-1.4-1.4H3.8a1.4 1.4 0 0 0-1.4 1.4v5.4a1.4 1.4 0 0 0 1.4 1.4h1.6"></path></symbol>
+  <symbol id="sr" viewBox="0 0 16 16"><circle cx="7.2" cy="7.2" r="4.4"></circle><path d="M10.6 10.6l2.9 2.9"></path></symbol>
+  <symbol id="dn" viewBox="0 0 16 16"><path d="M8 3.4v9M4.4 8.8L8 12.4l3.6-3.6"></path></symbol>
   <symbol id="ck" viewBox="0 0 16 16"><path d="M8 4.4v3.8l2.6 1.6"></path><circle cx="8" cy="8" r="5.6"></circle></symbol>
   <symbol id="in" viewBox="0 0 16 16"><path d="M6.4 2.8H3.2v10.4h3.2M9.2 5.6L11.6 8 9.2 10.4M11.6 8H6"></path></symbol>
   <symbol id="out" viewBox="0 0 16 16"><path d="M9.6 2.8h3.2v10.4H9.6M6.8 5.6L4.4 8l2.4 2.4M4.4 8H10"></path></symbol>
@@ -345,6 +514,12 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   <div id="bar">
     <div id="mark"><svg class="i" aria-hidden="true"><use href="#lg"></use></svg></div>
     <div id="name">saneha</div>
+    <span class="sp"></span>
+    <button id="jump" type="button" title="Jump to a channel">
+      <svg class="i" aria-hidden="true"><use href="#sr"></use></svg>
+      <span class="jt">Jump to a channel</span>
+      <kbd class="dk">⌘K</kbd>
+    </button>
     <span class="sp"></span>
     <div class="who">
       <span class="wl">posting as</span>
@@ -368,15 +543,26 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
         <button id="toChannels" class="btn ic ph" type="button" aria-label="Back to the channels"><svg class="i b" aria-hidden="true"><use href="#ls"></use></svg></button>
         <div class="ti">
           <div class="t1"><span id="channelName">no channel</span><span class="st" id="channelState" hidden></span></div>
-          <div id="channelPurpose"></div>
+          <div id="purposeRow">
+            <button id="channelPurpose" type="button" title="Say what this channel is for"></button>
+            <button id="purposeEditBtn" class="pe" type="button" aria-label="Edit the purpose"><svg class="i" aria-hidden="true"><use href="#pn"></use></svg></button>
+          </div>
+          <div id="purposeEdit" hidden>
+            <input id="purposeInput" autocomplete="off" aria-label="What this channel is for" placeholder="one line saying what this channel is for">
+            <span id="purposeHint" class="dk">↵ save · esc cancel</span>
+            <span id="purposeCount"></span>
+          </div>
         </div>
         <span class="sp"></span>
         <button id="headAvatars" type="button" aria-label="Participants"></button>
         <span id="caughtChip" class="chip dk" hidden></span>
-        <button id="closeChannel" class="btn dk" type="button" hidden><svg class="i" aria-hidden="true"><use href="#lk"></use></svg>close</button>
+        <button id="closeChannel" class="btn dk" type="button" hidden><svg class="i" aria-hidden="true"><use href="#sk"></use></svg>close</button>
       </div>
       <div id="banner" hidden></div>
-      <div id="transcript"><p class="empty">Pick a channel, or create one.</p></div>
+      <div id="twrap">
+        <div id="transcript"><p class="empty">Pick a channel, or create one.</p></div>
+        <button id="jumpNew" type="button" hidden></button>
+      </div>
       <div id="status"></div>
       <form id="compose" hidden>
         <div class="fld">
@@ -394,7 +580,7 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
       <div class="rhead">
         <span class="rt">Participants</span>
         <span id="caughtChip2" class="chip ph" hidden></span>
-        <button id="closeChannel2" class="btn ph" type="button" hidden><svg class="i" aria-hidden="true"><use href="#lk"></use></svg>close channel</button>
+        <button id="closeChannel2" class="btn ph" type="button" hidden><svg class="i" aria-hidden="true"><use href="#sk"></use></svg>close channel</button>
         <button id="panelToggle" class="btn ic dk" type="button" aria-label="Collapse the participants panel"><svg class="i b" aria-hidden="true"><use href="#cv"></use></svg></button>
         <button id="sheetClose" class="btn ic ph" type="button" aria-label="Close the participants sheet"><svg class="i b" aria-hidden="true"><use href="#xx"></use></svg></button>
       </div>
@@ -403,6 +589,13 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     </aside>
     <div id="scrim"></div>
   </div>
+</div>
+
+<div id="veil" hidden></div>
+<div id="palette" hidden role="dialog" aria-label="Jump to a channel">
+  <input id="paletteInput" autocomplete="off" spellcheck="false" aria-label="Filter the channels" placeholder="filter the channels">
+  <div id="paletteList" role="listbox"></div>
+  <div id="paletteFoot"><span>↑↓ move</span><span>↵ open</span><span>esc close</span></div>
 </div>
 
 <dialog id="nameDialog">
@@ -437,6 +630,11 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   const HARNESS = "web";
   const NAME_KEY = "saneha.name";
   const PANEL_KEY = "saneha.panel";
+  // Which channels this browser keeps at the top of the rail, in the order it
+  // keeps them. Per browser and not per identity: a pin is how one person's
+  // one window is arranged, it is nobody else's business, and keeping it here
+  // is the whole feature with nothing asked of the server.
+  const PINS_KEY = "saneha.pins";
   const DEFAULT_NAME = "surdy";
   const PAGE = 500;            // how much history one fetch asks for
   const HOLD = 55;             // seconds the server may hold a poll open
@@ -465,8 +663,15 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     peopleFoot: el("peopleFoot"), who: el("who"), whoId: el("whoId"), whoAv: el("whoAv"),
     nameDialog: el("nameDialog"), nameInput: el("nameInput"), namePreview: el("namePreview"),
     channelDialog: el("channelDialog"), newName: el("newName"),
-    newPurpose: el("newPurpose"), newError: el("newError")
+    newPurpose: el("newPurpose"), newError: el("newError"),
+    purposeRow: el("purposeRow"), purposeEdit: el("purposeEdit"),
+    purposeInput: el("purposeInput"), purposeCount: el("purposeCount"),
+    jumpNew: el("jumpNew"), veil: el("veil"), palette: el("palette"),
+    paletteInput: el("paletteInput"), paletteList: el("paletteList")
   };
+
+  /// The longest a purpose may be, as the store holds it.
+  const MAX_PURPOSE = 256;
 
   const state = {
     channels: [],
@@ -484,6 +689,18 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     onChannels: false,
     sheet: false,
     collapsed: false,    // the participants panel, folded to its avatars
+    // The channels pinned to the top of the rail, in their kept order.
+    pins: [],
+    // Where the reading had got to when this channel was opened, so the "new"
+    // rule stays put while it is read rather than walking down the transcript
+    // as the cursor advances under it. `null` until the first draw that has
+    // the participants to ask.
+    newAt: null,
+    // What is open over the page: the row menu, the palette, and whether the
+    // purpose in the head has been turned into an input.
+    menu: null,          // the channel name whose row menu is open
+    palette: false,
+    editingPurpose: false,
     // Bumped whenever the channel changes or a follower is restarted. A
     // follower whose generation is stale returns instead of rendering over
     // whatever is on screen now.
@@ -698,44 +915,243 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   /// The unread badge. The channel list does not carry what a badge needs yet;
   /// when it carries `newest_id` and `read_cursor` this lights up with no
   /// other change here, and until then nothing is drawn rather than guessed.
-  function badge(channel) {
-    if (typeof channel.newest_id !== "number" || typeof channel.read_cursor !== "number") return "";
-    const behind = channel.newest_id - channel.read_cursor;
-    return behind > 0 ? '<span class="bdg">' + behind + "</span>" : "";
+  function behind(channel) {
+    if (typeof channel.newest_id !== "number" || typeof channel.read_cursor !== "number") return 0;
+    return Math.max(0, channel.newest_id - channel.read_cursor);
+  }
+
+  // ---- pinning ------------------------------------------------------------
+
+  /// The pins this browser keeps, filtered to channels that still exist: a
+  /// channel that was deleted elsewhere should not hold a place in the group.
+  function pinned() {
+    const names = new Set(state.channels.map((channel) => channel.name));
+    return state.pins.filter((name) => names.has(name));
+  }
+
+  function isPinned(name) { return state.pins.indexOf(name) >= 0; }
+
+  function setPinned(name, on) {
+    const at = state.pins.indexOf(name);
+    if (on && at < 0) state.pins.push(name);
+    else if (!on && at >= 0) state.pins.splice(at, 1);
+    else return;
+    try { localStorage.setItem(PINS_KEY, JSON.stringify(state.pins)); } catch (ignored) { /* private window */ }
+    renderChannels();
+  }
+
+  /// What was stored, taken as data and not as gospel: a hand-edited or
+  /// half-written key leaves the rail unpinned rather than broken.
+  function loadPins() {
+    try {
+      const kept = JSON.parse(localStorage.getItem(PINS_KEY) || "[]");
+      state.pins = Array.isArray(kept) ? kept.filter((name) => typeof name === "string") : [];
+    } catch (ignored) {
+      state.pins = [];
+    }
+  }
+
+  // ---- the channel list ---------------------------------------------------
+
+  /// One row. The hash is the channel glyph and sits outside the name, so a
+  /// name that is too long ellipsises without taking the mark with it; a
+  /// closed channel has the hash struck through instead.
+  function channelRow(channel, on) {
+    const closed = channel.state === "closed";
+    const unread = !closed && behind(channel) > 0;
+    const cls = ["ch", on ? "on" : "", closed ? "cl" : "", unread ? "un" : ""].filter(Boolean).join(" ");
+    const mark = closed ? icon("sk") : '<span class="hs">#</span>';
+    const count = unread ? '<span class="bdg">' + behind(channel) + "</span>" : "";
+    return '<div class="' + cls + '" data-channel="' + esc(channel.name) + '">' +
+      mark +
+      '<span class="cc"><button type="button" class="op" data-open="' + esc(channel.name) + '">' +
+      '<span class="cn">' + esc(channel.name) + '</span>' +
+      '<span class="cp">' + esc(channel.purpose || "no purpose") + "</span></button></span>" +
+      count +
+      '<button type="button" class="more2" data-menu="' + esc(channel.name) + '" aria-label="More for ' +
+      esc(channel.name) + '">' + icon("dots") + "</button></div>";
+  }
+
+  function group(label, glyph) {
+    return '<div class="grp">' + (glyph ? icon(glyph) : "") +
+      "<span>" + label + '</span><span class="ln2"></span></div>';
   }
 
   function renderChannels() {
-    // Open first, then by name: what is live is what is being read.
-    const sorted = state.channels.slice().sort((a, b) => {
-      if (a.state !== b.state) return a.state === "open" ? -1 : 1;
-      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
-    });
-    if (!sorted.length) {
+    if (!state.channels.length) {
       ui.channelList.innerHTML = '<p class="empty">No channels yet.</p>';
       return;
     }
-    const mine = personOf(identity());
-    const caught = mine && state.lastId > 0 && mine.read_cursor >= state.lastId;
+    const by = new Map(state.channels.map((channel) => [channel.name, channel]));
+    const pins = pinned();
+    const kept = new Set(pins);
+    // What is not pinned sorts itself: open first, then by name. What is
+    // pinned keeps the order it was put in, which is the point of pinning.
+    const rest = state.channels
+      .filter((channel) => !kept.has(channel.name))
+      .sort((a, b) => {
+        if (a.state !== b.state) return a.state === "open" ? -1 : 1;
+        return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+      });
+
     const html = [];
-    let closedYet = false;
-    for (const channel of sorted) {
-      const closed = channel.state === "closed";
-      if (closed && !closedYet) {
-        html.push('<div class="grp"><span>Closed</span><span class="ln2"></span></div>');
-        closedYet = true;
-      }
-      const on = channel.name === state.current;
-      html.push('<button type="button" class="ch' + (on ? " on" : "") + (closed ? " cl" : "") +
-        '" data-channel="' + esc(channel.name) + '"><span class="cc"><span class="cn">' +
-        (closed ? icon("lk") : "") + esc(channel.name) + '</span><span class="cp">' +
-        esc(channel.purpose || "no purpose") + "</span></span>" +
-        (closed ? '<span class="st cl">closed</span>' : badge(channel)) +
-        (on && caught ? '<span class="rd">' + icon("tk") + "read</span>" : "") + "</button>");
+    if (pins.length) {
+      html.push(group("Pinned", "pinf"));
+      for (const name of pins) html.push(channelRow(by.get(name), name === state.current));
+    }
+    let heading = "";
+    for (const channel of rest) {
+      const want = channel.state === "closed" ? "Closed" : pins.length ? "Open" : "";
+      if (want && want !== heading) { html.push(group(want)); heading = want; }
+      html.push(channelRow(channel, channel.name === state.current));
     }
     ui.channelList.innerHTML = html.join("");
-    for (const button of ui.channelList.querySelectorAll(".ch")) {
-      button.onclick = () => openChannel(button.dataset.channel, true);
+    for (const button of ui.channelList.querySelectorAll(".op")) {
+      button.onclick = () => openChannel(button.dataset.open, true);
     }
+    for (const button of ui.channelList.querySelectorAll(".more2")) {
+      button.onclick = (event) => { event.stopPropagation(); rowMenu(button.dataset.menu, button); };
+    }
+  }
+
+  // ---- the row menu -------------------------------------------------------
+
+  /// Everything floating over the page closes the same way, so there is one
+  /// place that puts it away and one veil that catches the click outside.
+  function closeOver() {
+    state.menu = null;
+    state.palette = false;
+    const open = document.querySelector(".pop");
+    if (open) open.remove();
+    ui.palette.hidden = true;
+    ui.veil.hidden = true;
+    for (const row of ui.channelList.querySelectorAll(".ch.menu")) row.classList.remove("menu");
+  }
+
+  /// The menu on one channel's row: pin or unpin, the name to paste into a
+  /// message somewhere else, and close — which is why this exists at all, so
+  /// that closing a channel no longer means opening it first.
+  function rowMenu(name, anchor) {
+    const already = state.menu === name;
+    closeOver();
+    if (already) return;
+
+    const channel = state.channels.find((each) => each.name === name);
+    if (!channel) return;
+    const on = isPinned(name);
+    const closed = channel.state === "closed";
+
+    const pop = document.createElement("div");
+    pop.className = "pop";
+    pop.innerHTML =
+      '<button type="button" class="mi" data-do="pin">' + icon(on ? "pinf" : "pin") +
+      (on ? "Unpin channel" : "Pin channel") + "</button>" +
+      '<button type="button" class="mi" data-do="copy">' + icon("cp") +
+      '<span class="sub">#' + esc(name) + "</span></button>" +
+      (closed ? "" : '<div class="msep"></div><button type="button" class="mi dg" data-do="close">' +
+        icon("sk") + "Close channel</button>");
+    document.body.append(pop);
+
+    // Placed against the handle, and pulled back inside the window when the
+    // row is near an edge. Fixed positioning, so a scrolled rail does not
+    // leave the menu behind.
+    const box = anchor.getBoundingClientRect();
+    const size = pop.getBoundingClientRect();
+    const left = Math.min(box.right - size.width, window.innerWidth - size.width - 8);
+    const top = box.bottom + size.height + 8 > window.innerHeight
+      ? Math.max(8, box.top - size.height - 4)
+      : box.bottom + 4;
+    pop.style.left = Math.max(8, left) + "px";
+    pop.style.top = top + "px";
+
+    state.menu = name;
+    ui.veil.hidden = false;
+    const row = ui.channelList.querySelector('.ch[data-channel="' + CSS.escape(name) + '"]');
+    if (row) row.classList.add("menu");
+
+    pop.querySelector('[data-do="pin"]').onclick = () => { setPinned(name, !on); closeOver(); };
+    pop.querySelector('[data-do="copy"]').onclick = () => {
+      // Clipboard access can be refused, and a refusal here is not worth a
+      // message: the name is on the row the menu is attached to.
+      if (navigator.clipboard) navigator.clipboard.writeText("#" + name).catch(() => {});
+      closeOver();
+    };
+    const end = pop.querySelector('[data-do="close"]');
+    if (end) end.onclick = () => { closeOver(); closeChannel(name); };
+    pop.querySelector(".mi").focus();
+  }
+
+  // ---- jumping to a channel -----------------------------------------------
+
+  /// The whole channel list is already in hand, so this filters what is here
+  /// rather than asking the server anything. Closed channels are in it: they
+  /// are the ones whose name is hardest to remember.
+  function paletteMatches() {
+    const typed = ui.paletteInput.value.trim().toLowerCase();
+    const scored = [];
+    for (const channel of state.channels) {
+      const name = channel.name.toLowerCase();
+      const purpose = (channel.purpose || "").toLowerCase();
+      const at = name.indexOf(typed);
+      const inPurpose = typed && at < 0 && purpose.indexOf(typed) >= 0;
+      if (typed && at < 0 && !inPurpose) continue;
+      // A name that starts with what was typed first, then a name that
+      // contains it, then a purpose that does; pinned above unpinned, and
+      // open above closed, inside each of those.
+      const rank = (!typed ? 3 : at === 0 ? 0 : at > 0 ? 1 : 2) * 100 +
+        (isPinned(channel.name) ? 0 : 10) + (channel.state === "closed" ? 5 : 0);
+      scored.push({ channel: channel, at: at, rank: rank });
+    }
+    scored.sort((a, b) => a.rank - b.rank || (a.channel.name < b.channel.name ? -1 : 1));
+    return scored.slice(0, 40);
+  }
+
+  /// The typed run marked inside the name, with everything escaped first so
+  /// no part of a channel name can become an element.
+  function marked(name, at, length) {
+    if (at < 0 || !length) return esc(name);
+    return esc(name.slice(0, at)) + "<mark>" + esc(name.slice(at, at + length)) +
+      "</mark>" + esc(name.slice(at + length));
+  }
+
+  function renderPalette(selected) {
+    const matches = paletteMatches();
+    if (!matches.length) {
+      ui.paletteList.innerHTML = '<p id="paletteEmpty">No channel matches that.</p>';
+      return matches;
+    }
+    const length = ui.paletteInput.value.trim().length;
+    const at = Math.min(selected, matches.length - 1);
+    ui.paletteList.innerHTML = matches.map((match, index) => {
+      const channel = match.channel;
+      const closed = channel.state === "closed";
+      const count = !closed && behind(channel) > 0 ? '<span class="bdg">' + behind(channel) + "</span>" : "";
+      return '<button type="button" class="pi2" role="option" aria-selected="' + (index === at) +
+        '" data-open="' + esc(channel.name) + '"><span class="pnm">' +
+        (closed ? '<span class="hs">' + icon("sk") + "</span>" : '<span class="hs">#</span>') +
+        marked(channel.name, match.at, length) + "</span>" +
+        '<span class="pcp">' + esc(channel.purpose || "no purpose") + "</span>" +
+        (closed ? '<span class="st cl">closed</span>' : count) + "</button>";
+    }).join("");
+    for (const button of ui.paletteList.querySelectorAll(".pi2")) {
+      button.onclick = () => { closeOver(); openChannel(button.dataset.open, true); };
+    }
+    const chosen = ui.paletteList.querySelector('[aria-selected="true"]');
+    if (chosen) chosen.scrollIntoView({ block: "nearest" });
+    return matches;
+  }
+
+  let paletteAt = 0;
+
+  function openPalette() {
+    closeOver();
+    state.palette = true;
+    paletteAt = 0;
+    ui.paletteInput.value = "";
+    ui.palette.hidden = false;
+    ui.veil.hidden = false;
+    renderPalette(0);
+    ui.paletteInput.focus();
   }
 
   // ---- the transcript -----------------------------------------------------
@@ -891,14 +1307,31 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
       readers.set(person.read_cursor, at);
     }
 
+    // Where the reading had got to when this channel was opened. Taken once,
+    // not on every draw: the cursor advances under the rule as it is read, and
+    // a rule that followed it would walk down the transcript while somebody
+    // was looking at it.
+    const me = personOf(identity());
+    if (state.newAt === null && me) state.newAt = me.read_cursor || 0;
+
     const html = [];
     let day = "";
     let previous = null;
+    let ruled = false;
     for (const message of state.messages) {
       const at = when(message.created_at);
       if (at.day !== day) {
         html.push(divider(esc(dayLabel(at.day))));
         day = at.day;
+        previous = null;
+      }
+      // The rule goes in front of the first message this person had not read
+      // when they arrived, and only when there was something to read: a
+      // channel opened up to date has no rule in it.
+      if (!ruled && state.newAt > 0 && message.id > state.newAt) {
+        html.push('<div class="dv new" id="newRule"><span class="nw">new</span>' +
+          '<span class="at2">read to #' + state.newAt + "</span></div>");
+        ruled = true;
         previous = null;
       }
       if (message.kind === "message") {
@@ -911,12 +1344,28 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
       }
       previous = message;
     }
-    const mine = personOf(identity());
-    if (mine && state.lastId > 0 && mine.read_cursor >= state.lastId) {
+    if (me && state.lastId > 0 && me.read_cursor >= state.lastId) {
       html.push(divider(icon("tk") + "you are caught up", "up"));
     }
     box.innerHTML = html.join("");
     if (follow) box.scrollTop = box.scrollHeight;
+    showJumpNew();
+  }
+
+  /// The pill over the transcript, which is only worth drawing when the rule
+  /// it jumps to is off screen: with the rule in view it would be pointing at
+  /// something the reader is already looking at.
+  function showJumpNew() {
+    const rule = document.getElementById("newRule");
+    if (!rule) { ui.jumpNew.hidden = true; return; }
+    const box = ui.transcript.getBoundingClientRect();
+    const at = rule.getBoundingClientRect();
+    const seen = at.bottom > box.top && at.top < box.bottom;
+    ui.jumpNew.hidden = seen;
+    if (seen) return;
+    const count = state.messages.filter((message) => message.id > state.newAt).length;
+    ui.jumpNew.innerHTML = count + (count === 1 ? " new message" : " new messages") +
+      '<span class="rnd">' + icon("dn") + "</span>";
   }
 
   /// Whether the transcript is scrolled to its end, within a little slack.
@@ -962,7 +1411,7 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   function renderSystem(message, at, here) {
     const body = String(message.body || "");
     const about = message.about || body.split(" ")[0];
-    const glyph = message.kind === "close" ? "lk" : message.kind === "leave" ? "out" : "in";
+    const glyph = message.kind === "close" ? "sk" : message.kind === "leave" ? "out" : "in";
     const who = body.startsWith(about) ? about : "";
     const rest = body.slice(who.length);
     return '<div class="r sy"><div class="g">' + icon(glyph) + '</div><div class="c">' +
@@ -1025,8 +1474,12 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
 
   function renderChannelHead() {
     const closed = state.detail && state.detail.state === "closed";
-    ui.channelName.textContent = state.current || "no channel";
-    ui.channelPurpose.textContent = (state.detail && state.detail.purpose) || "";
+    // The hash is the channel glyph here as well as in the rail, and it is
+    // quieter than the name: it says what this is, the name says which.
+    ui.channelName.innerHTML = state.current
+      ? '<span class="hs">#</span>' + esc(state.current)
+      : "no channel";
+    renderPurpose(closed);
     ui.channelState.hidden = !state.detail;
     if (state.detail) {
       ui.channelState.textContent = state.detail.state;
@@ -1044,6 +1497,75 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
       ui.banner.title = at ? at.title : "";
     }
     ui.compose.hidden = !state.current || closed;
+  }
+
+  /// The purpose, as a control. A channel with none says so in a way that
+  /// invites the line rather than leaving a gap, which is also how a purpose
+  /// gets onto the channels the server minted names for.
+  ///
+  /// A closed channel is not editable: it is the record of a conversation that
+  /// is over, and what it said it was for is part of that record.
+  function renderPurpose(closed) {
+    if (state.editingPurpose) return;
+    const purpose = (state.detail && state.detail.purpose) || "";
+    ui.purposeRow.hidden = !state.current;
+    ui.purposeEdit.hidden = true;
+    ui.channelPurpose.textContent = purpose || (closed ? "" : "say what this channel is for");
+    ui.channelPurpose.classList.toggle("none", !purpose && !closed);
+    ui.channelPurpose.disabled = !!closed;
+    ui.channelPurpose.title = closed
+      ? "A closed channel keeps the purpose it had"
+      : purpose ? "Edit the purpose" : "Say what this channel is for";
+    el("purposeEditBtn").hidden = !!closed;
+  }
+
+  function startPurposeEdit() {
+    if (!state.current || (state.detail && state.detail.state === "closed")) return;
+    state.editingPurpose = true;
+    ui.purposeRow.hidden = true;
+    ui.purposeEdit.hidden = false;
+    ui.purposeInput.value = (state.detail && state.detail.purpose) || "";
+    countPurpose();
+    ui.purposeInput.focus();
+    ui.purposeInput.select();
+  }
+
+  function stopPurposeEdit() {
+    state.editingPurpose = false;
+    renderPurpose(state.detail && state.detail.state === "closed");
+  }
+
+  function countPurpose() {
+    const length = [...ui.purposeInput.value].length;
+    ui.purposeCount.textContent = length + "/" + MAX_PURPOSE;
+    ui.purposeCount.classList.toggle("over", length > MAX_PURPOSE);
+  }
+
+  /// Saves the line, as this person. A purpose that has not changed is not
+  /// sent at all, so pressing enter over an untouched line is free.
+  async function savePurpose() {
+    const purpose = ui.purposeInput.value.trim();
+    const before = (state.detail && state.detail.purpose) || "";
+    if (purpose === before) { stopPurposeEdit(); return; }
+    if ([...purpose].length > MAX_PURPOSE) return;
+    const channel = state.current;
+    try {
+      if (!(await ensureName())) return;
+      const updated = await api("/channels/" + enc(channel), {
+        method: "PATCH",
+        body: JSON.stringify({ by: identity(), purpose: purpose || null })
+      });
+      if (state.current !== channel) return;
+      state.detail = updated;
+      // The listing carries the purpose too, and the rail is showing the old
+      // one until something says otherwise.
+      const listed = state.channels.find((each) => each.name === channel);
+      if (listed) listed.purpose = updated.purpose;
+      stopPurposeEdit();
+      renderChannels();
+    } catch (failure) {
+      ui.status.textContent = failure.message;
+    }
   }
 
   // ---- the two screens a phone has ----------------------------------------
@@ -1068,6 +1590,10 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
 
   function openChannel(name, push) {
     const generation = nextGeneration();
+    closeOver();
+    state.editingPurpose = false;
+    state.newAt = null;
+    ui.jumpNew.hidden = true;
     state.current = name;
     state.detail = null;
     state.messages = [];
@@ -1275,18 +1801,23 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     }
   }
 
-  async function closeCurrent() {
-    if (!state.current) return;
+  /// Closes a channel, which is now reachable from the row menu as well as
+  /// from the head of the one being read — so closing something no longer
+  /// means opening it first.
+  async function closeChannel(name) {
+    if (!name) return;
     if (!(await ensureName())) return;
-    if (!confirm("Close " + state.current + "? It takes no more messages afterwards, and every wait on it ends.")) return;
+    if (!confirm("Close #" + name + "? It takes no more messages afterwards, and every wait on it ends.")) return;
     try {
-      await api("/channels/" + enc(state.current) + "/close", {
+      await api("/channels/" + enc(name) + "/close", {
         method: "POST",
         body: JSON.stringify({ by: identity() })
       });
       showSheet(false);
       await loadChannels();
-      resume();
+      // Only the channel being read has a follower to restart; closing one
+      // from its row leaves the transcript on screen where it was.
+      if (name === state.current) resume();
     } catch (failure) {
       ui.status.textContent = failure.message;
     }
@@ -1322,8 +1853,61 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); send(); }
   });
   ui.who.onclick = askName;
-  ui.closeChannel.onclick = closeCurrent;
-  ui.closeChannel2.onclick = closeCurrent;
+  ui.closeChannel.onclick = () => closeChannel(state.current);
+  ui.closeChannel2.onclick = () => closeChannel(state.current);
+
+  // the purpose, edited in place
+  ui.channelPurpose.onclick = startPurposeEdit;
+  el("purposeEditBtn").onclick = startPurposeEdit;
+  ui.purposeInput.addEventListener("input", countPurpose);
+  ui.purposeInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); savePurpose(); }
+    if (event.key === "Escape") { event.preventDefault(); stopPurposeEdit(); }
+  });
+  // Leaving the line alone is cancelling it, not saving it: a purpose is a
+  // deliberate edit, and clicking away is how somebody changes their mind.
+  ui.purposeInput.addEventListener("blur", () => { if (state.editingPurpose) stopPurposeEdit(); });
+
+  // jumping to a channel
+  el("jump").onclick = openPalette;
+  ui.veil.onclick = closeOver;
+  ui.paletteInput.addEventListener("input", () => { paletteAt = 0; renderPalette(0); });
+  ui.paletteInput.addEventListener("keydown", (event) => {
+    const matches = paletteMatches();
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!matches.length) return;
+      paletteAt = (paletteAt + (event.key === "ArrowDown" ? 1 : matches.length - 1)) % matches.length;
+      renderPalette(paletteAt);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const chosen = matches[Math.min(paletteAt, matches.length - 1)];
+      if (chosen) { closeOver(); openChannel(chosen.channel.name, true); }
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeOver();
+    }
+  });
+
+  // One key opens the palette and one key puts away whatever is over the
+  // page. Neither fires while something is being typed into, so ⌘K in the
+  // compose box is still whatever the browser does with it.
+  document.addEventListener("keydown", (event) => {
+    const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement && document.activeElement.tagName);
+    if ((event.metaKey || event.ctrlKey) && (event.key === "k" || event.key === "K")) {
+      event.preventDefault();
+      openPalette();
+      return;
+    }
+    if (event.key === "Escape" && (state.menu || state.palette)) { closeOver(); return; }
+    if (event.key === "/" && !typing && !state.palette) { event.preventDefault(); openPalette(); }
+  });
+
+  // the pill over the transcript, and the rule it points at
+  ui.jumpNew.onclick = () => {
+    const rule = document.getElementById("newRule");
+    if (rule) rule.scrollIntoView({ block: "center", behavior: "smooth" });
+  };
   el("newChannel").onclick = createChannel;
   el("toChannels").onclick = () => showChannels(true);
   // The avatar row opens the sheet on a phone and unfolds the panel on a desk;
@@ -1345,6 +1929,7 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   // The other half of the read rule: scrolling back stops the reading while
   // they are back there, and returning to the end starts it again.
   ui.transcript.addEventListener("scroll", scheduleRead, { passive: true });
+  ui.transcript.addEventListener("scroll", showJumpNew, { passive: true });
 
   window.addEventListener("popstate", () => {
     const name = channelFromPath();
@@ -1374,6 +1959,7 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   }, CHANNELS_EVERY);
 
   try { state.name = localStorage.getItem(NAME_KEY); } catch (ignored) { state.name = null; }
+  loadPins();
   try { collapse(localStorage.getItem(PANEL_KEY) === "1"); } catch (ignored) { /* private window */ }
   showWho();
   loadChannels();
