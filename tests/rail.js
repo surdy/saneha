@@ -1,8 +1,8 @@
 "use strict";
 
-// The rail, the palette and the purpose line, driven by Node over a DOM small
-// enough to fit in this file. Run by `tests/viewer.rs`, with the page as its
-// one argument.
+// The rail, the palette, the purpose line and the settings this browser keeps,
+// driven by Node over a DOM small enough to fit in this file. Run by
+// `tests/viewer.rs`, with the page as its one argument.
 //
 // What it holds the page to is what the redesign decided and what a browser
 // would otherwise be the only witness of: a hash in front of every channel
@@ -22,7 +22,10 @@ const vm = require("vm");
 const ME = "surdy@web";
 
 const page = fs.readFileSync(process.argv[2], "utf8");
-const script = page.slice(page.indexOf("<script>") + "<script>".length, page.lastIndexOf("</script>"));
+// The page's own script is the last one in it: there is a small script in the
+// head too, which paints the theme before the stylesheet is read.
+const open = page.lastIndexOf("<script>");
+const script = page.slice(open + "<script>".length, page.indexOf("</script>", open));
 
 /// The channels this world serves, with the unread the page draws a badge
 /// from: `newest_id` less `read_cursor`, as `GET /channels?as=` carries them.
@@ -63,10 +66,12 @@ function element(id) {
     fire(type, event) {
       for (const fn of node.listeners[type] || []) fn(event);
     },
-    querySelectorAll: () => [],
+    querySelectorAll: (selector) => (node.groups && node.groups[selector]) || [],
     querySelector: () => null,
     getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }),
     scrollIntoView() {},
+    attributes: {},
+    setAttribute(name, value) { node.attributes[name] = value; },
     append() {},
     remove() {},
     showModal() {},
@@ -92,6 +97,8 @@ function world(options) {
     listeners: {},
     activeElement: null,
     getElementById: byId,
+    // What the theme is stamped on, before the stylesheet is read.
+    documentElement: { dataset: {}, style: {} },
     querySelector: () => null,
     createElement: () => element("made"),
     body: { append() {} },
@@ -136,15 +143,47 @@ function world(options) {
   }
 
   const kept = { "saneha.name": "surdy", "saneha.pins": JSON.stringify(options.pins || []) };
+  if (options.theme) kept["saneha.theme"] = options.theme;
+
+  // The settings sheet asks the dialog for its segments by attribute, so the
+  // dialog is the one element here that answers a querySelectorAll.
+  const segment = (attribute, value) => {
+    const node = element(attribute + ":" + value);
+    node.dataset[attribute === "data-theme-pick" ? "themePick" : "rowsPick"] = value;
+    node.setAttribute = (name, on) => { node.pressed = on; };
+    return node;
+  };
+  byId("settingsDialog").groups = {
+    "[data-theme-pick]": ["system", "light", "dark"].map((v) => segment("data-theme-pick", v)),
+    "[data-rows-pick]": ["purpose", "name"].map((v) => segment("data-rows-pick", v))
+  };
+
+  // What the machine is asking for, and somebody able to change its mind.
+  const watchers = [];
+  const media = {
+    matches: false,
+    addEventListener: (type, fn) => watchers.push(fn)
+  };
   const sandbox = {
     document,
-    window: { addEventListener() {} },
+    window: { addEventListener() {}, matchMedia: () => media },
     location: { pathname: options.at ? "/c/" + options.at : "/", reload() {} },
     history: { pushState() {} },
     localStorage: {
-      getItem: (key) => (key in kept ? kept[key] : null),
-      setItem: (key, value) => { kept[key] = value; }
+      getItem: (key) => {
+        if (options.refuseStorage) throw new Error("storage is not available here");
+        return key in kept ? kept[key] : null;
+      },
+      setItem: (key, value) => {
+        if (options.refuseStorage) throw new Error("storage is not available here");
+        kept[key] = value;
+      },
+      removeItem: (key) => {
+        if (options.refuseStorage) throw new Error("storage is not available here");
+        delete kept[key];
+      }
     },
+    matchMedia: () => media,
     fetch,
     AbortController,
     confirm: () => true,
@@ -165,6 +204,20 @@ function world(options) {
     requests,
     el: byId,
     rail: () => byId("channelList").innerHTML,
+    /// One segment of one settings control, clicked.
+    pick(which, value) {
+      const key = which === "theme" ? "[data-theme-pick]" : "[data-rows-pick]";
+      const found = byId("settingsDialog").groups[key]
+        .find((node) => node.dataset[which === "theme" ? "themePick" : "rowsPick"] === value);
+      assert.ok(found, "there is a " + value + " segment");
+      found.onclick();
+    },
+    /// The machine changing its mind about the theme, which is what an
+    /// evening is.
+    systemGoesDark() {
+      media.matches = true;
+      for (const fn of watchers) fn();
+    },
     async settle() {
       for (let turn = 0; turn < 20; turn += 1) {
         await new Promise((done) => setTimeout(done, 0));
@@ -388,7 +441,88 @@ function groups(html) {
     );
   }
 
-  console.log("the rail, the palette and the purpose line hold");
+  // ---- the settings this browser keeps ----------------------------------
+
+  // The theme follows the machine unless it was told otherwise, and "system"
+  // is the absence of a preference rather than a third value to store.
+  {
+    const it = await run({});
+    assert.strictEqual(it.el("settingsDialog").dataset.opened, undefined);
+    assert.strictEqual(
+      it.sandbox.document.documentElement.dataset.theme,
+      "light",
+      "this DOM says the machine is not dark, so the page is light"
+    );
+
+    it.pick("theme", "dark");
+    assert.strictEqual(it.sandbox.document.documentElement.dataset.theme, "dark");
+    assert.strictEqual(it.sandbox.document.documentElement.style.colorScheme, "dark",
+      "the browser's own furniture is told as well as the page");
+    assert.strictEqual(it.kept["saneha.theme"], "dark");
+
+    it.pick("theme", "system");
+    assert.strictEqual(
+      "saneha.theme" in it.kept,
+      false,
+      "back on the machine's answer, nothing is kept: system is the default"
+    );
+    assert.strictEqual(it.sandbox.document.documentElement.dataset.theme, "light");
+  }
+
+  // A theme that was kept is in force before anything is clicked.
+  {
+    const it = await run({ theme: "dark" });
+    assert.strictEqual(it.sandbox.document.documentElement.dataset.theme, "dark");
+  }
+
+  // "system" follows the machine while the page is open, without a reload.
+  {
+    const it = await run({});
+    it.systemGoesDark();
+    assert.strictEqual(
+      it.sandbox.document.documentElement.dataset.theme,
+      "dark",
+      "the sun going down turns the page over too"
+    );
+
+    it.pick("theme", "light");
+    it.systemGoesDark();
+    assert.strictEqual(
+      it.sandbox.document.documentElement.dataset.theme,
+      "light",
+      "but not once this browser has been told which one it wants"
+    );
+  }
+
+  // The rail rows lever, which is the one setting that changes the rail.
+  {
+    const it = await run({});
+    assert.ok(it.rail().includes("cross-laptop wake test"), "the purpose is under the name");
+    it.pick("rows", "name");
+    assert.strictEqual(it.sandbox.document.documentElement.dataset.rows, "name");
+    assert.strictEqual(it.kept["saneha.rows"], "name");
+    it.pick("rows", "purpose");
+    assert.strictEqual(
+      it.sandbox.document.documentElement.dataset.rows,
+      undefined,
+      "and back off again, keeping nothing"
+    );
+  }
+
+  // Storage that refuses everything leaves the page working on its defaults.
+  {
+    const it = await run({ refuseStorage: true });
+    assert.strictEqual(it.sandbox.document.documentElement.dataset.theme, "light");
+    assert.deepStrictEqual(groups(it.rail()), ["Closed"], "nothing pinned, nothing broken");
+    it.pick("theme", "dark");
+    assert.strictEqual(
+      it.sandbox.document.documentElement.dataset.theme,
+      "dark",
+      "a private window still gets the theme it asks for, just not kept"
+    );
+  }
+
+  console.log("the rail, the palette, the purpose line and the settings hold");
 })().catch((failure) => {
   console.error(failure);
   process.exit(1);

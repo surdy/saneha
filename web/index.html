@@ -8,6 +8,29 @@
      here is a fetch to anywhere. The server is on a LAN and a tailnet and may
      have no route out at all. -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%232c50cc%22%2F%3E%3Cpath%20d%3D%22M7%208.5h18a2%202%200%200%201%202%202v9a2%202%200%200%201-2%202h-9l-6.5%205v-5H7a2%202%200%200%201-2-2v-9a2%202%200%200%201%202-2z%22%20fill%3D%22%23ffffff%22%2F%3E%3C%2Fsvg%3E">
+<script>
+// Before the first paint, and before the stylesheet is even read: the theme
+// this browser was told to use, or what the machine says when it was told
+// "system". Anything later than this is a flash of the wrong palette on every
+// load, which is the one thing a theme setting must not introduce.
+//
+// It is deliberately tiny and standalone — no page state, nothing to wait
+// for — and everything else about the theme is in the script at the bottom.
+(function () {
+  var kept = null;
+  try { kept = localStorage.getItem("saneha.theme"); } catch (e) { /* private window */ }
+  var dark = kept === "dark" || (kept !== "light" &&
+    window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  var root = document.documentElement;
+  root.dataset.theme = dark ? "dark" : "light";
+  // So the browser's own furniture — scrollbars, form controls, the canvas
+  // behind the page — is the same theme as the page.
+  root.style.colorScheme = dark ? "dark" : "light";
+  try {
+    if (localStorage.getItem("saneha.rows") === "name") root.dataset.rows = "name";
+  } catch (e) { /* private window */ }
+})();
+</script>
 <style>
 :root {
   --bg: #e9ecf1; --panel: #ffffff; --panel2: #f4f6f9; --panel3: #eceff4;
@@ -43,34 +66,38 @@
 .h5 { --hb: #2c6b3a; --hi: #fff }
 .h6 { --hb: #4b3fa8; --hi: #fff }
 .h7 { --hb: #8f3572; --hi: #fff }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0e1116; --panel: #171b21; --panel2: #1d222a; --panel3: #232932;
-    --fg: #e8ebf0; --fg2: #c3cad4; --muted: #98a2b0;
-    --line: #262d36; --line2: #39424e;
-    --accent: #8ea6ff; --ink: #b5c5ff; --soft: #1c2540; --aline: #33437a; --on: #0d1220;
-    --code: #10141a; --cline: #262d36; --danger: #f19a9a;
-    --s1: 0 1px 2px rgba(0,0,0,.5);
-    --s2: 0 1px 2px rgba(0,0,0,.5), 0 10px 24px -10px rgba(0,0,0,.75);
-    --ring: 0 0 0 3px rgba(142,166,255,.22);
-    /* In the dark the rail goes UNDER the transcript rather than over it: the
-       sidebar is the darkest surface on the page, not a lighter one, so the
-       same separation reads the same way round. */
-    --rail: #090c11; --rail2: #151a22; --rail-fg: #dfe4ec; --rail-muted: #99a3b3;
-    --rail-head: #7a8494; --rail-line: #1a2029;
-    --rail-sel: #2b3c7d; --rail-sel-fg: #dee6ff; --rail-sel-sub: #9db0ec;
-    --rail-badge: #5f7cf0; --rail-badge-fg: #0b1020;
-    --rail-btn: #171d26; --rail-btn-line: #262e3a;
+/* The dark palette hangs off an attribute rather than a media query, because
+   the page has to be able to say "dark" when the machine says light. The
+   attribute is stamped on <html> before anything paints — by the script in
+   the head, from what was kept in this browser or, for "system", from what
+   the machine says — so there is one dark palette here and not two. */
+[data-theme="dark"] {
+  --bg: #0e1116; --panel: #171b21; --panel2: #1d222a; --panel3: #232932;
+  --fg: #e8ebf0; --fg2: #c3cad4; --muted: #98a2b0;
+  --line: #262d36; --line2: #39424e;
+  --accent: #8ea6ff; --ink: #b5c5ff; --soft: #1c2540; --aline: #33437a; --on: #0d1220;
+  --code: #10141a; --cline: #262d36; --danger: #f19a9a;
+  --s1: 0 1px 2px rgba(0,0,0,.5);
+  --s2: 0 1px 2px rgba(0,0,0,.5), 0 10px 24px -10px rgba(0,0,0,.75);
+  --ring: 0 0 0 3px rgba(142,166,255,.22);
+  /* In the dark the rail goes UNDER the transcript rather than over it: the
+     sidebar is the darkest surface on the page, not a lighter one, so the
+     same separation reads the same way round. */
+  --rail: #090c11; --rail2: #151a22; --rail-fg: #dfe4ec; --rail-muted: #99a3b3;
+  --rail-head: #7a8494; --rail-line: #1a2029;
+  --rail-sel: #2b3c7d; --rail-sel-fg: #dee6ff; --rail-sel-sub: #9db0ec;
+  --rail-badge: #5f7cf0; --rail-badge-fg: #0b1020;
+  --rail-btn: #171d26; --rail-btn-line: #262e3a;
   }
-  .h0 { --hb: #79cec4; --hi: #082a27 }
-  .h1 { --hb: #b9a2ea; --hi: #211a33 }
-  .h2 { --hb: #e0a377; --hi: #2c1a0c }
-  .h3 { --hb: #93bdf0; --hi: #0c1e38 }
-  .h4 { --hb: #eda3ad; --hi: #33101a }
-  .h5 { --hb: #8fd0a0; --hi: #0b2413 }
-  .h6 { --hb: #aeaaf0; --hi: #191534 }
-  .h7 { --hb: #e2a4cd; --hi: #33112a }
-}
+[data-theme="dark"] .h0 { --hb: #79cec4; --hi: #082a27 }
+[data-theme="dark"] .h1 { --hb: #b9a2ea; --hi: #211a33 }
+[data-theme="dark"] .h2 { --hb: #e0a377; --hi: #2c1a0c }
+[data-theme="dark"] .h3 { --hb: #93bdf0; --hi: #0c1e38 }
+[data-theme="dark"] .h4 { --hb: #eda3ad; --hi: #33101a }
+[data-theme="dark"] .h5 { --hb: #8fd0a0; --hi: #0b2413 }
+[data-theme="dark"] .h6 { --hb: #aeaaf0; --hi: #191534 }
+[data-theme="dark"] .h7 { --hb: #e2a4cd; --hi: #33112a }
+
 * { box-sizing: border-box }
 html, body { height: 100% }
 body {
@@ -130,7 +157,8 @@ button, input, textarea { font: inherit; color: inherit }
 .who { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 6px 0 10px; border: 1px solid var(--rail-btn-line); border-radius: 9px; background: var(--rail-btn) }
 .who .wl { font-family: var(--ui); font-size: 11.5px; color: var(--rail-muted) }
 #whoId { font-family: var(--mono); font-size: 12.5px }
-#who { height: 26px; padding: 0 9px; font-size: 11.5px; background: none; border-color: var(--rail-btn-line); color: var(--rail-muted) }
+#who { height: 28px; padding: 0 9px; font-size: 11.5px; background: none; border-color: var(--rail-btn-line); color: var(--rail-muted) }
+#who.ic { width: 28px; padding: 0 }
 #who:hover { color: var(--rail-fg); border-color: var(--rail-muted) }
 /* jump to a channel: the whole channel list is already in hand, so this is a
    filter over it rather than a search anybody has to answer */
@@ -170,6 +198,9 @@ button, input, textarea { font: inherit; color: inherit }
 .ch.on .hs { color: var(--rail-sel-sub) }
 .ch.cl { opacity: .62 }
 .ch.cl .i { color: var(--rail-muted) }
+/* "name only" in the settings: the rail is the names and nothing else, which
+   is about twice as many channels on a screen. */
+[data-rows="name"] .ch .cp { display: none }
 .ch .cp { display: block; font-size: 11px; color: var(--rail-head); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px }
 .ch.on .cp { color: var(--rail-sel-sub) }
 .bdg {
@@ -381,6 +412,17 @@ dialog h2 { margin: 0 0 10px; font-family: var(--ui); font-size: 15px }
 dialog label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px }
 dialog input { width: 100%; background: var(--panel2); border: 1px solid var(--line2); border-radius: 8px; padding: 7px 9px }
 dialog .drow { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px }
+/* a choice of two or three, all of them on screen: there is no room in any of
+   these for an option to hide behind a closed menu */
+.seg { display: flex; gap: 4px; padding: 3px; border: 1px solid var(--line2); border-radius: 9px; background: var(--panel2) }
+.sg {
+  flex: 1; height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: none;
+  color: var(--fg2); font-family: var(--ui); font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.sg:hover { color: var(--fg) }
+.sg[aria-pressed="true"] { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: var(--s1) }
+.setrow { display: flex; align-items: center; gap: 8px; min-height: 34px }
+#settingsId { font-size: 12.5px }
 dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
 .pri { border-color: var(--accent); background: var(--accent); color: var(--on); font-weight: 600 }
 .pri:hover { color: var(--on) }
@@ -495,6 +537,7 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   <symbol id="cp" viewBox="0 0 16 16"><rect x="5.4" y="5.4" width="8.2" height="8.2" rx="1.6"></rect><path d="M10.6 5.4V3.8a1.4 1.4 0 0 0-1.4-1.4H3.8a1.4 1.4 0 0 0-1.4 1.4v5.4a1.4 1.4 0 0 0 1.4 1.4h1.6"></path></symbol>
   <symbol id="sr" viewBox="0 0 16 16"><circle cx="7.2" cy="7.2" r="4.4"></circle><path d="M10.6 10.6l2.9 2.9"></path></symbol>
   <symbol id="dn" viewBox="0 0 16 16"><path d="M8 3.4v9M4.4 8.8L8 12.4l3.6-3.6"></path></symbol>
+  <symbol id="gr" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"></circle><path d="M8 1.6l1 1.7a5.6 5.6 0 0 1 1.5.6l1.9-.4.9 1.6-1.3 1.4a5.6 5.6 0 0 1 0 1.6l1.3 1.4-.9 1.6-1.9-.4a5.6 5.6 0 0 1-1.5.6l-1 1.7H7l-1-1.7a5.6 5.6 0 0 1-1.5-.6l-1.9.4-.9-1.6 1.3-1.4a5.6 5.6 0 0 1 0-1.6L1.7 5.1l.9-1.6 1.9.4A5.6 5.6 0 0 1 6 3.3l1-1.7z"></path></symbol>
   <symbol id="ck" viewBox="0 0 16 16"><path d="M8 4.4v3.8l2.6 1.6"></path><circle cx="8" cy="8" r="5.6"></circle></symbol>
   <symbol id="in" viewBox="0 0 16 16"><path d="M6.4 2.8H3.2v10.4h3.2M9.2 5.6L11.6 8 9.2 10.4M11.6 8H6"></path></symbol>
   <symbol id="out" viewBox="0 0 16 16"><path d="M9.6 2.8h3.2v10.4H9.6M6.8 5.6L4.4 8l2.4 2.4M4.4 8H10"></path></symbol>
@@ -525,7 +568,7 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
       <span class="wl">posting as</span>
       <span id="whoAv"></span>
       <span id="whoId"></span>
-      <button id="who" class="btn" type="button" title="Change the name you post under"></button>
+      <button id="who" class="btn" type="button" aria-label="Settings" title="Settings"></button>
     </div>
   </div>
 
@@ -598,6 +641,36 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   <div id="paletteFoot"><span>↑↓ move</span><span>↵ open</span><span>esc close</span></div>
 </div>
 
+<dialog id="settingsDialog">
+  <form method="dialog">
+    <h2>Settings</h2>
+
+    <label id="themeLabel">Theme</label>
+    <div class="seg" role="group" aria-labelledby="themeLabel">
+      <button type="button" class="sg" data-theme-pick="system">System</button>
+      <button type="button" class="sg" data-theme-pick="light">Light</button>
+      <button type="button" class="sg" data-theme-pick="dark">Dark</button>
+    </div>
+
+    <label id="rowsLabel">Channel rows</label>
+    <div class="seg" role="group" aria-labelledby="rowsLabel">
+      <button type="button" class="sg" data-rows-pick="purpose">With purpose</button>
+      <button type="button" class="sg" data-rows-pick="name">Name only</button>
+    </div>
+
+    <label id="nameLabel">The name you post under</label>
+    <div class="setrow" aria-labelledby="nameLabel">
+      <span id="settingsAv"></span>
+      <span id="settingsId" class="mono"></span>
+      <span class="sp"></span>
+      <button id="settingsName" class="btn" type="button"></button>
+    </div>
+
+    <p>Kept in this browser, and nowhere else: the server is told none of it, and another machine has its own.</p>
+    <div class="drow"><button class="btn pri" value="ok">done</button></div>
+  </form>
+</dialog>
+
 <dialog id="nameDialog">
   <form method="dialog">
     <h2>Post as</h2>
@@ -635,6 +708,12 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   // one window is arranged, it is nobody else's business, and keeping it here
   // is the whole feature with nothing asked of the server.
   const PINS_KEY = "saneha.pins";
+  // The two the settings sheet keeps. `saneha.theme` is read twice — once by
+  // the script in the head, before anything paints, and once here — so the
+  // spelling of its values is the one contract between them: "system", which
+  // is the default and is not stored, "light", or "dark".
+  const THEME_KEY = "saneha.theme";
+  const ROWS_KEY = "saneha.rows";
   const DEFAULT_NAME = "surdy";
   const PAGE = 500;            // how much history one fetch asks for
   const HOLD = 55;             // seconds the server may hold a poll open
@@ -667,7 +746,9 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     purposeRow: el("purposeRow"), purposeEdit: el("purposeEdit"),
     purposeInput: el("purposeInput"), purposeCount: el("purposeCount"),
     jumpNew: el("jumpNew"), veil: el("veil"), palette: el("palette"),
-    paletteInput: el("paletteInput"), paletteList: el("paletteList")
+    paletteInput: el("paletteInput"), paletteList: el("paletteList"),
+    settingsDialog: el("settingsDialog"), settingsAv: el("settingsAv"),
+    settingsId: el("settingsId"), settingsName: el("settingsName")
   };
 
   /// The longest a purpose may be, as the store holds it.
@@ -691,6 +772,10 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     collapsed: false,    // the participants panel, folded to its avatars
     // The channels pinned to the top of the rail, in their kept order.
     pins: [],
+    // The settings this browser keeps: "system", "light" or "dark", and
+    // whether a rail row carries the channel's purpose under its name.
+    theme: "system",
+    rows: "purpose",
     // Where the reading had got to when this channel was opened, so the "new"
     // rule stays put while it is read rather than walking down the transcript
     // as the cursor advances under it. `null` until the first draw that has
@@ -715,6 +800,13 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     // ignored: that is what makes a hidden tab really hold nothing open.
     abort: null
   };
+
+  /// What the machine is asking for. Watched rather than read once: somebody
+  /// whose theme follows their machine should see the page turn over with
+  /// everything else when the sun goes down, without reloading it.
+  const systemDark = window.matchMedia
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : { matches: false, addEventListener() {} };
 
   const enc = encodeURIComponent;
   const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -828,10 +920,77 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     const me = identity();
     ui.whoId.textContent = me || "no name yet";
     ui.whoAv.innerHTML = me ? avatar(me, "md") : "";
-    ui.who.innerHTML = icon("pn") + '<span class="sl">' + (me ? "change" : "set a name") + "</span>";
+    // With a name, this is the gear and nothing else — the name is one of the
+    // settings behind it. Without one, it stays the call to action it was:
+    // somebody who has not named themselves needs telling, not a gear.
+    ui.who.innerHTML = me
+      ? icon("gr", "b")
+      : icon("pn") + '<span class="sl">set a name</span>';
+    ui.who.classList.toggle("ic", !!me);
+    ui.who.title = me ? "Settings" : "Set the name you post under";
+    ui.who.setAttribute("aria-label", me ? "Settings" : "Set the name you post under");
     ui.composeHint.innerHTML = me
       ? 'Ctrl or Cmd with Enter sends · you post as <span class="mono">' + esc(me) + "</span>"
       : "Ctrl or Cmd with Enter sends";
+  }
+
+  // ---- what this browser keeps ---------------------------------------------
+
+  /// Reading and writing one kept preference. Storage can be refused outright
+  /// — a private window throws on the way in as well as on the way out — so
+  /// every one of these falls back to the default rather than to an error.
+  function kept(key, fallback) {
+    try { return localStorage.getItem(key) || fallback; } catch (ignored) { return fallback; }
+  }
+
+  function keep(key, value, fallback) {
+    try {
+      if (value === fallback) localStorage.removeItem(key);
+      else localStorage.setItem(key, value);
+    } catch (ignored) { /* private window */ }
+  }
+
+  /// The theme applied. "system" is not a third palette: it is whichever of
+  /// the two the machine is asking for, so it resolves here to the same
+  /// attribute the head script stamped and the stylesheet reads.
+  function applyTheme() {
+    const dark = state.theme === "dark" || (state.theme === "system" && systemDark.matches);
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    document.documentElement.style.colorScheme = dark ? "dark" : "light";
+  }
+
+  function setTheme(theme) {
+    state.theme = theme;
+    keep(THEME_KEY, theme, "system");
+    applyTheme();
+    drawSettings();
+  }
+
+  function setRows(rows) {
+    state.rows = rows;
+    keep(ROWS_KEY, rows, "purpose");
+    if (rows === "name") document.documentElement.dataset.rows = "name";
+    else delete document.documentElement.dataset.rows;
+    drawSettings();
+  }
+
+  /// Which segment of each control is the one in force, and who is posting.
+  function drawSettings() {
+    for (const button of ui.settingsDialog.querySelectorAll("[data-theme-pick]")) {
+      button.setAttribute("aria-pressed", button.dataset.themePick === state.theme);
+    }
+    for (const button of ui.settingsDialog.querySelectorAll("[data-rows-pick]")) {
+      button.setAttribute("aria-pressed", button.dataset.rowsPick === state.rows);
+    }
+    const me = identity();
+    ui.settingsId.textContent = me || "no name yet";
+    ui.settingsAv.innerHTML = me ? avatar(me, "md") : "";
+    ui.settingsName.innerHTML = icon("pn") + (me ? "change" : "set a name");
+  }
+
+  function openSettings() {
+    drawSettings();
+    ui.settingsDialog.showModal();
   }
 
   function askName() {
@@ -1852,7 +2011,15 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   ui.body.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); send(); }
   });
-  ui.who.onclick = askName;
+  ui.who.onclick = () => (state.name ? openSettings() : askName());
+  ui.settingsName.onclick = () => { ui.settingsDialog.close(); askName(); };
+  for (const button of ui.settingsDialog.querySelectorAll("[data-theme-pick]")) {
+    button.onclick = () => setTheme(button.dataset.themePick);
+  }
+  for (const button of ui.settingsDialog.querySelectorAll("[data-rows-pick]")) {
+    button.onclick = () => setRows(button.dataset.rowsPick);
+  }
+  systemDark.addEventListener("change", () => { if (state.theme === "system") applyTheme(); });
   ui.closeChannel.onclick = () => closeChannel(state.current);
   ui.closeChannel2.onclick = () => closeChannel(state.current);
 
@@ -1960,6 +2127,14 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
 
   try { state.name = localStorage.getItem(NAME_KEY); } catch (ignored) { state.name = null; }
   loadPins();
+  // The head script stamped both of these before the first paint. Reading them
+  // again here is what puts them in the page's own hands, and `applyTheme` is
+  // what makes "system" follow the machine from now on rather than only at
+  // the moment the page loaded.
+  state.theme = kept(THEME_KEY, "system");
+  state.rows = kept(ROWS_KEY, "purpose");
+  applyTheme();
+  setRows(state.rows);
   try { collapse(localStorage.getItem(PANEL_KEY) === "1"); } catch (ignored) { /* private window */ }
   showWho();
   loadChannels();

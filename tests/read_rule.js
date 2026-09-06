@@ -25,7 +25,10 @@ const ME = "surdy@web";
 const SETTLE = 2000; // what the page waits before it counts a message as read
 
 const page = fs.readFileSync(process.argv[2], "utf8");
-const script = page.slice(page.indexOf("<script>") + "<script>".length, page.lastIndexOf("</script>"));
+// The page's own script is the last one in it: there is a small script in the
+// head too, which paints the theme before the stylesheet is read.
+const opens = page.lastIndexOf("<script>");
+const script = page.slice(opens + "<script>".length, page.indexOf("</script>", opens));
 
 /// One element: everything the page sets on one, and nothing else. The
 /// transcript's three scroll numbers are what "scrolled to the end" is decided
@@ -55,6 +58,8 @@ function element(id) {
     // rule it drew is on screen, and a box of zeros is an answer it handles.
     getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }),
     scrollIntoView() {},
+    attributes: {},
+    setAttribute(name, value) { node.attributes[name] = value; },
     append() {},
     remove() {},
     showModal() {},
@@ -127,6 +132,8 @@ function world(options) {
     listeners: {},
     activeElement: null,
     getElementById: byId,
+    // What the theme is stamped on, before the stylesheet is read.
+    documentElement: { dataset: {}, style: {} },
     // The page looks for a menu it might have left open and builds one when a
     // row asks for it; neither happens under this rule, so both are answered
     // with the least that will do.
@@ -213,7 +220,8 @@ function world(options) {
       // Keyed, because the page keeps more than the name here now and a name
       // handed back for every key is not a shape any of them would be in.
       getItem: (key) => (key === "saneha.name" && options.name !== null ? "surdy" : null),
-      setItem() {}
+      setItem() {},
+      removeItem() {}
     },
     CSS: { escape: (text) => text },
     navigator: {},
