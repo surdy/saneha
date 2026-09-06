@@ -209,11 +209,11 @@ fn the_page_reads_for_the_person_only_under_the_rule() {
 
 /// The rail is what the page opens on and the part a browser was the only
 /// witness of: the hash in front of a name, the pinned group, unread as
-/// weight, the struck hash on a closed channel, the palette, and the purpose
-/// edited in place.
+/// weight, the struck hash on a closed channel, the palette, the purpose
+/// edited in place, and the settings this browser keeps.
 #[test]
-fn the_rail_and_the_purpose_line_are_drawn_as_decided() {
-    drive("rail.js", "the rail and the purpose line");
+fn the_rail_and_the_settings_are_drawn_as_decided() {
+    drive("rail.js", "the rail and the settings");
 }
 
 /// The page is the whole viewer and is carried in the binary, so its size is
@@ -224,20 +224,26 @@ fn the_rail_and_the_purpose_line_are_drawn_as_decided() {
 /// needs — monograms, day dividers, grouped messages, read-cursor clusters,
 /// the caught-up counts, and the two screens and one sheet a phone has.
 ///
-/// It is 104 KB from here, and the 32 KB is four things that each needed room:
+/// It is 112 KB from here. The 32 KB after 72 is four things that each needed
+/// room:
 /// the rail, which is its own surface with its own palette in both themes so
 /// the channels are never the colour of the transcript (12 KB of stylesheet,
 /// up from 17 to 29); pinning, which is a group, a row menu and a key in this
 /// browser's storage; the palette behind ⌘K, which filters the channel list
 /// the page is already holding; and the purpose, which is now edited in place
-/// against `PATCH /channels/{name}`. What is left is a few KB of room for the
-/// next thing the page has to say, and the whole viewer is still one response
-/// a phone on a tailnet has at once, over a link that may have no route out.
-/// It is raised by the change that needs the room and not by the change that
-/// runs out of it.
+/// against `PATCH /channels/{name}`. The eight after that are the settings
+/// sheet: a theme this browser can hold against the machine's, which cost the
+/// dark palette nothing because it moved from a media query onto an attribute
+/// rather than being written twice, and the lever that takes the purpose line
+/// out of the rail rows.
+///
+/// What is left is a few KB of room for the next thing the page has to say,
+/// and the whole viewer is still one response a phone on a tailnet has at
+/// once, over a link that may have no route out. It is raised by the change
+/// that needs the room and not by the change that runs out of it.
 #[test]
 fn the_page_stays_inside_its_budget() {
-    const BUDGET: usize = 104 * 1024;
+    const BUDGET: usize = 112 * 1024;
     let size = saneha::server::VIEWER.len();
     assert!(
         size <= BUDGET,
