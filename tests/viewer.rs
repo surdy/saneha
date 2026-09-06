@@ -530,3 +530,64 @@ fn a_hold_on_a_channel_that_is_not_there_is_refused() {
         "a channel that is not there was held open anyway"
     );
 }
+
+/// The page is served with the two headers that make a deploy visible.
+///
+/// Without them it went out bare, and a browser is entitled to reuse a bare
+/// response on its own judgement: the settings sheet shipped and was not there
+/// for a reader who had the old page in hand. `no-cache` asks the browser to
+/// revalidate every time, and the entity tag makes revalidating free.
+/// One GET with a header sent, for the conditional request a browser makes
+/// when it already has the page.
+fn get_with_header_sent(url: &str, header: &str, value: &str) -> (u16, String) {
+    let config = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+    let mut response = agent
+        .get(url)
+        .header(header, value)
+        .call()
+        .expect("the server to answer");
+    let status = response.status().as_u16();
+    let body = response.body_mut().read_to_string().expect("read the body");
+    (status, body)
+}
+
+#[test]
+fn the_page_is_revalidated_rather_than_guessed_at() {
+    let server = TestServer::start();
+    let (status, tag, body) = get_with_header(&server.url, "etag");
+    assert_eq!(status, 200);
+    assert!(!body.is_empty());
+    assert!(
+        !tag.is_empty(),
+        "the page carries no entity tag, so a browser has nothing to revalidate with"
+    );
+
+    let (_, cache, _) = get_with_header(&server.url, "cache-control");
+    assert_eq!(
+        cache, "no-cache",
+        "the page must be revalidated, not reused on the browser's own judgement"
+    );
+
+    // The tag it just gave back, handed to it: nothing to send.
+    let (status, body) = get_with_header_sent(&server.url, "if-none-match", &tag);
+    assert_eq!(status, 304, "a page the browser already has is a 304");
+    assert!(body.is_empty(), "and a 304 carries no body");
+
+    // A proxy may weaken the tag on the way through; it is the same page.
+    let (status, _) = get_with_header_sent(&server.url, "if-none-match", &format!("W/{tag}"));
+    assert_eq!(status, 304, "a weakened tag still names this page");
+
+    // Anything else is the page again.
+    let (status, body) = get_with_header_sent(&server.url, "if-none-match", "\"not-this-page\"");
+    assert_eq!(status, 200);
+    assert!(!body.is_empty());
+
+    // The tag is the page: the same build answers with the same one, and it is
+    // what a channel's own path answers with too.
+    let (_, again, _) = get_with_header(&format!("{}/c/brisk-otter", server.url), "etag");
+    assert_eq!(again, tag);
+}

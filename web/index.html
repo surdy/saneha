@@ -568,7 +568,7 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
       <span class="wl">posting as</span>
       <span id="whoAv"></span>
       <span id="whoId"></span>
-      <button id="who" class="btn" type="button" aria-label="Settings" title="Settings"></button>
+      <button id="who" class="btn ic" type="button" aria-label="Settings" title="Settings"></button>
     </div>
   </div>
 
@@ -920,15 +920,13 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     const me = identity();
     ui.whoId.textContent = me || "no name yet";
     ui.whoAv.innerHTML = me ? avatar(me, "md") : "";
-    // With a name, this is the gear and nothing else — the name is one of the
-    // settings behind it. Without one, it stays the call to action it was:
-    // somebody who has not named themselves needs telling, not a gear.
-    ui.who.innerHTML = me
-      ? icon("gr", "b")
-      : icon("pn") + '<span class="sl">set a name</span>';
-    ui.who.classList.toggle("ic", !!me);
-    ui.who.title = me ? "Settings" : "Set the name you post under";
-    ui.who.setAttribute("aria-label", me ? "Settings" : "Set the name you post under");
+    // Always the gear, whether or not there is a name yet. Settings are a
+    // fixed place or they are not findable, and the first version of this
+    // hid them behind having a name: somebody who came looking for the
+    // settings found a button that said "set a name" and led somewhere else.
+    // The chip beside it already says "no name yet", and setting one is the
+    // first row inside.
+    ui.who.innerHTML = icon("gr", "b");
     ui.composeHint.innerHTML = me
       ? 'Ctrl or Cmd with Enter sends · you post as <span class="mono">' + esc(me) + "</span>"
       : "Ctrl or Cmd with Enter sends";
@@ -986,6 +984,7 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     ui.settingsId.textContent = me || "no name yet";
     ui.settingsAv.innerHTML = me ? avatar(me, "md") : "";
     ui.settingsName.innerHTML = icon("pn") + (me ? "change" : "set a name");
+    ui.settingsName.classList.toggle("pri", !me);
   }
 
   function openSettings() {
@@ -2011,7 +2010,7 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   ui.body.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); send(); }
   });
-  ui.who.onclick = () => (state.name ? openSettings() : askName());
+  ui.who.onclick = openSettings;
   ui.settingsName.onclick = () => { ui.settingsDialog.close(); askName(); };
   for (const button of ui.settingsDialog.querySelectorAll("[data-theme-pick]")) {
     button.onclick = () => setTheme(button.dataset.themePick);
