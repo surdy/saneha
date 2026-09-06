@@ -483,9 +483,53 @@ fn say(line: &str) {
 /// and a server on a LAN with no route to the internet still renders it.
 pub const VIEWER: &str = include_str!("../web/index.html");
 
-async fn viewer() -> Response {
+/// The page's entity tag: the FNV-1a hash of the bytes this build carries, so
+/// it changes when and only when the page does.
+///
+/// It exists because the page went out with no cache headers at all, which
+/// leaves a browser free to reuse an old copy on its own judgement — and a
+/// deploy that a reader cannot see until they think to hard-reload is a deploy
+/// that did not happen. Computed once, on first use, over a string that is
+/// fixed at compile time.
+fn viewer_etag() -> &'static str {
+    static ETAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ETAG.get_or_init(|| {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in VIEWER.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("\"{hash:016x}\"")
+    })
+}
+
+/// The viewer, with the two headers that make a deploy visible without a
+/// hard reload and cost almost nothing in between.
+///
+/// `no-cache` is not "do not store": it is "store it, but ask before using
+/// it". Every load is one conditional request, and the answer is a `304` with
+/// no body until the page actually changes — which on a LAN is the difference
+/// between a few bytes and a hundred kilobytes, and on any link is the
+/// difference between reading this deploy and the last one.
+async fn viewer(headers: HeaderMap) -> Response {
+    let etag = viewer_etag();
+    let known = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        // A revalidating browser may send several, and a proxy may weaken one.
+        .is_some_and(|sent| {
+            sent.split(',')
+                .any(|one| one.trim().trim_start_matches("W/") == etag)
+        });
+    if known {
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
+    }
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8".to_string())],
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::ETAG, etag),
+        ],
         VIEWER,
     )
         .into_response()

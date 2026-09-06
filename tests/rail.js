@@ -142,7 +142,8 @@ function world(options) {
     throw new Error("the page asked for " + url + ", which this DOM knows nothing about");
   }
 
-  const kept = { "saneha.name": "surdy", "saneha.pins": JSON.stringify(options.pins || []) };
+  const kept = { "saneha.pins": JSON.stringify(options.pins || []) };
+  if (options.name !== null) kept["saneha.name"] = "surdy";
   if (options.theme) kept["saneha.theme"] = options.theme;
 
   // The settings sheet asks the dialog for its segments by attribute, so the
@@ -438,6 +439,39 @@ function groups(html) {
       it.requests.filter((request) => /search|filter/.test(request.url)).length,
       0,
       "the palette is a filter over what is in hand, not a question for the server"
+    );
+  }
+
+  // ---- the settings are reachable, named or not -------------------------
+
+  // The first version of this gated the gear on having a name, so somebody
+  // who went looking for the settings found a button that said "set a name"
+  // and led somewhere else. Settings are a fixed place or they are not
+  // findable.
+  {
+    for (const name of [undefined, null]) {
+      const it = await run({ name: name });
+      const who = it.el("who");
+      assert.ok(
+        who.innerHTML.includes('href="#gr"'),
+        "the top bar carries the gear whether or not a name is set (name: " + name + ")"
+      );
+    }
+    // The label is on the markup rather than drawn, so it is asserted there.
+    assert.ok(
+      /<button id="who" class="btn ic"[^>]*aria-label="Settings"[^>]*title="Settings"/.test(page),
+      "the button says what it is, to a screen reader and on hover"
+    );
+
+    // Without one, the chip says so and the way to fix it is the first row
+    // inside the settings rather than the button in the bar.
+    const fresh = await run({ name: null });
+    assert.strictEqual(fresh.el("whoId").textContent, "no name yet");
+    assert.strictEqual(fresh.el("settingsId").textContent, "no name yet");
+    assert.ok(fresh.el("settingsName").innerHTML.includes("set a name"));
+    assert.ok(
+      fresh.el("settingsName").classes.has("pri"),
+      "and it is the one thing in the sheet drawn as an action to take"
     );
   }
 
