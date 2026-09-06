@@ -211,6 +211,11 @@ fn the_page_reads_for_the_person_only_under_the_rule() {
 /// witness of: the hash in front of a name, the pinned group, unread as
 /// weight, the struck hash on a closed channel, the palette, the purpose
 /// edited in place, and the settings this browser keeps.
+///
+/// It runs its world across the states rather than one fixture — no name
+/// kept, no channels at all, a channel nobody has joined, a closed one,
+/// storage that refuses — because both viewer bugs that reached a reader
+/// lived in a state the fixture never entered.
 #[test]
 fn the_rail_and_the_settings_are_drawn_as_decided() {
     drive("rail.js", "the rail and the settings");
