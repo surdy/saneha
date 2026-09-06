@@ -15,7 +15,7 @@ After=network-online.target
 # SIGTERM fix (issue #15). An older tag ignores SIGTERM as PID 1: rolling back
 # past that fix means restoring StopSignal=SIGINT in the same commit, or every
 # stop stalls for TimeoutStopSec and ends in SIGKILL.
-Image=ghcr.io/surdy/saneha:sha-d810d4c
+Image=ghcr.io/surdy/saneha:sha-cad4c58
 ContainerName=saneha
 
 # The database. saneha creates saneha.db here on first start.
