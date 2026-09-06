@@ -26,9 +26,9 @@ use tokio::sync::{watch, Notify};
 use crate::api::{
     ApiError, Attachment, Channel, ChannelDetail, ChannelList, ChannelQuery, ChannelState,
     CloseRequest, Closed, CursorUpdate, DeleteQuery, Deleted, JoinRequest, Joined, Left, Message,
-    MessageList, MessageQuery, NewChannel, NewMessage, Participant, ParticipantList, WaitQuery,
-    Waited, DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT, FILENAME_HEADER, MAX_ATTACHMENT, MAX_BODY,
-    MAX_HOLD,
+    MessageList, MessageQuery, NewChannel, NewMessage, Participant, ParticipantList,
+    PurposeRequest, WaitQuery, Waited, DEFAULT_CONTENT_TYPE, DEFAULT_MESSAGE_LIMIT,
+    FILENAME_HEADER, MAX_ATTACHMENT, MAX_BODY, MAX_HOLD,
 };
 use crate::store::{PendingAttachment, Store, StoreError, UNBOUND_ATTACHMENT_TTL};
 
@@ -223,9 +223,13 @@ fn routes() -> Router<Arc<Serving>> {
         // One channel, and the counts a delete is confirmed against; and the
         // delete itself, which needs `?confirm=true` before it will do
         // anything.
+        // A purpose is the one thing about a channel that can be edited after
+        // it exists, so it is a PATCH of the channel and not a verb beside it.
         .route(
             "/channels/{channel}",
-            get(channel_detail).delete(delete_channel),
+            get(channel_detail)
+                .patch(set_purpose)
+                .delete(delete_channel),
         )
         // Closing is not an edit of the channel resource: it writes a system
         // message and wakes every waiter, so it is a verb of its own, with the
@@ -528,6 +532,23 @@ async fn channel_detail(
     Path(channel): Path<String>,
 ) -> Result<Json<ChannelDetail>, Failure> {
     Ok(Json(serving.store.channel_detail(&channel)?))
+}
+
+/// Changes what a channel says it is for.
+///
+/// Nothing is woken. A purpose is not a message, so no held wait is looking
+/// for it, and a viewer that has the channel open picks the new line up on its
+/// next refresh of the list rather than being interrupted mid-transcript.
+async fn set_purpose(
+    State(serving): State<Arc<Serving>>,
+    Path(channel): Path<String>,
+    ApiJson(body): ApiJson<PurposeRequest>,
+) -> Result<Json<Channel>, Failure> {
+    Ok(Json(serving.store.set_purpose(
+        &channel,
+        &body.by,
+        body.purpose.as_deref(),
+    )?))
 }
 
 /// Closes a channel: no more messages, no more joins, still readable.

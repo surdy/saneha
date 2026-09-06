@@ -459,3 +459,121 @@ fn the_binary_lists_the_newest_id_and_the_unread_count() {
     let cells: Vec<&str> = lines[1].split_whitespace().collect();
     assert_eq!(cells, vec!["brisk-otter", "open", "2", "2", "-"], "{asked}");
 }
+
+/// A channel to work in, and the identity working in it.
+fn channel_and_who(remote: &Remote, name: &str, purpose: Option<&str>) -> String {
+    remote.create_channel(Some(name), purpose).expect("create");
+    join(remote, name, "surdy")
+}
+
+/// The purpose is the one field of a channel that can be changed after it is
+/// created — set, corrected, and cleared — and a listing reports the change.
+#[test]
+fn a_purpose_can_be_set_corrected_and_cleared() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    let who = channel_and_who(&remote, "brisk-otter", Some("coordinating the refactr"));
+
+    let fixed = remote
+        .set_purpose("brisk-otter", &who, Some("coordinating the refactor"))
+        .expect("correct the purpose");
+    assert_eq!(fixed.purpose.as_deref(), Some("coordinating the refactor"));
+    assert_eq!(
+        named(&remote.list_channels(None).expect("list"), "brisk-otter")
+            .purpose
+            .as_deref(),
+        Some("coordinating the refactor")
+    );
+
+    // Blank and absent are the same request, and both clear it.
+    let cleared = remote
+        .set_purpose("brisk-otter", &who, Some("   "))
+        .expect("clear with blank");
+    assert!(cleared.purpose.is_none());
+    let still = remote
+        .set_purpose("brisk-otter", &who, None)
+        .expect("clear with nothing");
+    assert!(still.purpose.is_none());
+}
+
+/// Setting a purpose writes nothing into the transcript: it changes the
+/// channel, it is not an event in it.
+#[test]
+fn setting_a_purpose_leaves_the_transcript_alone() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    let who = channel_and_who(&remote, "brisk-otter", None);
+    send(&remote, "brisk-otter", &who, "the first message");
+    let before = newest(&remote, "brisk-otter");
+
+    remote
+        .set_purpose("brisk-otter", &who, Some("the wake test"))
+        .expect("set the purpose");
+
+    assert_eq!(
+        newest(&remote, "brisk-otter"),
+        before,
+        "a purpose change must not allocate a message id"
+    );
+}
+
+/// A closed channel is the record of a conversation that is over, and what it
+/// said it was for is part of that record.
+#[test]
+fn a_closed_channel_keeps_the_purpose_it_had() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    let who = channel_and_who(&remote, "brisk-otter", Some("the wake test"));
+    remote.close_channel("brisk-otter", &who).expect("close");
+
+    let refused = remote
+        .set_purpose("brisk-otter", &who, Some("something else"))
+        .expect_err("a closed channel refuses a purpose");
+    let said = refused.to_string();
+    assert!(
+        said.contains("closed") && said.contains("purpose"),
+        "the refusal should say what was refused and why: {said}"
+    );
+    assert_eq!(
+        remote
+            .channel_detail("brisk-otter")
+            .expect("detail")
+            .channel
+            .purpose
+            .as_deref(),
+        Some("the wake test")
+    );
+}
+
+/// The same shapes `new` refuses, refused here too: a purpose is one line, and
+/// `by` is an identity rather than anything at all.
+#[test]
+fn a_purpose_is_held_to_one_line_and_a_real_identity() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    let who = channel_and_who(&remote, "brisk-otter", None);
+
+    let two_lines = remote
+        .set_purpose("brisk-otter", &who, Some("one line\nand another"))
+        .expect_err("a purpose with a line break is refused");
+    assert!(
+        two_lines.to_string().contains("one line"),
+        "the refusal should say a purpose is one line: {two_lines}"
+    );
+
+    let too_long = "p".repeat(saneha::store::MAX_PURPOSE + 1);
+    remote
+        .set_purpose("brisk-otter", &who, Some(&too_long))
+        .expect_err("a purpose over the limit is refused");
+
+    remote
+        .set_purpose("brisk-otter", "not an identity", Some("anything"))
+        .expect_err("`by` has to be an identity");
+
+    // and none of that changed the channel
+    assert!(
+        named(&remote.list_channels(None).expect("list"), "brisk-otter")
+            .purpose
+            .is_none()
+    );
+}

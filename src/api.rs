@@ -90,6 +90,20 @@ pub struct NewChannel {
     pub purpose: Option<String>,
 }
 
+/// The body of `PATCH /channels/{channel}`: the one field of a channel that
+/// can be changed after it is created.
+///
+/// `purpose` absent and `purpose` null are the same request — clear it — so
+/// that a client with no purpose to send does not have to know which spelling
+/// of nothing this route wants. `by` is the identity making the change, held
+/// to the same shape every other verb holds it to.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PurposeRequest {
+    pub by: String,
+    #[serde(default)]
+    pub purpose: Option<String>,
+}
+
 /// The body of `GET /channels`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelList {
