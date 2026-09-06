@@ -118,10 +118,12 @@ function world(options) {
 
   function fetch(url, init) {
     requests.push({ url, init });
-    if (url.split("?")[0] === "/channels") return json({ channels: CHANNELS });
+    if (url.split("?")[0] === "/channels") return json({ channels: channels });
     if (/\/messages\?.*hold=/.test(url)) return held();
     if (/\/messages\?/.test(url)) return json({ messages: [] });
     if (/\/participants$/.test(url)) {
+      // Nobody has joined yet is the state every channel starts in.
+      if (options.joined === false) return json({ participants: [] });
       return json({
         participants: [{
           identity: ME, name: "surdy", host: "web", harness: "web",
@@ -130,17 +132,22 @@ function world(options) {
       });
     }
     if (/^\/channels\/[^/]+$/.test(url) && (!init || (init.method || "GET") === "GET")) {
-      const found = CHANNELS.find((channel) => channel.name === about(url));
+      const found = channels.find((channel) => channel.name === about(url));
       return json({ channel: found });
     }
     // The purpose being set: the one PATCH the page makes.
     if (/^\/channels\/[^/]+$/.test(url) && init.method === "PATCH") {
       const sent = JSON.parse(init.body);
-      const found = CHANNELS.find((channel) => channel.name === about(url));
+      const found = channels.find((channel) => channel.name === about(url));
       return json(Object.assign({}, found, { purpose: sent.purpose }));
     }
     throw new Error("the page asked for " + url + ", which this DOM knows nothing about");
   }
+
+  // The channels this world serves. A case can hand it none, or a set nobody
+  // has joined — both are states the page is in on somebody's first visit and
+  // neither was covered until a shipped bug lived in one.
+  const channels = options.channels || CHANNELS;
 
   const kept = { "saneha.pins": JSON.stringify(options.pins || []) };
   if (options.name !== null) kept["saneha.name"] = "surdy";
@@ -440,6 +447,59 @@ function groups(html) {
       0,
       "the palette is a filter over what is in hand, not a question for the server"
     );
+  }
+
+  // ---- the states a page is in before anything has happened -------------
+
+  // A server with nothing on it, which is what the first visit meets.
+  {
+    const it = await run({ channels: [] });
+    assert.ok(
+      it.rail().includes("No channels yet"),
+      "an empty server says so rather than drawing an empty rail"
+    );
+    assert.deepStrictEqual(rows(it.rail()), [], "and there is nothing to draw");
+    // With no channel open the head is never drawn, so what shows is what the
+    // markup says — asserted there, since nothing here parses markup.
+    assert.ok(
+      page.includes('<span id="channelName">no channel</span>'),
+      "the head says so until a channel is opened"
+    );
+    assert.ok(
+      it.el("transcript").innerHTML.includes("Pick a channel") ||
+        page.includes("Pick a channel, or create one."),
+      "and the transcript invites one"
+    );
+  }
+
+  // A channel nobody has joined: there is no read cursor, so there is nothing
+  // honest to say about what is unread, and the page says nothing.
+  {
+    const it = await run({
+      at: "xlaptop-1",
+      joined: false,
+      channels: [{ name: "xlaptop-1", state: "open", purpose: "the wake test", newest_id: 6 }]
+    });
+    const [row] = rows(it.rail());
+    assert.strictEqual(row.name, "xlaptop-1");
+    assert.ok(
+      !row.classes.includes("un"),
+      "a channel with no cursor is not unread: nobody knows how much of it was read"
+    );
+    assert.ok(!it.rail().includes('class="bdg"'), "and it carries no badge");
+    assert.ok(
+      !it.el("transcript").innerHTML.includes("newRule"),
+      "nor a new rule, which is drawn from a cursor there is none of"
+    );
+  }
+
+  // A closed channel opened: it keeps everything except the way in.
+  {
+    const it = await run({ at: "notes-method" });
+    assert.strictEqual(it.el("channelState").textContent, "closed");
+    assert.strictEqual(it.el("compose").hidden, true, "a closed channel takes no more messages");
+    assert.strictEqual(it.el("banner").hidden, false, "and says so above the transcript");
+    assert.strictEqual(it.el("closeChannel").hidden, true, "there is nothing left to close");
   }
 
   // ---- the settings are reachable, named or not -------------------------
