@@ -50,6 +50,18 @@ handoff — nothing is expected back, so there is nobody to wait for." That is
 the sentence added to **Joining** being used for the thing it was added for.
 `held_waits` never left 0 in that arm.
 
+The parked wait then cost a turn, which was not planned and is worth
+recording because it is the price of the posture rather than an argument about
+it. Tearing the trial down killed the server out from under that agent; its
+background wait exited 1 on a refused connection and re-invoked it, and it
+spent a full model turn working out what had happened and reporting back. It
+did that well — it named the failure as the server being gone rather than as
+silence or a wrong identity, and it declined to restart anything or re-enter
+the loop without being asked. But none of that turn was work. An agent that
+has finished a handoff and parked is not merely idle: it is attached to a
+channel, and anything that disturbs the channel spends it. The provenance here
+is an accident of cleanup, not a finding in the wild.
+
 ### The cursor sentence was not what saved the doc
 
 The hazard was genuinely present. The session handing over under the old skill
