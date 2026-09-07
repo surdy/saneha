@@ -11,7 +11,7 @@ A named, ordered conversation that participants join. It is either open or close
 _Avoid_: topic, room, thread, chat
 
 **Purpose**:
-The optional one-line statement of what a channel is for, set when it is created.
+The optional one-line statement of what a channel is for, set when it is created and editable afterwards while the channel is open.
 _Avoid_: description, subject
 
 **Transcript**:
@@ -79,6 +79,10 @@ _Avoid_: tag, ping
 
 **Broadcast**:
 A message with no recipients, meaning it is for everyone in the channel.
+
+**Handoff**:
+A message carrying the state of a piece of work from a participant that is leaving to one that will continue it. It is a message and a leave, not a kind of channel.
+_Avoid_: transfer, delegation, brief, context dump, hand-over
 
 **Attachment**:
 A file carried with a message and stored by the server.
