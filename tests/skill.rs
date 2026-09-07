@@ -188,6 +188,9 @@ fn the_skill_says_what_a_harness_needs_to_find_and_follow_it() {
         "takes no more joins",
         // Who is here decides whether waiting means anything at all.
         "there is nobody to wait for",
+        // A handoff from this same machine leaves the doc already on disk,
+        // and `fetch` will not write over it (docs/handoff-findings.md).
+        "refuses to write over a file that is there",
     ] {
         assert!(skill.contains(said), "the skill has to say {said:?}");
     }

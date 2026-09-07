@@ -112,7 +112,9 @@ the very session that handed over, whose cursor is already past the doc; then
 say the one line that you have it, so the transcript and the person both hold
 the receipt, and work without waiting. Close it only if the person says so: a
 closed channel takes no more joins, so closing is what stops anybody carrying
-this on from here.
+this on from here. Where the handoff came from this same machine the doc may
+already be on disk, and `fetch` refuses to write over a file that is there:
+fetch it under another name and compare, rather than assuming either copy.
 
 ## The wake loop
 
