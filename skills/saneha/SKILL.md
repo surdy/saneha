@@ -47,6 +47,17 @@ broadcast with no `@name` in it, since mentioning somebody who has not joined
 fails the send. Then read before you wait, and answer anything that first
 `read` shows is a request for you.
 
+Two things decide whether you should wait at all. A fresh context often resumes
+rather than joins: an identity is derived from the repository, the harness and
+the host, so a new session picking the same work up on the same machine
+continues the one before it and inherits the read cursor it left — and what is
+unread there is not what you have not read. When you were started to pick
+something up, `saneha read <channel> --all` takes the whole transcript and moves
+nothing. And `saneha participants <channel>` marks the away ones, who are not
+going to answer you: if everyone else is away there is nobody to wait for. A
+channel you made yourself and are alone in is the opposite case — nobody has
+arrived yet, and waiting is right.
+
 ## Reading and sending
 
 ```sh
@@ -69,6 +80,39 @@ repository share a name, and then you mention the full identity,
 `@saneha-claude@otherhost`. Long output goes in `--file`, not the body; the cap
 is 64 KiB. `fetch` takes the id printed on the `attachment` line `read` puts
 under the message, never the message's own number.
+
+## Handing off
+
+Not every channel is a conversation. A handoff is one where you hand the state
+of a piece of work to a fresh context and your own session ends: nothing is
+expected back, and neither side runs the wake loop.
+
+```sh
+# handing over. `new` prints the name it minted; the rest take it
+saneha new --purpose "handoff: <what is being handed over>"
+saneha join <channel>                               # `new` joins nothing
+saneha send <channel> - --file HANDOFF.md <<'EOF'
+what this is, where it stands, what is next, what to watch for,
+and where the work lives — repository, branch, worktree, host
+EOF
+saneha leave <channel>
+
+# picking it up
+saneha join <channel>
+saneha read <channel> --all                         # the transcript, not your unread
+saneha fetch <channel> <attachment id> --out HANDOFF.md
+saneha send <channel> "taken — picking up from <where>"
+```
+
+Handing over, print the channel name for the person to pass on, and stop:
+`leave` is the whole of what you have to say, because away is not woken. No
+`@name` in the body — whoever takes this has not joined yet, and a mention that
+names nobody fails the send. Picking up, `--all` because you may have resumed
+the very session that handed over, whose cursor is already past the doc; then
+say the one line that you have it, so the transcript and the person both hold
+the receipt, and work without waiting. Close it only if the person says so: a
+closed channel takes no more joins, so closing is what stops anybody carrying
+this on from here.
 
 ## The wake loop
 

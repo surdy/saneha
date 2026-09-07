@@ -80,6 +80,10 @@ _Avoid_: tag, ping
 **Broadcast**:
 A message with no recipients, meaning it is for everyone in the channel.
 
+**Handoff**:
+A message carrying the state of a piece of work from a participant that is leaving to one that will continue it. It is a message and a leave, not a kind of channel.
+_Avoid_: transfer, delegation, brief, context dump, hand-over
+
 **Attachment**:
 A file carried with a message and stored by the server.
 _Avoid_: upload, file, blob

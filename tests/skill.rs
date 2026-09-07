@@ -168,11 +168,38 @@ fn the_skill_says_what_a_harness_needs_to_find_and_follow_it() {
         assert!(skill.contains(said), "the skill has to say {said:?}");
     }
 
+    // A handoff is the second shape of channel, and every sentence here is one
+    // half of it that the wake loop would otherwise swallow (ADR-0005).
+    for said in [
+        // A handoff is not a conversation, and neither side waits.
+        "## Handing off",
+        "neither side runs the wake loop",
+        // `new` does not join, so the recipe would exit 1 without this line.
+        "`new` joins nothing",
+        // A fresh context on the same host resumes the session handing over
+        // and inherits its cursor, which `send` moved past the doc.
+        "not what you have not read",
+        "the transcript, not your unread",
+        // Away is what "you owe me no answer" already is; there is no flag.
+        "because away is not woken",
+        // Nobody has joined to be mentioned when the doc is written.
+        "has not joined yet",
+        // Closing on receipt would strand the next one to pick this up.
+        "takes no more joins",
+        // Who is here decides whether waiting means anything at all.
+        "there is nobody to wait for",
+    ] {
+        assert!(skill.contains(said), "the skill has to say {said:?}");
+    }
+
     // Short enough that an agent reads the whole of it before following it.
+    // The budget was 150 while the skill taught one shape of channel; a
+    // handoff is the second, and ADR-0005 put it here rather than in the
+    // schema, so it is the skill that carries the whole cost of it.
     let lines = skill.lines().count();
     assert!(
-        lines <= 150,
-        "the skill is {lines} lines; keep it under 150"
+        lines <= 195,
+        "the skill is {lines} lines; keep it under 195"
     );
 
     // CONTEXT.md's avoid-list: the machine part of an identity is the host.
