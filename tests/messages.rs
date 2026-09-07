@@ -68,9 +68,32 @@ fn send_to(
             body: body.to_string(),
             to: to.iter().map(|value| (*value).to_string()).collect(),
             attachments: Vec::new(),
-            key: None,
+            // A key, because `send_message` retries on EINTR and a retried
+            // send is only safe to make again when it carries one. Without
+            // this a loaded machine writes some sends twice, which is
+            // `a_backlog_longer_than_one_page_is_read_whole` failing by one
+            // message (issue #59). The CLI mints a key per send; so does this.
+            key: Some(saneha::api::mint_id()),
         },
     )
+}
+
+/// A send with no key, which is what an older client and every message written
+/// before the key existed looks like. Only the test about that shape wants it:
+/// it is deliberately unsafe to retry, so nothing else should use it.
+fn send_unkeyed(remote: &Remote, channel: &str, from: &str, body: &str) -> Message {
+    remote
+        .send_message(
+            channel,
+            &NewMessage {
+                from: from.to_string(),
+                body: body.to_string(),
+                to: Vec::new(),
+                attachments: Vec::new(),
+                key: None,
+            },
+        )
+        .expect("send")
 }
 
 /// A participant's read cursor as the server has it.
@@ -1049,8 +1072,8 @@ fn a_send_with_no_key_is_written_every_time() {
 
     // What an older client sends, and what every message written before the
     // key existed was sent as: no key, and so nothing to deduplicate on.
-    let first = send(&remote, "brisk-otter", &alice, "the same words");
-    let second = send(&remote, "brisk-otter", &alice, "the same words");
+    let first = send_unkeyed(&remote, "brisk-otter", &alice, "the same words");
+    let second = send_unkeyed(&remote, "brisk-otter", &alice, "the same words");
 
     assert_ne!(first.id, second.id);
     assert_eq!(rows_written(&server, "brisk-otter"), 2);
