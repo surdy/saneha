@@ -168,41 +168,50 @@ fn the_skill_says_what_a_harness_needs_to_find_and_follow_it() {
         assert!(skill.contains(said), "the skill has to say {said:?}");
     }
 
-    // A handoff is the second shape of channel, and every sentence here is one
-    // half of it that the wake loop would otherwise swallow (ADR-0005).
+    // A handoff is the other reason to open a channel, and every sentence
+    // here is a half of it the wake loop would otherwise swallow (ADR-0005).
     for said in [
-        // A handoff is not a conversation, and neither side waits.
         "## Handing off",
-        "neither side runs the wake loop",
+        // The vocabulary's load-bearing clause, said the same way here: the
+        // channel has no mode, because one-way is a participant's posture.
+        "A handoff is a message and a leave",
+        // Neither side waits, which is the whole point of the section.
+        "side runs the wake loop",
+        // And the wake loop itself has to admit the exception.
+        "unless **Joining** or",
         // `new` does not join, so the recipe would exit 1 without this line.
         "`new` joins nothing",
         // A fresh context on the same host resumes the session handing over
-        // and inherits its cursor, which `send` moved past the doc.
-        "not what you have not read",
+        // and inherits its cursor, which `send` may have moved past the doc.
+        "inherits its read cursor",
         "the transcript, not your unread",
-        // Away is what "you owe me no answer" already is; there is no flag.
-        "because away is not woken",
+        // `leave` is the declaration; there is no flag saying "one-way".
+        "not coming back to answer",
         // Nobody has joined to be mentioned when the doc is written.
         "has not joined yet",
-        // Closing on receipt would strand the next one to pick this up.
-        "takes no more joins",
         // Who is here decides whether waiting means anything at all.
-        "there is nobody to wait for",
-        // A handoff from this same machine leaves the doc already on disk,
-        // and `fetch` will not write over it (docs/handoff-findings.md).
-        "refuses to write over a file that is there",
+        "nobody is going to answer you",
+        // A handoff from this host leaves the file on disk already, and a
+        // fetch onto it is refused — found by the run in handoff-findings.md.
+        "HANDOFF.received.md",
+        // Closing on receipt would strand whoever picks this up next, and
+        // "its purpose is done" must not read as licence to.
+        "takes no more joins",
+        "never what makes it done",
     ] {
         assert!(skill.contains(said), "the skill has to say {said:?}");
     }
 
     // Short enough that an agent reads the whole of it before following it.
-    // The budget was 150 while the skill taught one shape of channel; a
-    // handoff is the second, and ADR-0005 put it here rather than in the
-    // schema, so it is the skill that carries the whole cost of it.
+    // The budget was 150 while a conversation was the only reason to open a
+    // channel. ADR-0005 put the second reason here rather than in the schema,
+    // so the skill carries the whole cost of it. The margin over the current
+    // length is deliberate: the first run of the handoff sentences found a
+    // defect that needed a line, and the next one will too.
     let lines = skill.lines().count();
     assert!(
-        lines <= 195,
-        "the skill is {lines} lines; keep it under 195"
+        lines <= 200,
+        "the skill is {lines} lines; keep it under 200"
     );
 
     // CONTEXT.md's avoid-list: the machine part of an identity is the host.

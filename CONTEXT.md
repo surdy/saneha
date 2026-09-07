@@ -11,7 +11,7 @@ A named, ordered conversation that participants join. It is either open or close
 _Avoid_: topic, room, thread, chat
 
 **Purpose**:
-The optional one-line statement of what a channel is for, set when it is created.
+The optional one-line statement of what a channel is for, set when it is created and editable afterwards while the channel is open.
 _Avoid_: description, subject
 
 **Transcript**:
