@@ -2307,18 +2307,24 @@ fn read_participant(conn: &Connection, id: i64) -> Result<Participant, StoreErro
     )?)
 }
 
+/// Whether this is a name a channel may have, refusing it in the server's own
+/// words. Public so a client can refuse the same thing before spending a
+/// request on it, and refuse it identically.
 pub fn validate_channel_name(name: &str) -> Result<(), StoreError> {
     validate_slug(name, &CHANNEL_NAME)
 }
 
+/// The same, for the name half of an identity.
 pub fn validate_participant_name(name: &str) -> Result<(), StoreError> {
     validate_slug(name, &PARTICIPANT_NAME)
 }
 
+/// The same, for the host half.
 pub fn validate_host(host: &str) -> Result<(), StoreError> {
     validate_slug(host, &HOST)
 }
 
+/// The same, for the harness a participant records.
 pub fn validate_harness(harness: &str) -> Result<(), StoreError> {
     validate_slug(harness, &HARNESS)
 }
