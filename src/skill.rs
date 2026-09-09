@@ -114,26 +114,52 @@ pub struct Outcome {
     pub because: Option<String>,
 }
 
-/// The skill as it is written to disk: the embedded file with the ownership
-/// marker added to its frontmatter.
+/// The body of the file `init` installs: a pointer at the binary, not a copy
+/// of the instructions.
 ///
-/// The marker goes in last, immediately before the closing `---`, so the
-/// `name` and `description` a harness reads stay where a reader expects them.
-pub fn managed(version: &str) -> String {
+/// What an agent is told and what will actually happen have to be the same
+/// thing, and a copy on disk is a second place for the truth to live. A copy
+/// goes stale the moment the binary is updated and stays stale until somebody
+/// remembers to run `init` again, which on the machine that prompted this went
+/// unremembered for days. A pointer cannot: `saneha skill` prints what the
+/// binary that will run the commands carries, so the two are the same file by
+/// construction rather than by anybody's diligence.
+///
+/// What stays here is what a pointer cannot do without. The orientation, so a
+/// person opening the file learns what saneha is. And the fallback, because an
+/// agent that cannot run the binary can do nothing else this file might have
+/// told it, and should say so rather than invent verbs.
+const STUB_BODY: &str = r#"# saneha
+
+**Run `saneha skill` and follow what it prints.** Your instructions are not in
+this file. They live in the binary that will run your commands, so that what
+you are told and what will happen cannot drift apart. It is one page, it needs
+no server, and it is all of them: the verbs, how your identity is worked out,
+the wake loop, and how to hand work over to a fresh session.
+
+saneha is a self-hosted channel where coding agents on different machines, and
+the person running them, talk to each other. Every instruction in it is a
+`saneha` command in a shell; there is no MCP server.
+
+If `saneha` is not on your PATH, try `~/.cargo/bin/saneha`, and ask the person
+where it is. If it cannot be run at all, tell them — do not guess at the
+commands, because nothing in this file says what they are.
+"#;
+
+/// The file `init` writes: the skill's own frontmatter, the marker, and the
+/// pointer body.
+///
+/// The frontmatter is lifted from the skill rather than written out again. It
+/// is what makes a harness load this at the right moment, so it is the one
+/// part that has to stay on disk — and a second copy of it, hand-maintained,
+/// would drift in exactly the way the body no longer can.
+pub fn installed(version: &str) -> String {
     let Some(end) = frontmatter_end(SKILL) else {
-        // No frontmatter to add to. The embedded skill has one and a test says
-        // so; this is only here so a malformed file installs as itself rather
-        // than as something with a marker line stuck at the top.
+        // No frontmatter to lift. The embedded skill has one and a test says
+        // so; this is only here so a malformed file installs as itself.
         return SKILL.to_string();
     };
-    let mut out = String::with_capacity(SKILL.len() + MARKER.len() + version.len() + 3);
-    out.push_str(&SKILL[..end]);
-    out.push_str(MARKER);
-    out.push_str(": ");
-    out.push_str(version);
-    out.push('\n');
-    out.push_str(&SKILL[end..]);
-    out
+    format!("{}{MARKER}: {version}\n---\n\n{STUB_BODY}", &SKILL[..end])
 }
 
 /// The version saneha stamped into a file's frontmatter, or `None` when the
@@ -172,7 +198,7 @@ fn frontmatter_end(text: &str) -> Option<usize> {
 /// Nothing outside `<skills dir>/saneha/SKILL.md` is created, read or written.
 /// With `dry_run` the answer is what would happen and not one byte moves.
 pub fn install(home: &Path, version: &str, dry_run: bool) -> Vec<Outcome> {
-    let wanted = managed(version);
+    let wanted = installed(version);
     HARNESSES
         .iter()
         .filter(|harness| home.join(harness.skills_dir).is_dir())
@@ -282,12 +308,36 @@ mod tests {
     }
 
     #[test]
-    fn the_installed_skill_carries_the_version_that_wrote_it() {
-        let text = managed("0.1.0");
+    fn the_installed_file_carries_the_version_that_wrote_it() {
+        let text = installed("0.1.0");
         assert_eq!(managed_version(&text).as_deref(), Some("0.1.0"));
-        // Everything else about the file is untouched.
-        assert_eq!(text.replace("saneha-managed: 0.1.0\n", ""), SKILL);
         assert!(text.starts_with("---\nname: saneha\n"), "{text}");
+    }
+
+    #[test]
+    fn the_installed_file_is_the_skill_s_own_frontmatter_and_a_pointer() {
+        let text = installed("0.1.0");
+
+        // The frontmatter is lifted, not written out again, so the line that
+        // decides when a harness loads this cannot drift from the skill's.
+        let front_of = |s: &str| s.split("\n---\n").next().unwrap().to_string();
+        let theirs = front_of(SKILL);
+        let mine = front_of(&text).replace("\nsaneha-managed: 0.1.0", "");
+        assert_eq!(mine, theirs);
+
+        // And the body is a pointer rather than a copy: the instructions are
+        // fetched from the binary that will run the commands.
+        assert!(text.contains("Run `saneha skill`"), "{text}");
+        assert!(
+            !text.contains("## The wake loop"),
+            "the instructions must not be copied in here: {text}"
+        );
+        // Short enough that it is obviously not the instructions themselves.
+        let lines = text.lines().count();
+        assert!(
+            lines <= 30,
+            "the installed file is {lines} lines; keep it small"
+        );
     }
 
     #[test]

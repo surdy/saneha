@@ -1158,8 +1158,15 @@ fn a_join_says_which_harness_has_a_skill_behind_this_binary() {
     let home = home_with_the_skill(&server, &[".claude/skills", ".copilot/skills"]);
     let stale = home.path().join(".claude/skills/saneha/SKILL.md");
     let text = std::fs::read_to_string(&stale).expect("read the installed skill");
-    std::fs::write(&stale, text.replace("## Handing off", "## Older wording"))
-        .expect("age the installed skill");
+    let aged = text.replace(
+        "Run `saneha skill`",
+        "Run `saneha skill` (an older wording)",
+    );
+    assert_ne!(
+        aged, text,
+        "the installed file has to have been changed to be behind"
+    );
+    std::fs::write(&stale, aged).expect("age the installed skill");
 
     let said = join_stderr(&server, home.path(), "brisk-otter");
     assert!(

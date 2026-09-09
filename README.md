@@ -4,7 +4,7 @@
 
 Status: design settled; the crate skeleton is in place, with `serve`, `new`, `list`, `join`, `leave`, `participants`, `send`, `read`, `wait`, `fetch`, `close`, `delete`, `skill` and `init` working, deployed at `https://saneha.clusterfault.com`. See [CONTEXT.md](CONTEXT.md) for the vocabulary, [docs/adr](docs/adr) for the load-bearing decisions, [docs/v1-scope.md](docs/v1-scope.md) for what v1 is and is not, and [docs/deploy.md](docs/deploy.md) for how it is deployed.
 
-[docs/handoffs.md](docs/handoffs.md) is the guide to handing work from one agent to a fresh one, written for the person running them.
+[docs/handoffs.md](docs/handoffs.md) is the guide to handing work from one agent to a fresh one, written for the person running them; its *Keeping up* section is how a machine is kept current, which is one `saneha init` per machine and then the binary.
 
 [docs/wake-findings.md](docs/wake-findings.md) records which harness has actually been seen waking itself from a background `saneha wait`, on what evidence, and what is still untested.
 
@@ -125,7 +125,7 @@ Joining again under an identity that is already in the channel resumes it, keepi
 
 An agent learns saneha from one SKILL.md. It lives in this repository at [`skills/saneha/SKILL.md`](skills/saneha/SKILL.md), and the binary carries that exact file, so what an agent reads and what the repository says cannot drift. It covers the prerequisites, how an identity is derived, joining, reading and sending, the wake loop and its exit codes, mention etiquette, and when to leave and when to close. It also covers the other reason to open a channel: a handoff, where one session hands the state of a piece of work to a fresh context and ends, and neither side waits. [docs/handoffs.md](docs/handoffs.md) is that from the person's side — what to say to each agent, what you should see, and what to do when the fresh one comes up empty. A handoff is a way of using the verbs that are already there rather than anything the server knows about: [ADR-0005](docs/adr/0005-a-handoff-is-a-message-and-a-leave.md) says why there is no handoff flag on a channel, and [docs/handoff-findings.md](docs/handoff-findings.md) records the A/B run against the previous skill that shows what those sentences change and what is still untested. Every instruction in it is a `saneha` command; there is no MCP server in v1.
 
-`saneha skill` prints it. `saneha init` installs it:
+`saneha skill` prints it. `saneha init` installs a short file that points at it:
 
 ```sh
 saneha init
@@ -137,6 +137,8 @@ installed   /Users/surdy/.copilot/skills/saneha/SKILL.md  (Copilot CLI)
 ```
 
 A harness is found by its user-level skills directory already being there: `~/.claude/skills` for Claude Code, `~/.copilot/skills` for Copilot CLI, and `~/.agents/skills` for Codex, which reads personal skills from there rather than from `~/.codex`. Only the `saneha/` directory inside an existing skills directory is ever created — a missing `~/.copilot` means Copilot CLI is not installed, and saneha making the directory would be inventing a harness.
+
+What `init` writes is not a copy of the skill. It is a page that says the instructions are in the binary and to run `saneha skill` for them, so that updating the binary updates what an agent is told and there is no second place for the truth to live — the copy used to go stale the moment the binary moved and stay stale until somebody remembered to run `init` again, which on the second laptop went unremembered for four days. [ADR-0006](docs/adr/0006-the-installed-skill-is-a-pointer.md) says why, and [docs/stub-findings.md](docs/stub-findings.md) records the run where four agents were given one and all four went and fetched the real thing. The frontmatter is lifted from the skill rather than written out again, because it is what makes a harness load the file at the right moment and a second hand-maintained copy of it would drift in exactly the way the body no longer can. What stays in the body is an orientation and a fallback: what saneha is, and what to do when the binary cannot be run, since an agent in that position can do nothing else the file might have told it.
 
 The installed file is a file saneha owns and says so: `init` adds `saneha-managed: <version>` to its frontmatter, and will only write over a `SKILL.md` that carries that field. Anybody else's skill of the same name is reported as `skipped` and left byte for byte as it was, and so is every neighbouring skill, which is never opened at all. Running `init` again reports `up to date` when the file already says what this build says, and `updated` when the build has moved on.
 
