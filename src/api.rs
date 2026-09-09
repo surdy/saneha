@@ -14,6 +14,9 @@ pub enum ChannelState {
 }
 
 impl ChannelState {
+    /// The word the database, the wire and every table column use for this
+    /// state. One spelling, so a row, a JSON field and a printed cell cannot
+    /// disagree about what a channel is.
     pub fn as_str(self) -> &'static str {
         match self {
             ChannelState::Open => "open",
@@ -246,6 +249,9 @@ pub enum MessageKind {
 }
 
 impl MessageKind {
+    /// The word the `kind` column holds, which the CHECK constraint on
+    /// `messages` is written against — so this is the spelling, not a
+    /// rendering of it.
     pub fn as_str(self) -> &'static str {
         match self {
             MessageKind::Message => "message",
@@ -327,6 +333,12 @@ pub struct Message {
 }
 
 impl Message {
+    /// Whether `identity` is who wrote this. A system message was written by
+    /// nobody, so it is never anyone's own.
+    pub fn written_by(&self, identity: &str) -> bool {
+        self.from.as_deref() == Some(identity)
+    }
+
     /// Whether this message wakes a participant waiting with `--mentions`.
     ///
     /// The rule is the one the scope states: what is addressed to me, or what
@@ -340,12 +352,6 @@ impl Message {
     /// says. A `join` or a `leave` does not: a participant that asked to be
     /// woken only for what is addressed to it did not ask to be woken because
     /// somebody arrived, and it will see the arrival in its next `read`.
-    /// Whether `identity` is who wrote this. A system message was written by
-    /// nobody, so it is never anyone's own.
-    pub fn written_by(&self, identity: &str) -> bool {
-        self.from.as_deref() == Some(identity)
-    }
-
     pub fn wakes(&self, identity: &str) -> bool {
         match self.kind {
             MessageKind::Close => true,
