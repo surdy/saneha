@@ -162,7 +162,33 @@ Caddy notices the container's labels by itself; it needs no restart, and its
 configuration is never edited by hand. The first request for a new name waits
 on the Let's Encrypt DNS-01 challenge, so give it a few seconds.
 
-## 4. Verify
+## 4. Tag the release
+
+A version is what is deployed ([ADR-0008](adr/0008-a-version-is-what-is-deployed.md)),
+so the tag belongs to this deploy and not to a separate occasion. Do it in the
+pull request that bumps `Image=`: raise the version in `Cargo.toml`, add the
+section to [CHANGELOG.md](../CHANGELOG.md), and after it merges tag the merge
+commit.
+
+```sh
+git checkout main && git pull
+git tag -a v0.2.0 -m "saneha 0.2.0"
+git push origin v0.2.0
+gh release create v0.2.0 --title "saneha 0.2.0" --notes-file <(
+  awk '/^## 0\.2\.0/{f=1;next} /^## /{f=0} f' CHANGELOG.md)
+```
+
+The tag publishes the same image again under `0.2.0` and the moving `0.2`, so a
+release is pullable by the number its notes are written against. The unit goes
+on pinning the SHA: a version tag is a name somebody could move, and the drift
+check below only means something if what the repository says is deployed cannot
+have moved under it.
+
+The notes are what the deploy pull request already had to say — what changed,
+whether a migration is involved, whether mixed versions are safe. Publishing
+them is the only new work.
+
+## 5. Verify
 
 From either laptop, on the LAN or the tailnet:
 
