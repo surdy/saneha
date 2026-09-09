@@ -1089,3 +1089,86 @@ fn a_repeat_of_a_suffixed_join_does_not_hand_out_a_second_name() {
         "a repeat must not create a third participant: {participants:?}"
     );
 }
+
+/// A home directory with a skills directory for each named harness, and the
+/// skill installed into every one of them as `init` would.
+fn home_with_the_skill(server: &TestServer, harnesses: &[&str]) -> tempfile::TempDir {
+    let home = tempfile::tempdir().expect("temporary home");
+    for harness in harnesses {
+        std::fs::create_dir_all(home.path().join(harness)).expect("a harness skills directory");
+    }
+    let installed = server.run_in(
+        home.path(),
+        &["init"],
+        &[("HOME", &home.path().to_string_lossy())],
+    );
+    assert!(installed.status.success(), "install the skill");
+    home
+}
+
+/// What a join said on standard error.
+fn join_stderr(server: &TestServer, home: &Path, channel: &str) -> String {
+    let output = server.run_in(
+        home,
+        &["join", channel, "--harness", "claude"],
+        &[("HOME", &home.to_string_lossy())],
+    );
+    assert!(output.status.success(), "join");
+    String::from_utf8_lossy(&output.stderr).to_string()
+}
+
+#[test]
+fn health_says_which_saneha_this_server_is() {
+    let server = TestServer::start();
+    let health = server.remote().health().expect("health");
+
+    assert_eq!(health.service, "saneha");
+    assert_eq!(health.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    // The digest is the skill's own bytes, so a server and a client can tell
+    // they were built from the same saneha without either trusting a version
+    // number that nobody bumps.
+    assert_eq!(health.skill.as_deref(), Some(saneha::skill::digest()));
+}
+
+#[test]
+fn a_join_is_quiet_when_the_installed_skill_is_this_binary_s() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create the channel");
+    let home = home_with_the_skill(&server, &[".claude/skills"]);
+
+    let said = join_stderr(&server, home.path(), "brisk-otter");
+    assert!(
+        !said.contains("behind"),
+        "nothing is behind, so nothing should be said: {said}"
+    );
+}
+
+#[test]
+fn a_join_says_which_harness_has_a_skill_behind_this_binary() {
+    let server = TestServer::start();
+    server
+        .remote()
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create the channel");
+    // Two harnesses, and only one of them is left behind, so the message has
+    // to name the one that is rather than telling a person to go and look.
+    let home = home_with_the_skill(&server, &[".claude/skills", ".copilot/skills"]);
+    let stale = home.path().join(".claude/skills/saneha/SKILL.md");
+    let text = std::fs::read_to_string(&stale).expect("read the installed skill");
+    std::fs::write(&stale, text.replace("## Handing off", "## Older wording"))
+        .expect("age the installed skill");
+
+    let said = join_stderr(&server, home.path(), "brisk-otter");
+    assert!(
+        said.contains("saneha init"),
+        "it has to say the fix: {said}"
+    );
+    assert!(said.contains("Claude Code"), "and which harness: {said}");
+    assert!(
+        !said.contains("Copilot CLI"),
+        "Copilot's copy is current and should not be named: {said}"
+    );
+}

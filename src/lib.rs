@@ -16,3 +16,20 @@ pub mod slug;
 pub mod store;
 
 pub use cli::run;
+
+/// FNV-1a over some bytes, as sixteen hex characters.
+///
+/// Two things in this binary have to say "the bytes I carry are these and not
+/// another build's": the viewer's entity tag, so a browser fetches a page that
+/// has changed, and the skill digest a client compares with the server's, so an
+/// agent finds out its instructions are behind. Neither is defending against
+/// somebody choosing bytes to collide with it, so a short hash that is not a
+/// cryptographic one is the whole of what either needs.
+pub fn digest_hex(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}

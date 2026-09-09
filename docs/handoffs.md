@@ -95,8 +95,8 @@ The current skill tells agents to do this without being asked. An agent that
 does not is running an old copy — see below.
 
 **"The old agent is still sitting there waiting."** It is on a skill from before
-handoffs were written down, which told it to wait after every message. Update
-it:
+handoffs were written down, which told it to wait after every message. `saneha
+join` will have said so on standard error — see *Keeping up* below. Update it:
 
 ```sh
 cargo install --path .    # in the saneha repo, if the binary is behind
@@ -117,6 +117,35 @@ still fails, check the name against `saneha list` or the viewer.
 machine, the file is already sitting in that directory and `saneha fetch` will
 not write over it. That is a refusal, not a loss — the copy on disk is the same
 file.
+
+## Keeping up
+
+Two things go stale independently, and only one of them `saneha init` can fix.
+
+`saneha join` checks both and says so on standard error:
+
+- **"the saneha skill installed for Claude Code is behind this binary"** — the
+  ordinary case. `saneha init` fixes it, and names the harness so you know
+  which one drifted.
+- **"the server was built from a different saneha than this one"** — your
+  *binary* is out of step with what is deployed. **`saneha init` does not fix
+  this**, and is worse than useless: with an old binary it reinstalls the old
+  skill and reports `up to date`. Update the binary first, then run `init`.
+
+That second one is why this check exists. A machine can sit for weeks with a
+binary from before a change, reporting success the whole time, and nothing
+would say otherwise.
+
+If you would rather never think about the first one, `saneha init` is
+idempotent, needs no server and runs in a few milliseconds, so it is fine in a
+shell profile:
+
+```sh
+saneha init >/dev/null 2>&1
+```
+
+That keeps the skill file level with whatever binary you have. It cannot tell
+you the binary is old — only the join warning does that.
 
 ## When not to bother
 

@@ -692,6 +692,8 @@ fn join(args: JoinArgs, me: &IdentityArgs) -> Result<()> {
             joined.identity
         ));
     }
+    say_if_behind(&remote);
+
     // Only a derived name is worth explaining. A name that was given is the
     // one that was asked for, and a person at a shell has no harness to name,
     // so the advice below would be noise (issue #46).
@@ -1274,6 +1276,59 @@ fn say(line: &str) -> Result<()> {
 /// the answer. `saneha join` prints only the granted identity on standard
 /// output, so anything explaining that identity goes here instead. A closed
 /// standard error is not worth failing over.
+/// Says so, once, when the instructions an agent is about to follow are not
+/// the ones this saneha was built with.
+///
+/// There are two ways to be behind and they need different answers, so they
+/// are two sentences rather than one. The server carrying a different skill
+/// means this *binary* is out of step with what is deployed, and no amount of
+/// `saneha init` fixes that — it would reinstall the same old skill and say
+/// `up to date`, which is the failure this whole thing exists to make
+/// visible. An installed file differing from this binary's skill is the
+/// ordinary case that `init` does fix.
+///
+/// This hangs off `join` because a join is the first thing an agent does, and
+/// the skill already teaches it to read what a join says on standard error.
+/// None of it can fail a join: a server too old to answer, or one that cannot
+/// be reached for this, leaves the check unmade rather than stopping somebody
+/// joining a channel.
+fn say_if_behind(remote: &Remote) {
+    let mine = skill::digest();
+    match remote.health() {
+        Ok(health) => match health.skill.as_deref() {
+            Some(theirs) if theirs == mine => {}
+            Some(_) => warn(
+                "the server was built from a different saneha than this one, so the skill your \
+                 agents follow may be behind it; update this binary and then run: saneha init",
+            ),
+            None => warn(
+                "the server is too old to say which skill it carries, so it is behind this \
+                 binary; the two are worth bringing back together",
+            ),
+        },
+        // Not being able to ask is not something to report. The verbs that
+        // need the server will say so themselves, in their own words.
+        Err(_) => return,
+    }
+
+    // Purely local, and a read: `install` with `dry_run` opens each installed
+    // file and compares, writing nothing.
+    let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let behind: Vec<String> = skill::install(&PathBuf::from(home), env!("CARGO_PKG_VERSION"), true)
+        .into_iter()
+        .filter(|outcome| matches!(outcome.action, skill::Action::Updated))
+        .map(|outcome| outcome.harness.to_string())
+        .collect();
+    if !behind.is_empty() {
+        warn(&format!(
+            "the saneha skill installed for {} is behind this binary; run: saneha init",
+            behind.join(" and ")
+        ));
+    }
+}
+
 fn warn(line: &str) {
     use std::io::Write;
 

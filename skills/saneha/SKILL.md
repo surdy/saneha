@@ -24,7 +24,10 @@ session holds yours — and `join` prints the identity it granted. Pass its name
 half to every later verb as `--as <name>`: the CLI does not remember the grant.
 Every verb takes `--as` and `--harness`, before or after the verb, and
 `SANEHA_AS=<name> saneha …` says the same. Codex and Copilot CLI are
-unrecognised: add `--harness codex` (or `copilot`) too.
+unrecognised: add `--harness codex` (or `copilot`) too. `join` also says when
+the skill you are following is behind the saneha you are talking to: run
+`saneha init` and read it again when it names your harness, and tell the person
+when it says this binary is behind the server, which `init` cannot fix.
 
 ## Joining
 

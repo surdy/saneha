@@ -263,6 +263,16 @@ impl Remote {
         }
     }
 
+    /// What the server says about itself: whether it is well, how many waits
+    /// it is holding, and which saneha it was built from.
+    pub fn health(&self) -> Result<crate::api::Health> {
+        let response = self.check(
+            retrying(|| self.agent.get(self.url("/health")).call())
+                .map_err(|err| self.unreachable(&err))?,
+        )?;
+        read_json(response, "health")
+    }
+
     /// Everyone who has joined a channel.
     pub fn list_participants(&self, channel: &str) -> Result<Vec<Participant>> {
         let response = self.check(
