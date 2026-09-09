@@ -240,14 +240,27 @@ fn init_installs_into_every_harness_that_is_there() {
         let written = std::fs::read_to_string(&path).expect("the installed skill");
         assert!(written.starts_with("---\nname: saneha\n"), "{written}");
         assert!(written.contains(&marker), "{written}");
-        // The marker is the only difference from the repository's own copy.
+        // What is installed is a pointer at the binary, not a copy of the
+        // instructions: the frontmatter is the skill's, so a harness loads it
+        // at the same moments, and the body says where to get the rest.
         assert_eq!(
-            written.replacen(
-                &format!("saneha-managed: {}\n", env!("CARGO_PKG_VERSION")),
-                "",
-                1
-            ),
+            written
+                .split("\n---\n")
+                .next()
+                .expect("frontmatter")
+                .to_string()
+                + "\n---\n",
             repository_skill()
+                .split("\n---\n")
+                .next()
+                .expect("frontmatter")
+                .to_string()
+                + &format!("\nsaneha-managed: {}\n---\n", env!("CARGO_PKG_VERSION"))
+        );
+        assert!(written.contains("Run `saneha skill`"), "{written}");
+        assert!(
+            !written.contains("## The wake loop"),
+            "the instructions must not be copied into the installed file: {written}"
         );
         assert!(
             said.contains("installed") && said.contains(&path.display().to_string()),
@@ -297,7 +310,7 @@ fn an_older_saneha_skill_is_updated_in_place() {
     let said = stdout_of("init", &saneha(&home, &["init"]));
     assert!(said.contains("updated"), "{said}");
     let written = std::fs::read_to_string(&path).expect("the installed skill");
-    assert!(written.contains("## The wake loop"), "{written}");
+    assert!(written.contains("Run `saneha skill`"), "{written}");
     assert!(
         written.contains(&format!("saneha-managed: {}\n", env!("CARGO_PKG_VERSION"))),
         "{written}"

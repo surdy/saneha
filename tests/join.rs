@@ -1157,9 +1157,19 @@ fn a_join_says_which_harness_has_a_skill_behind_this_binary() {
     // to name the one that is rather than telling a person to go and look.
     let home = home_with_the_skill(&server, &[".claude/skills", ".copilot/skills"]);
     let stale = home.path().join(".claude/skills/saneha/SKILL.md");
+    // Aged the way a real installed file goes stale now that it is a pointer:
+    // its body is fixed, so what moves under it is the frontmatter that the
+    // harness triggers on.
     let text = std::fs::read_to_string(&stale).expect("read the installed skill");
-    std::fs::write(&stale, text.replace("## Handing off", "## Older wording"))
-        .expect("age the installed skill");
+    let aged = text.replace(
+        "description: Talk to",
+        "description: An older wording. Talk to",
+    );
+    assert_ne!(
+        aged, text,
+        "the installed file has to have been changed to be behind"
+    );
+    std::fs::write(&stale, aged).expect("age the installed skill");
 
     let said = join_stderr(&server, home.path(), "brisk-otter");
     assert!(

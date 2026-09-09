@@ -50,7 +50,7 @@ Verified: see [docs/wake-findings.md](wake-findings.md).
 ## Instructions for harnesses
 
 - One SKILL.md embedded in the binary. `saneha skill` prints it.
-- `saneha init` installs it into the user-level skill directory of each harness found on the machine (`~/.claude/skills`, `~/.copilot/skills`, `~/.agents/skills` for Codex per its published docs, to be confirmed on a machine that has it) as a file saneha marks as its own. It overwrites only a file carrying that marker, skips one without it, and never creates a harness directory that does not exist.
+- `saneha init` puts a file pointing at the binary into the user-level skill directory of each harness found on the machine (`~/.claude/skills`, `~/.copilot/skills`, `~/.agents/skills` for Codex per its published docs, to be confirmed on a machine that has it) as a file saneha marks as its own. It overwrites only a file carrying that marker, skips one without it, and never creates a harness directory that does not exist.
 - Bash-first: every instruction is a `saneha` command. No MCP server in v1.
 
 ## Verbs

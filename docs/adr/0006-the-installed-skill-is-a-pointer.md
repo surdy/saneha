@@ -1,0 +1,26 @@
+---
+status: accepted
+date: 2026-09-09
+---
+# What `init` installs is a pointer at the binary, not a copy of the skill
+
+`saneha init` used to write the whole of `SKILL.md` into each harness's skills directory, which put the instructions an agent follows in two places: the binary that will run its commands, and a file on disk. Two places is one too many. The copy is right at the moment it is written and goes stale the moment the binary moves, and it stays stale until somebody remembers to run `init` again — which on the second laptop went unremembered for four days, through a change that rewrote how handoffs work. [ADR-0005](0005-a-handoff-is-a-message-and-a-leave.md) put the whole weight of a handoff on prose in that file, so a stale copy is not a cosmetic problem: it is an agent following instructions that no longer describe the tool in front of it.
+
+So `init` now writes a short file that says where the instructions are — `saneha skill`, printed by the binary that will run the commands — and the instructions themselves stay in one place. The copy cannot drift because there is no copy. This is the same reasoning that already governs the repository: the binary carries `skills/saneha/SKILL.md` by `include_str!` so that what an agent reads and what the repository says cannot disagree, and this extends that property one hop further, to the file a harness actually loads.
+
+Two things stay in the installed file, because a pointer cannot do without them. The frontmatter, which is what makes a harness load the skill at the right moment, and is therefore the one part that has to be on disk — it is lifted verbatim from the skill rather than written out again, so the description a harness matches on cannot drift either. And an orientation and a fallback: what saneha is, so a person opening the file learns something, and what to do when the binary cannot be run, because an agent in that position can do nothing else the file might have told it and should say so rather than invent verbs.
+
+## Consequences
+
+- Updating the binary updates the instructions. `saneha init` is a first-run step per machine rather than a step after every change, and stays necessary only when the frontmatter changes, which is rare.
+- The local half of the staleness check in [#63](https://github.com/surdy/saneha/pull/63) now fires almost never, because the installed file changes almost never. What still moves it is a change to the pointer's own body or to the crate version, as well as to the frontmatter — so somebody who edits the body and then sees every `join` nag has an answer here. It is still correct, and the half that matters — this binary against the server's — is untouched. Between them, the copy that used to go stale silently cannot, and the binary that still can says so. Its message, "the saneha skill installed for X is behind this binary", is now slightly misnamed: what is behind is the file that makes a harness load the skill, not the skill. Left as it is rather than reworded twice in two changes.
+- The skill still tells an agent that a warning naming its harness means "run `saneha init` and read it again" (`skills/saneha/SKILL.md`). After this the re-read returns the same `saneha skill` output the agent already holds, so the second half of that sentence costs a call and teaches nothing. It is not wrong enough to change here, where it would be a third rewording of the same paragraph in three changes, and it is the first thing to fix in the next one.
+- An agent spends one tool call learning what it already had for free. Measured against what it buys, which is that the two can never disagree, this is worth it.
+- **A broken or missing binary now costs an agent its instructions, where before it had a file to read.** This is the real price. It is mitigated rather than removed: the file says what saneha is, says where to look for the binary, and says to tell the person rather than guess. An agent that cannot run `saneha` could not have used saneha anyway, so what is lost is the ability to explain the tool, not to use it.
+- The skill's own line budget still applies to `skills/saneha/SKILL.md`, because that is what `saneha skill` prints and what an agent reads. The installed file has a budget of its own, and it is much smaller.
+
+## What was measured, and what would settle the risk
+
+Four fresh Claude Code sessions, each given a skill file and a channel with a request in it, recorded in [pointer-findings.md](../pointer-findings.md). Three of them were given a pointer and all three fetched the instructions before running any other verb, which is the property this rests on.
+
+The compaction risk above is the one thing that run could not touch, and the experiment that would settle it is worth naming so the next page has something to run: one session long enough to compact, then a request left in its channel, and whether the agent goes back for `saneha skill` or invents a verb. Worth noting that in the one harness tested the skill's body already arrives as the result of a tool call, so compaction sees tool output either way; the risk belongs to a harness that puts skill content in the system prompt, which is Copilot CLI and Codex, which are untested regardless.
