@@ -920,10 +920,28 @@ impl Store {
     /// channel and not an event in it.
     ///
     /// An empty or blank purpose clears it, which is the shape `create` already
-    /// accepts. A purpose equal to the one already there writes nothing.
+    /// accepts. A purpose equal to the one already there is written again
+    /// rather than skipped: the row is the same afterwards either way, and the
+    /// viewer does not send one, so there is nothing here worth a read to
+    /// avoid a write. (This said the write was skipped, which was never true —
+    /// the no-op check is the page's, and the store took credit for it.)
+    ///
+    /// `by` says who is asking and is checked for shape and then not used
+    /// again. It is not required to be a participant, deliberately: a purpose
+    /// edited from the viewer comes from `<name>@web`, which joins a channel
+    /// on its first *message* and so has often joined nothing at the moment it
+    /// renames one — the same reason `close` takes anybody. And it is not
+    /// recorded, because there is nowhere to record it: the paragraph above is
+    /// why a purpose change writes no transcript line, and a column holding
+    /// only the latest editor would be a second, weaker record of a thing this
+    /// schema says is not an event. So it identifies the caller to a server
+    /// that does not authenticate anybody ([ADR-0003]) and is kept for the
+    /// shape it shares with `close` rather than for anything it decides.
     ///
     /// A closed channel is refused: it is the record of a conversation that is
     /// over, and what it says it was for is part of that record.
+    ///
+    /// [ADR-0003]: ../docs/adr/0003-no-authentication.md
     pub fn set_purpose(
         &self,
         channel: &str,

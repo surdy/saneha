@@ -581,6 +581,10 @@ async fn channel_detail(
 /// Nothing is woken. A purpose is not a message, so no held wait is looking
 /// for it, and a viewer that has the channel open picks the new line up on its
 /// next refresh of the list rather than being interrupted mid-transcript.
+///
+/// The `by` in the body identifies the caller and decides nothing: it is not
+/// checked against the channel's participants and it is not recorded. See
+/// [`crate::store::Store::set_purpose`] for why it is neither.
 async fn set_purpose(
     State(serving): State<Arc<Serving>>,
     Path(channel): Path<String>,
