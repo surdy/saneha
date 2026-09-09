@@ -210,6 +210,23 @@ pub struct Joined {
     pub participant: Participant,
 }
 
+/// The body of `GET /health`.
+///
+/// `version` and `skill` are optional because a server older than they are
+/// does not send them, and a client that refused to parse that answer could
+/// not report the one thing it most needs to: that the two are far enough
+/// apart to matter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Health {
+    pub status: String,
+    pub service: String,
+    pub held_waits: usize,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub skill: Option<String>,
+}
+
 /// The body of `GET /channels/{name}/participants`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParticipantList {

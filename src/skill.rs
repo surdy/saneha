@@ -20,6 +20,18 @@ pub const SKILL: &str = include_str!("../skills/saneha/SKILL.md");
 /// it again.
 pub const MARKER: &str = "saneha-managed";
 
+/// The digest of the skill this build carries.
+///
+/// The crate version cannot answer "are we running the same saneha", because
+/// it has not moved since the first commit and a version nobody bumps is a
+/// check that never fires. The skill's own bytes do move, exactly when the
+/// instructions an agent follows move, which is the thing worth noticing. So
+/// this is what the server reports and what a client compares against its own.
+pub fn digest() -> &'static str {
+    static DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DIGEST.get_or_init(|| crate::digest_hex(SKILL.as_bytes()))
+}
+
 /// The directory `init` makes inside a harness's own skills directory. One
 /// skill, one directory, named for the skill.
 const SKILL_DIR: &str = "saneha";

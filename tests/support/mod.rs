@@ -27,11 +27,19 @@ const HARNESS_ENV: &[&str] = &[
 pub struct TestServer {
     pub url: String,
     database: TempDir,
+    /// A home for the commands this server runs, so none of them reads the
+    /// home of whoever is running the tests. `join` looks at the skill
+    /// installed under `HOME` to say whether it is behind, and a check that
+    /// consulted the real one would answer differently on a laptop with the
+    /// skill installed than on a runner without it. Empty unless a test puts
+    /// something in it, which is the machine every test should assume.
+    home: TempDir,
 }
 
 impl TestServer {
     pub fn start() -> TestServer {
         let database = tempfile::tempdir().expect("temporary directory");
+        let home = tempfile::tempdir().expect("temporary home");
         let path = database.path().join("saneha.db");
         let store = Arc::new(Store::open(&path).expect("open the database"));
 
@@ -54,6 +62,7 @@ impl TestServer {
 
         let address = receive_address.recv().expect("the server to bind");
         TestServer {
+            home,
             url: format!("http://{address}"),
             database,
         }
@@ -196,7 +205,10 @@ impl TestServer {
     /// environment this test process happens to be running under removed.
     pub fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_saneha"));
-        command.args(args).env("SANEHA_URL", &self.url);
+        command
+            .args(args)
+            .env("SANEHA_URL", &self.url)
+            .env("HOME", self.home.path());
         for key in HARNESS_ENV {
             command.env_remove(key);
         }
@@ -220,6 +232,7 @@ impl TestServer {
             .arg("-c")
             .arg(script)
             .env("SANEHA_URL", &self.url)
+            .env("HOME", self.home.path())
             .env("SANEHA", env!("CARGO_BIN_EXE_saneha"));
         for key in HARNESS_ENV {
             command.env_remove(key);

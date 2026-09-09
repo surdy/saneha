@@ -493,14 +493,7 @@ pub const VIEWER: &str = include_str!("../web/index.html");
 /// fixed at compile time.
 fn viewer_etag() -> &'static str {
     static ETAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    ETAG.get_or_init(|| {
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in VIEWER.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        format!("\"{hash:016x}\"")
-    })
+    ETAG.get_or_init(|| format!("\"{}\"", crate::digest_hex(VIEWER.as_bytes())))
 }
 
 /// The viewer, with the two headers that make a deploy visible without a
@@ -543,6 +536,11 @@ async fn health(State(serving): State<Arc<Serving>>) -> Json<serde_json::Value> 
         "status": "ok",
         "service": "saneha",
         "held_waits": serving.waiters.held(),
+        "version": env!("CARGO_PKG_VERSION"),
+        // Which skill this build carries, so a client can tell that the
+        // instructions its agents follow are not the ones this server was
+        // built with. A server too old to report it says so by its absence.
+        "skill": crate::skill::digest(),
     }))
 }
 
