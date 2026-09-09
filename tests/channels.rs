@@ -589,3 +589,105 @@ fn a_purpose_is_held_to_one_line_and_a_real_identity() {
             .is_none()
     );
 }
+
+/// A server with one open channel and two closed ones, the second closed last.
+fn server_with_closed() -> TestServer {
+    let server = TestServer::start();
+    let remote = server.remote();
+    remote
+        .create_channel(Some("still-open"), Some("the live one"))
+        .expect("create");
+    for name in ["closed-first", "closed-last"] {
+        remote.create_channel(Some(name), None).expect("create");
+        remote.close_channel(name, "surdy@here").expect("close");
+    }
+    server
+}
+
+#[test]
+fn the_listing_counts_the_closed_channels_rather_than_printing_them() {
+    // ADR-0005 made a channel per handoff, so they accumulate; closing already
+    // says a conversation is over and this is the listing using what the close
+    // said. The count is the useful part of a pile of finished conversations.
+    let server = server_with_closed();
+    let listed = stdout_of("list", &server.run(&["list"]));
+
+    assert!(
+        listed.contains("still-open"),
+        "the open one is shown: {listed}"
+    );
+    assert!(
+        !listed.contains("closed-first") && !listed.contains("closed-last"),
+        "the closed ones are not: {listed}"
+    );
+    assert!(
+        listed.contains("2 closed — saneha list --all"),
+        "and the count says how to see them: {listed}"
+    );
+}
+
+#[test]
+fn all_shows_the_closed_ones_under_the_open_ones_newest_first() {
+    let server = server_with_closed();
+    let listed = stdout_of("list --all", &server.run(&["list", "--all"]));
+
+    let at = |name: &str| {
+        listed
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} in {listed}"))
+    };
+    assert!(
+        at("still-open") < at("closed-first"),
+        "open first: {listed}"
+    );
+    assert!(
+        at("still-open") < at("closed-last"),
+        "both of them: {listed}"
+    );
+    // Which of the two leads is `closed_at`, and these two were closed in the
+    // same second — the ordering itself is a unit test in `cli.rs`, where the
+    // timestamps can differ without a sleep.
+    assert!(
+        !listed.contains("saneha list --all"),
+        "nothing left to offer: {listed}"
+    );
+}
+
+#[test]
+fn json_lists_every_channel_whatever_the_table_shows() {
+    // The machine's view is never filtered: a listing that quietly left
+    // channels out would be a worse answer than a long one.
+    let server = server_with_closed();
+    for args in [&["list", "--json"][..], &["list", "--json", "--all"][..]] {
+        let said = stdout_of("list --json", &server.run(args));
+        let answer: serde_json::Value = serde_json::from_str(&said).expect("JSON");
+        let names: Vec<&str> = answer["channels"]
+            .as_array()
+            .expect("channels")
+            .iter()
+            .map(|c| c["name"].as_str().expect("a name"))
+            .collect();
+        assert_eq!(names.len(), 3, "{args:?} listed {names:?}");
+    }
+}
+
+#[test]
+fn a_server_of_nothing_but_closed_channels_explains_itself() {
+    // Otherwise the table is a bare header and reads as a server with nothing
+    // on it, which is the one case where hiding is actively misleading.
+    let server = TestServer::start();
+    let remote = server.remote();
+    remote
+        .create_channel(Some("all-done"), None)
+        .expect("create");
+    remote
+        .close_channel("all-done", "surdy@here")
+        .expect("close");
+
+    let listed = stdout_of("list", &server.run(&["list"]));
+    assert!(
+        listed.contains("No open channels."),
+        "it says the open ones are the empty half: {listed}"
+    );
+    assert!(listed.contains("1 closed"), "{listed}");
+}

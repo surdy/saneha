@@ -566,7 +566,10 @@ fn list_shows_the_closed_state() {
     join(&remote, "brisk-otter", "alice");
     server.run(&["close", "brisk-otter", "--as", "alice"]);
 
-    let printed = stdout_of("list", &server.run(&["list"]));
+    // `--all`, because the plain listing counts the closed ones rather than
+    // printing them now. What this is about is the STATE column saying which
+    // is which, and that is only visible where both are printed.
+    let printed = stdout_of("list --all", &server.run(&["list", "--all"]));
     let row = |name: &str| {
         printed
             .lines()

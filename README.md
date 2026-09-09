@@ -28,7 +28,8 @@ export SANEHA_URL=http://localhost:7343
 
 saneha new                                          # mints a slug such as brisk-otter and prints it
 saneha new brisk-otter --purpose "coordinating the refactor"
-saneha list
+saneha list                                         # the open channels, and a count of the closed ones
+saneha list --all                                   # the closed ones too, newest closed first
 saneha list --as reviewer                           # and how much reviewer has not read of each
 saneha list --json                                  # every subcommand that prints takes --json
 
@@ -120,7 +121,9 @@ One `saneha wait` is many HTTP requests. The server holds each one open for at m
 
 `leave` is a declaration, not a departure. It marks this participant away and writes a leave into the transcript; the participant stays in the channel, can still be mentioned, and goes on collecting unread messages, and `saneha join` resumes it with its read cursor where it was. Leaving twice does nothing the second time and still exits 0, and leaving a closed channel does nothing at all, because a leave is a message and a closed channel takes no more of them.
 
-`close` makes a channel read-only: no more messages, no more joins, and a close system message that every held `wait` returns on at once, exiting 4. Anyone may close a channel, whether or not they have joined it — a person closing from the viewer is `surdy@web`, who has joined nothing — so who did it is recorded in the body of that message rather than as a participant, which is what the schema says a `close` is about the channel and not about anybody. Closing a closed channel does nothing and exits 0. `saneha list` shows `open` or `closed` for every channel.
+`close` makes a channel read-only: no more messages, no more joins, and a close system message that every held `wait` returns on at once, exiting 4. Anyone may close a channel, whether or not they have joined it — a person closing from the viewer is `surdy@web`, who has joined nothing — so who did it is recorded in the body of that message rather than as a participant, which is what the schema says a `close` is about the channel and not about anybody. Closing a closed channel does nothing and exits 0.
+
+`saneha list` shows the open channels and then a line saying how many closed ones there are; `--all` prints those too, under the open ones and newest closed first. Sorted by creation with no grouping, a finished conversation cost the same attention as a live one, which [ADR-0005](docs/adr/0005-a-handoff-is-a-message-and-a-leave.md) named as a consequence of making a channel per handoff: they accumulate, and closing already says which are over. This is the listing using what the close said, rather than a second thing to mark. `closed_at` is a second, so two channels closed in the same one tie and the name breaks it — an arbitrary order is still worth being the same one every time. `--json` is never filtered: that is the machine's view, and a listing that quietly left channels out would be a worse answer than a long one.
 
 `delete` removes a channel, its participants, its transcript and its attachments, and nothing brings them back, so it is asked twice. Without `--yes` it prints what would go — the participant count, the message count, the attachment count and what those attachments take up — removes nothing, and exits 1. With `--yes` it removes them and prints the same counts as what went. Open and closed channels delete alike. Any `wait` being held on the channel ends at once and exits 1, saying the channel no longer exists. On the wire the confirmation is `DELETE /channels/{channel}?confirm=true`: it is in the URL rather than in a body, because a `DELETE` body is a thing that gets dropped on the way and a deletion must not be decided by something that went missing.
 

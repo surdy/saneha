@@ -138,6 +138,13 @@ pub struct NewArgs {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
+    /// Show the closed channels too, under the open ones
+    ///
+    /// Without it the table names how many there are rather than printing
+    /// them. `--json` is unaffected and always lists every channel.
+    #[arg(long, short = 'a')]
+    pub all: bool,
+
     /// Print the channels as JSON
     #[arg(long)]
     pub json: bool,
@@ -541,11 +548,13 @@ fn list(args: ListArgs, me: &IdentityArgs) -> Result<()> {
     let identity = given_identity(me)?;
     let channels = remote.list_channels(identity.as_deref())?;
     if args.json {
+        // Never filtered. This is the machine's view, and a listing that
+        // quietly left channels out would be a worse answer than a long one.
         return say(&serde_json::to_string_pretty(&crate::api::ChannelList {
             channels,
         })?);
     }
-    write_out(&channel_table(&channels, identity.is_some()))
+    write_out(&channel_table(&channels, identity.is_some(), args.all))
 }
 
 /// The identity `--as` or `SANEHA_AS` names on this host, and `None` when
@@ -1452,17 +1461,53 @@ fn warn(line: &str) {
 /// The `saneha list` table. `unread` adds a column of what the identity that
 /// was asked about has not read — the newest message id less its read cursor,
 /// and `-` where it has not joined that channel at all.
-fn channel_table(channels: &[Channel], unread: bool) -> String {
+/// The channels, open ones first and closed ones after them.
+///
+/// Sorted by creation with no grouping, this was a list where the eight
+/// finished conversations and the five live ones cost the same attention —
+/// named as a consequence in [ADR-0005], which made a channel per handoff and
+/// so made them accumulate faster. Closing already says a conversation is
+/// over; all this does is let the listing use what the close said.
+///
+/// Closed channels are counted rather than printed unless `all`, because the
+/// count is the useful part of eight finished conversations and the names are
+/// not. `--json` is never filtered: that is the machine's view, and one that
+/// quietly left channels out would be worse than a long one.
+///
+/// [ADR-0005]: ../docs/adr/0005-a-handoff-is-a-message-and-a-leave.md
+fn channel_table(channels: &[Channel], unread: bool, all: bool) -> String {
     if channels.is_empty() {
         return "No channels yet. Create one with: saneha new\n".to_string();
     }
 
+    let (open, closed): (Vec<&Channel>, Vec<&Channel>) = channels
+        .iter()
+        .partition(|channel| channel.state == ChannelState::Open);
+
+    // Newest closed first: the one worth finding again is the one just
+    // finished, and `closed_at` is on the wire already for the viewer's sake.
+    //
+    // It is a second, so two channels closed in the same one tie — which
+    // happens: four of them were closed inside ninety seconds on the day this
+    // was written. The name breaks the tie, because an order that is arbitrary
+    // is still worth being the same arbitrary order every time.
+    let mut closed = closed;
+    closed.sort_by(|a, b| b.closed_at.cmp(&a.closed_at).then(a.name.cmp(&b.name)));
+
+    let shown: Vec<&Channel> = if all {
+        open.iter().chain(closed.iter()).copied().collect()
+    } else {
+        open.clone()
+    };
+
+    // Widths are measured over what is printed, so hiding the closed ones
+    // does not leave the table padded for names that are not there.
     let unread_of = |channel: &Channel| match channel.read_cursor {
         Some(cursor) => (channel.newest_id - cursor).max(0).to_string(),
         None => "-".to_string(),
     };
     let width = |header: &str, cell: &dyn Fn(&Channel) -> String| {
-        channels
+        shown
             .iter()
             .map(|c| cell(c).chars().count())
             .chain(std::iter::once(header.chars().count()))
@@ -1487,7 +1532,7 @@ fn channel_table(channels: &[Channel], unread: bool) -> String {
     };
 
     row("NAME", "STATE", "NEWEST", "UNREAD", "PURPOSE");
-    for channel in channels {
+    for channel in &shown {
         row(
             &channel.name,
             channel.state.as_str(),
@@ -1495,6 +1540,19 @@ fn channel_table(channels: &[Channel], unread: bool) -> String {
             &unread_of(channel),
             channel.purpose.as_deref().unwrap_or("-"),
         );
+    }
+
+    // Said even when there are no open channels, so a listing that looks empty
+    // explains itself rather than reading as a server with nothing on it.
+    if !all && !closed.is_empty() {
+        if open.is_empty() {
+            out.push_str("No open channels.");
+        }
+        out.push_str(&format!(
+            "{}{} closed — saneha list --all\n",
+            if open.is_empty() { " " } else { "" },
+            closed.len()
+        ));
     }
     out
 }
@@ -1664,6 +1722,43 @@ fn short_name(identity: &str, participants: &[Participant]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The names in the order the table printed them.
+    fn order(table: &str, names: &[&str]) -> Vec<String> {
+        let mut found: Vec<(usize, String)> = names
+            .iter()
+            .filter_map(|name| table.find(*name).map(|at| (at, (*name).to_string())))
+            .collect();
+        found.sort();
+        found.into_iter().map(|(_, name)| name).collect()
+    }
+
+    /// `closed_at` is a second, and two channels closed in the same one tie.
+    /// The ordering needs timestamps that differ, which a test against a live
+    /// server cannot arrange without sleeping through a second.
+    #[test]
+    fn the_closed_ones_come_last_newest_first_and_ties_go_by_name() {
+        let channels = vec![
+            closed_at("older", "2026-09-09T07:00:00Z"),
+            channel("live", None),
+            closed_at("tied-b", "2026-09-09T08:00:00Z"),
+            closed_at("newer", "2026-09-09T09:00:00Z"),
+            closed_at("tied-a", "2026-09-09T08:00:00Z"),
+        ];
+        let names = ["live", "newer", "tied-a", "tied-b", "older"];
+
+        let table = channel_table(&channels, false, true);
+        assert_eq!(
+            order(&table, &names),
+            vec!["live", "newer", "tied-a", "tied-b", "older"],
+            "open first, then newest closed, ties by name:\n{table}"
+        );
+
+        // And without `--all` the same list is the open one and a count.
+        let hidden = channel_table(&channels, false, false);
+        assert_eq!(order(&hidden, &names), vec!["live"], "{hidden}");
+        assert!(hidden.contains("4 closed"), "{hidden}");
+    }
+
     /// The three answers `different_skill` gives, two of which are silence.
     ///
     /// These cannot be reached through a `TestServer`: server and client are
@@ -1705,6 +1800,15 @@ mod tests {
         }
     }
 
+    /// The same, closed at a stated moment.
+    fn closed_at(name: &str, closed: &str) -> Channel {
+        Channel {
+            state: ChannelState::Closed,
+            closed_at: Some(closed.to_string()),
+            ..channel(name, None)
+        }
+    }
+
     #[test]
     fn command_line_is_well_formed() {
         use clap::CommandFactory;
@@ -1714,7 +1818,7 @@ mod tests {
     #[test]
     fn empty_listing_says_so() {
         assert_eq!(
-            channel_table(&[], false),
+            channel_table(&[], false, false),
             "No channels yet. Create one with: saneha new\n"
         );
     }
@@ -1726,6 +1830,7 @@ mod tests {
                 channel("brisk-otter", Some("the refactor")),
                 channel("a-much-longer-channel", None),
             ],
+            false,
             false,
         );
         let lines: Vec<&str> = table.lines().collect();
