@@ -56,6 +56,7 @@ fn request(name: &str, harness: &str) -> JoinRequest {
         name: name.to_string(),
         host: host(),
         harness: harness.to_string(),
+        key: None,
         session_id: None,
         pid: None,
         pid_started_at: None,
@@ -999,5 +1000,92 @@ fn participants_are_listed() {
     assert!(
         stderr.starts_with("saneha: there is no channel named \"nobody-here\""),
         "{stderr}"
+    );
+}
+
+/// The request a retry sends: the same bytes, including the same key.
+fn keyed_request(name: &str, key: &str) -> JoinRequest {
+    JoinRequest {
+        name: name.to_string(),
+        host: host(),
+        harness: "claude".to_string(),
+        key: Some(key.to_string()),
+        session_id: None,
+        pid: None,
+        pid_started_at: None,
+        cwd: Some("/repos/saneha".to_string()),
+        madari_pane: None,
+        same_host_session_live: false,
+        held_session_id: None,
+    }
+}
+
+#[test]
+fn a_join_made_again_under_its_key_is_the_same_join() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    remote
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create the channel");
+
+    let key = saneha::api::mint_id();
+    let request = keyed_request("alice", &key);
+    let first = match remote.join("brisk-otter", &request).expect("join") {
+        JoinAnswer::Granted(joined) => joined,
+        JoinAnswer::Stale(why) => panic!("stale: {why}"),
+    };
+    // What `retrying` does when a signal lands on the answer to the first.
+    let again = match remote.join("brisk-otter", &request).expect("join again") {
+        JoinAnswer::Granted(joined) => joined,
+        JoinAnswer::Stale(why) => panic!("stale: {why}"),
+    };
+
+    assert_eq!(first.identity, again.identity);
+    let transcript = remote.messages("brisk-otter", 0, 100).expect("read");
+    assert_eq!(
+        transcript.len(),
+        1,
+        "a repeat must not put a join nobody made in the transcript: {transcript:?}"
+    );
+}
+
+#[test]
+fn a_repeat_of_a_suffixed_join_does_not_hand_out_a_second_name() {
+    let server = TestServer::start();
+    let remote = server.remote();
+    remote
+        .create_channel(Some("brisk-otter"), None)
+        .expect("create the channel");
+
+    // Somebody already holds the name, and their session is live, so this join
+    // is granted a suffixed one. A repeat of it must grant the same suffixed
+    // name rather than the next one along — the reason the key is checked
+    // before any of the work and not only before the message.
+    let held = keyed_request("alice", &saneha::api::mint_id());
+    remote.join("brisk-otter", &held).expect("the first alice");
+
+    let key = saneha::api::mint_id();
+    let mut request = keyed_request("alice", &key);
+    request.same_host_session_live = true;
+
+    let first = match remote.join("brisk-otter", &request).expect("join") {
+        JoinAnswer::Granted(joined) => joined,
+        JoinAnswer::Stale(why) => panic!("stale: {why}"),
+    };
+    let again = match remote.join("brisk-otter", &request).expect("join again") {
+        JoinAnswer::Granted(joined) => joined,
+        JoinAnswer::Stale(why) => panic!("stale: {why}"),
+    };
+
+    assert!(first.suffixed, "the first should have been suffixed");
+    assert_eq!(first.identity, again.identity, "and the repeat is the same");
+    assert!(again.suffixed, "which is still a suffixed name");
+    let participants = remote
+        .list_participants("brisk-otter")
+        .expect("participants");
+    assert_eq!(
+        participants.len(),
+        2,
+        "a repeat must not create a third participant: {participants:?}"
     );
 }

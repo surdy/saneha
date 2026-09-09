@@ -650,6 +650,7 @@ fn join(args: JoinArgs, me: &IdentityArgs) -> Result<()> {
             name: name.clone(),
             host: host.clone(),
             harness: harness.clone(),
+            key: None,
             session_id: session_id.clone(),
             pid,
             pid_started_at: pid_started_at.clone(),

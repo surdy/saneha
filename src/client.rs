@@ -238,6 +238,14 @@ impl Remote {
     /// `Stale` when the participant the request was reasoned about changed
     /// hands in between and the caller should look again.
     pub fn join(&self, channel: &str, request: &JoinRequest) -> Result<JoinAnswer> {
+        // Minted here rather than asked of the caller, and minted before the
+        // first attempt so that every retry inside `retrying` sends the same
+        // one. A join is otherwise the one write in this client that a repeat
+        // changes: the server takes it for a resume and writes a second join
+        // into the transcript, which is a message nobody sent (issue #64).
+        let mut request = request.clone();
+        request.key.get_or_insert_with(crate::api::mint_id);
+        let request = &request;
         let response = retrying(|| {
             self.agent
                 .post(self.url(&format!("/channels/{channel}/participants")))
@@ -923,7 +931,10 @@ mod tests {
         // And the rule says nothing unless the helper is used where repeating
         // a request only asks the same question twice. A send is in that list
         // now: it carries the key its sender minted, so the server answers a
-        // repeat with the message it already wrote (issue #38).
+        // repeat with the message it already wrote (issue #38). So is a join,
+        // which mints its own before the first attempt (issue #64) — until it
+        // did, a signal landing on the answer to a join put a second join in
+        // the transcript, and on the suffixed path handed out a second name.
         for repeatable in [
             "pub fn messages",
             "pub fn join",

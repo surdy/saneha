@@ -34,6 +34,7 @@ fn join_on(remote: &Remote, channel: &str, name: &str, host: &str) -> String {
         name: name.to_string(),
         host: host.to_string(),
         harness: "claude".to_string(),
+        key: None,
         session_id: None,
         pid: None,
         pid_started_at: None,
