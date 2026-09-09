@@ -684,6 +684,28 @@ impl Store {
         let tx = conn.transaction()?;
         let channel_id = open_channel_id(&tx, channel, "nobody can join it")?;
 
+        // A join made again under the key it was made with the first time is
+        // the same join, and is answered with the participant it granted
+        // rather than granting another. This has to come before any of the
+        // work below: on the suffixed path a second attempt would not merely
+        // write a second message, it would hand out a second name.
+        if let Some(key) = request.key.as_deref() {
+            if let Some(participant_id) = joined_under_key(&tx, channel_id, key)? {
+                let participant = read_participant(&tx, participant_id)?;
+                let suffixed = participant.name != request.name;
+                tx.commit()?;
+                return Ok(Joined {
+                    channel: channel.to_string(),
+                    identity: participant.identity.clone(),
+                    // Nothing was created by this attempt, whatever the first
+                    // one did.
+                    resumed: true,
+                    suffixed,
+                    participant,
+                });
+            }
+        }
+
         let (participant_id, name, resumed, suffixed) = if request.same_host_session_live {
             let (id, name) = insert_suffixed(&tx, channel_id, channel, request)?;
             (id, name, false, true)
@@ -724,6 +746,7 @@ impl Store {
             "join",
             Some(participant_id),
             &format!("{identity} joined"),
+            request.key.as_deref(),
         )?;
         let participant = read_participant(&tx, participant_id)?;
         tx.commit()?;
@@ -815,6 +838,9 @@ impl Store {
                 "leave",
                 Some(participant_id),
                 &format!("{identity} left"),
+                // A leave is already safe to repeat: the second one finds the
+                // participant away and writes nothing.
+                None,
             )?;
         }
         let participant = read_participant(&tx, participant_id)?;
@@ -857,6 +883,9 @@ impl Store {
                 "close",
                 None,
                 &format!("{by} closed the channel"),
+                // A close is already safe to repeat: closing a closed channel
+                // writes nothing.
+                None,
             )?;
         }
         let row = tx.query_row(
@@ -2209,21 +2238,45 @@ fn channel_counts(conn: &Connection, channel_id: i64) -> Result<ChannelCounts, S
 /// `about_participant` is `None` for a `close`, which is about the channel and
 /// not about anybody; the schema's CHECK holds that difference, so this passes
 /// it through rather than deciding it.
+/// The id of the participant a join under `key` granted, when this channel
+/// already holds that join.
+///
+/// The `messages_send_key` index covers every kind of message, not only the
+/// ones a person sends, so the column migration 5 added for send keys is what
+/// a join key is kept in too, and the uniqueness is the one already enforced.
+fn joined_under_key(
+    conn: &Connection,
+    channel_id: i64,
+    key: &str,
+) -> Result<Option<i64>, StoreError> {
+    let found = conn
+        .query_row(
+            "SELECT about_participant FROM messages
+              WHERE channel_id = ?1 AND send_key = ?2 AND kind = 'join'",
+            rusqlite::params![channel_id, key],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?;
+    Ok(found.flatten())
+}
+
 fn write_system_message(
     conn: &Connection,
     channel_id: i64,
     kind: &str,
     about_participant: Option<i64>,
     body: &str,
+    key: Option<&str>,
 ) -> Result<i64, StoreError> {
     let message_id = next_message_id(conn, channel_id)?;
     conn.execute(
         &format!(
             "INSERT INTO messages
-                 (channel_id, id, kind, from_participant, about_participant, body, created_at)
-             VALUES (?1, ?2, ?3, NULL, ?4, ?5, {NOW})"
+                 (channel_id, id, kind, from_participant, about_participant, body,
+                  send_key, created_at)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, {NOW})"
         ),
-        rusqlite::params![channel_id, message_id, kind, about_participant, body],
+        rusqlite::params![channel_id, message_id, kind, about_participant, body, key],
     )?;
     Ok(message_id)
 }
@@ -2716,6 +2769,7 @@ mod tests {
             name: "reviewer".to_string(),
             host: "web".to_string(),
             harness: "web".to_string(),
+            key: None,
             session_id: None,
             pid: None,
             pid_started_at: None,

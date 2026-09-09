@@ -164,6 +164,12 @@ pub struct JoinRequest {
     pub name: String,
     pub host: String,
     pub harness: String,
+    /// What makes this join safe to make again: the server keeps one message
+    /// per key per channel, so a repeat of the same request answers with the
+    /// join already written rather than writing a second one. A join with no
+    /// key is written unconditionally, as every join was before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

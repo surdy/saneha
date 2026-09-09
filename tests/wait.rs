@@ -42,6 +42,7 @@ fn join(remote: &Remote, channel: &str, name: &str) -> String {
         name: name.to_string(),
         host: host(),
         harness: "claude".to_string(),
+        key: None,
         session_id: None,
         pid: None,
         pid_started_at: None,
