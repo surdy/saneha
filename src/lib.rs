@@ -33,3 +33,15 @@ pub fn digest_hex(bytes: &[u8]) -> String {
     }
     format!("{hash:016x}")
 }
+
+#[cfg(test)]
+mod tests {
+    /// Pinned against the published FNV-1a 64-bit vectors, so a rewrite of the
+    /// loop cannot quietly change what the viewer's entity tag and the skill
+    /// digest are without this saying so.
+    #[test]
+    fn digest_hex_is_fnv_1a() {
+        assert_eq!(super::digest_hex(b""), "cbf29ce484222325");
+        assert_eq!(super::digest_hex(b"a"), "af63dc4c8601ec8c");
+    }
+}

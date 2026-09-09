@@ -405,9 +405,7 @@ fn skill() -> Result<()> {
 /// having even when something else did not; the exit code is decided at the
 /// end, after both output modes have said their piece.
 fn init(args: InitArgs) -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    let home = home()
         .ok_or_else(|| anyhow!("HOME is not set, so there is no home directory to install into"))?;
 
     let version = env!("CARGO_PKG_VERSION");
@@ -1272,51 +1270,59 @@ fn say(line: &str) -> Result<()> {
     write_out(&format!("{line}\n"))
 }
 
-/// One line on standard error, for something a person should know that is not
-/// the answer. `saneha join` prints only the granted identity on standard
-/// output, so anything explaining that identity goes here instead. A closed
-/// standard error is not worth failing over.
+/// What to say about a server whose skill is not the one this build carries.
+///
+/// Two digests differing proves the two builds differ. It does **not** prove
+/// which is older, and this repository produces the other direction every
+/// time: a skill change and the deploy that ships it are separate pull
+/// requests, so between them anybody who has built from `main` is ahead of the
+/// server. Telling that person to update their binary would be telling them to
+/// do nothing, on every join, until the deploy lands. So the message says what
+/// is proven and hands the question to the person, who can answer it.
+///
+/// A server reporting no digest at all says nothing, on purpose. It predates
+/// the field, so it is provably the older of the two — which means the skill
+/// this binary carries is the newer one and whoever follows it is fine. There
+/// is nothing to tell an agent, and saying it on every join until the next
+/// deploy would put noise exactly where a real warning goes.
+fn different_skill(theirs: Option<&str>, mine: &str) -> Option<&'static str> {
+    match theirs {
+        Some(theirs) if theirs != mine => Some(
+            "this binary and the server were built from different saneha skills, so one of the \
+             two is behind; this cannot tell which, so tell the person, who can",
+        ),
+        _ => None,
+    }
+}
+
 /// Says so, once, when the instructions an agent is about to follow are not
 /// the ones this saneha was built with.
 ///
-/// There are two ways to be behind and they need different answers, so they
-/// are two sentences rather than one. The server carrying a different skill
-/// means this *binary* is out of step with what is deployed, and no amount of
-/// `saneha init` fixes that — it would reinstall the same old skill and say
-/// `up to date`, which is the failure this whole thing exists to make
-/// visible. An installed file differing from this binary's skill is the
-/// ordinary case that `init` does fix.
+/// The two ways of being behind need different answers, so they are two
+/// messages. An installed file that no longer matches this binary's skill is
+/// the ordinary one, and `saneha init` fixes it. A server built from another
+/// skill is the one `init` cannot fix: on an old binary it reinstalls the old
+/// skill and reports `up to date`, which is the failure this exists to make
+/// visible.
 ///
 /// This hangs off `join` because a join is the first thing an agent does, and
 /// the skill already teaches it to read what a join says on standard error.
-/// None of it can fail a join: a server too old to answer, or one that cannot
-/// be reached for this, leaves the check unmade rather than stopping somebody
-/// joining a channel.
+/// None of it can fail a join, and a server that cannot be reached leaves that
+/// half unasked while the local half is asked regardless, because that half
+/// never needed the server.
 fn say_if_behind(remote: &Remote) {
-    let mine = skill::digest();
-    match remote.health() {
-        Ok(health) => match health.skill.as_deref() {
-            Some(theirs) if theirs == mine => {}
-            Some(_) => warn(
-                "the server was built from a different saneha than this one, so the skill your \
-                 agents follow may be behind it; update this binary and then run: saneha init",
-            ),
-            None => warn(
-                "the server is too old to say which skill it carries, so it is behind this \
-                 binary; the two are worth bringing back together",
-            ),
-        },
-        // Not being able to ask is not something to report. The verbs that
-        // need the server will say so themselves, in their own words.
-        Err(_) => return,
+    if let Ok(health) = remote.health() {
+        if let Some(line) = different_skill(health.skill.as_deref(), skill::digest()) {
+            warn(line);
+        }
     }
 
     // Purely local, and a read: `install` with `dry_run` opens each installed
     // file and compares, writing nothing.
-    let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) else {
+    let Some(home) = home() else {
         return;
     };
-    let behind: Vec<String> = skill::install(&PathBuf::from(home), env!("CARGO_PKG_VERSION"), true)
+    let behind: Vec<String> = skill::install(&home, env!("CARGO_PKG_VERSION"), true)
         .into_iter()
         .filter(|outcome| matches!(outcome.action, skill::Action::Updated))
         .map(|outcome| outcome.harness.to_string())
@@ -1329,6 +1335,20 @@ fn say_if_behind(remote: &Remote) {
     }
 }
 
+/// This user's home directory, or nothing when the environment does not say.
+///
+/// An empty `HOME` is no home: it would put every installed path under the
+/// working directory, which is not where a harness looks for a skill.
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// One line on standard error, for something a person should know that is not
+/// the answer. `saneha join` prints only the granted identity on standard
+/// output, so anything explaining that identity goes here instead. A closed
+/// standard error is not worth failing over.
 fn warn(line: &str) {
     use std::io::Write;
 
@@ -1553,6 +1573,32 @@ fn short_name(identity: &str, participants: &[Participant]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The three answers `different_skill` gives, two of which are silence.
+    ///
+    /// These cannot be reached through a `TestServer`: server and client are
+    /// one crate there, so the digest reported is always the digest held. The
+    /// decision is a function of two strings, so it is tested as one.
+    #[test]
+    fn only_a_digest_that_differs_is_worth_saying_anything_about() {
+        assert!(super::different_skill(Some("abc"), "abc").is_none());
+
+        let said =
+            super::different_skill(Some("def"), "abc").expect("a differing digest is worth saying");
+        assert!(said.contains("one of the two is behind"), "{said}");
+        // It must not tell anybody which to update. A skill change and the
+        // deploy that ships it are separate pull requests, so a client ahead
+        // of the server is the ordinary state in between.
+        assert!(
+            !said.contains("update"),
+            "it cannot know which is behind: {said}"
+        );
+
+        // A server too old to report a digest is the older of the two, so the
+        // skill this binary carries is the newer one and nobody is following
+        // anything stale.
+        assert!(super::different_skill(None, "abc").is_none());
+    }
+
     use super::*;
     use crate::api::ChannelState;
 

@@ -95,8 +95,9 @@ The current skill tells agents to do this without being asked. An agent that
 does not is running an old copy — see below.
 
 **"The old agent is still sitting there waiting."** It is on a skill from before
-handoffs were written down, which told it to wait after every message. `saneha
-join` will have said so on standard error — see *Keeping up* below. Update it:
+handoffs were written down, which told it to wait after every message. From now
+on a join says so on standard error — see *Keeping up* — but not on a machine
+whose binary predates that too, which is the machine this happens on. Update it:
 
 ```sh
 cargo install --path .    # in the saneha repo, if the binary is behind
@@ -122,19 +123,26 @@ file.
 
 Two things go stale independently, and only one of them `saneha init` can fix.
 
-`saneha join` checks both and says so on standard error:
+`saneha join` says so on standard error, and there are two messages:
 
 - **"the saneha skill installed for Claude Code is behind this binary"** — the
-  ordinary case. `saneha init` fixes it, and names the harness so you know
-  which one drifted.
-- **"the server was built from a different saneha than this one"** — your
-  *binary* is out of step with what is deployed. **`saneha init` does not fix
-  this**, and is worse than useless: with an old binary it reinstalls the old
-  skill and reports `up to date`. Update the binary first, then run `init`.
+  ordinary case, and the one `saneha init` fixes. It names the harness that
+  drifted so you do not have to go looking.
+- **"this binary and the server were built from different saneha skills"** —
+  the two are out of step. It does not say which is behind, because it cannot:
+  a skill change and the deploy that ships it are separate pull requests, so
+  for a while after every skill change anyone who has built from `main` is
+  *ahead* of the server. You can tell which way round it is; the command
+  cannot.
 
-That second one is why this check exists. A machine can sit for weeks with a
-binary from before a change, reporting success the whole time, and nothing
-would say otherwise.
+If it is your binary that is behind, **`saneha init` does not fix it** and is
+worse than useless — with an old binary it reinstalls the old skill and reports
+`up to date`. Update the binary, then run `init`.
+
+That second message is why this exists. A machine can sit for weeks on a binary
+from before a change, reporting success the whole time, and nothing would say
+otherwise. A server too old to report its skill at all says nothing, which is
+right: it is the older of the two, so the skill you hold is the newer one.
 
 If you would rather never think about the first one, `saneha init` is
 idempotent, needs no server and runs in a few milliseconds, so it is fine in a

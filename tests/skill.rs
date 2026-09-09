@@ -198,9 +198,11 @@ fn the_skill_says_what_a_harness_needs_to_find_and_follow_it() {
         // "its purpose is done" must not read as licence to.
         "takes no more joins",
         "never what makes it done",
-        // A join says when the skill is stale; the agent has to know that one
-        // of the two answers is not `init` (docs/handoffs.md, "Keeping up").
-        "which `init` cannot fix",
+        // A join says when the skill is stale, and the two answers differ:
+        // `init` for a stale file, the person for a stale binary, because
+        // nothing here can tell which of binary and server is behind.
+        "read it again when it names your harness",
+        "tell the person when it",
     ] {
         assert!(skill.contains(said), "the skill has to say {said:?}");
     }
