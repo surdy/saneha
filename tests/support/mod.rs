@@ -201,6 +201,13 @@ impl TestServer {
         (status, body)
     }
 
+    /// The throwaway home every child of this server runs under. What `init`
+    /// writes — the pointers, and the configured address — lands here rather
+    /// than in the home of whoever is running the tests.
+    pub fn home(&self) -> &Path {
+        self.home.path()
+    }
+
     /// The `saneha` binary, pointed at this server, with any harness
     /// environment this test process happens to be running under removed.
     pub fn command(&self, args: &[&str]) -> Command {

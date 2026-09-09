@@ -86,13 +86,26 @@ impl Remote {
     pub fn from_env() -> Result<Self> {
         let raw = std::env::var(URL_ENV).ok().unwrap_or_default();
         let raw = raw.trim();
-        if raw.is_empty() {
-            return Err(anyhow!(
-                "{URL_ENV} is not set; point it at your saneha server, \
-                 for example: export {URL_ENV}=http://localhost:7343"
-            ));
+        if !raw.is_empty() {
+            return Self::at(raw);
         }
-        Self::at(raw)
+
+        // Only then the file, so a prefix on one command still beats whatever
+        // this machine was configured with — which is what a test pointing a
+        // child at an OS-picked port, and a one-off against a local `serve`,
+        // both rely on.
+        if let Some(url) = crate::config::load()?.url {
+            let url = url.trim().to_string();
+            if !url.is_empty() {
+                return Self::at(&url);
+            }
+        }
+
+        Err(anyhow!(
+            "no saneha server: {URL_ENV} is not set and this machine has none \
+             configured; set it once with `saneha init --url <URL>`, or name it \
+             for one command with {URL_ENV}=<URL>"
+        ))
     }
 
     /// Talks to the server at `url`.

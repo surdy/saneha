@@ -14,6 +14,7 @@ use crate::api::{
     ParticipantList, DEFAULT_WAIT_TIMEOUT, MAX_HOLD,
 };
 use crate::client::{JoinAnswer, Remote, Waiting, URL_ENV};
+use crate::config;
 use crate::identity;
 use crate::server;
 use crate::skill;
@@ -347,6 +348,14 @@ pub struct WaitArgs {
                   written over. Anybody else's SKILL.md at that path is reported and left alone."
 )]
 pub struct InitArgs {
+    /// The saneha server every verb on this machine talks to, saved so
+    /// `SANEHA_URL` does not have to be set for each one
+    ///
+    /// `SANEHA_URL` still wins where it is set, so a one-off against another
+    /// server stays a prefix on one command.
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
+
     /// Say what would happen and write nothing
     #[arg(long)]
     pub dry_run: bool,
@@ -411,9 +420,18 @@ fn init(args: InitArgs) -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let outcomes = skill::install(&home, version, args.dry_run);
 
+    // Before the outcomes are printed, so a failure to save the address is an
+    // error rather than a line lost under the list of pointers that did land.
+    let saved = save_url(args.url.as_deref(), args.dry_run)?;
+
     if args.json {
-        write_out(&format!("{}\n", serde_json::to_string_pretty(&outcomes)?))?;
+        let answer = serde_json::json!({"skills": outcomes, "url": saved});
+        write_out(&format!("{}\n", serde_json::to_string_pretty(&answer)?))?;
         return failures(&outcomes);
+    }
+
+    if let Some(saved) = &saved {
+        say(&format!("{} {}", saved.action, saved.path.display()))?;
     }
 
     if outcomes.is_empty() {
@@ -1337,6 +1355,75 @@ fn say_if_behind(remote: &Remote) {
             behind.join(" and ")
         ));
     }
+}
+
+/// What `init` did with the address it was given, for both output modes.
+#[derive(Debug, serde::Serialize)]
+struct SavedUrl {
+    /// `saved`, or `dry run: would save`, said the way the pointer lines are.
+    action: &'static str,
+    path: PathBuf,
+    url: String,
+}
+
+/// Saves the server address, when one was given.
+///
+/// Nothing to do without `--url`: `init` is run on its own to bring the
+/// pointers up to date, and an address is not something to be cleared by
+/// leaving a flag off.
+///
+/// What is saved goes through [`Remote::at`] first, so the scheme it adds to a
+/// bare host is the scheme the file gets and every later verb agrees with it.
+/// That alone accepts anything, since `at` builds a string rather than parsing
+/// one, so the result is then parsed as a URI and required to have a host.
+/// This is the one place where being wrong is durable — a typo in
+/// `SANEHA_URL` is gone with the shell, a typo here is on the machine until
+/// somebody finds it — which is what the extra check buys.
+fn save_url(url: Option<&str>, dry_run: bool) -> Result<Option<SavedUrl>> {
+    let Some(url) = url else {
+        return Ok(None);
+    };
+    let url = url.trim();
+    if url.is_empty() {
+        return Err(anyhow!("--url was given nothing to point at"));
+    }
+    // Parsed from what was typed rather than from what `at` returns: `at`
+    // strips a trailing slash before it looks for a scheme, so a lone
+    // `http://` reaches it as `http:` and comes back as `http://http:`, which
+    // parses and names a host and is nothing anybody meant.
+    let candidate = if url.contains("://") {
+        url.to_string()
+    } else {
+        format!("http://{url}")
+    };
+    let parsed = ureq::http::Uri::try_from(candidate.as_str())
+        .map_err(|err| anyhow!("{url:?} is not a URL a verb could be pointed at: {err}"))?;
+    if parsed.host().is_none_or(str::is_empty) {
+        return Err(anyhow!("{url:?} names no host to reach"));
+    }
+
+    let checked = Remote::at(url)
+        .with_context(|| format!("{url:?} is not somewhere a saneha server can be"))?;
+    let url = checked.base_url().to_string();
+
+    let path = config::path().ok_or_else(|| {
+        anyhow!("neither XDG_CONFIG_HOME nor HOME is set, so there is nowhere to save the address")
+    })?;
+
+    if dry_run {
+        return Ok(Some(SavedUrl {
+            action: "dry run: would save",
+            path,
+            url,
+        }));
+    }
+
+    config::set_url(&path, &url)?;
+    Ok(Some(SavedUrl {
+        action: "saved",
+        path,
+        url,
+    }))
 }
 
 /// This user's home directory, or nothing when the environment does not say.

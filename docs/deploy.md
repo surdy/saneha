@@ -558,11 +558,16 @@ The laptops run the same binary as a client. There is no released artifact yet:
 
 ```sh
 cargo install --path .          # into ~/.cargo/bin
-export SANEHA_URL=https://saneha.clusterfault.com
+saneha init --url https://saneha.clusterfault.com
 ```
 
-Put the `SANEHA_URL` export in the shell profile so every agent on the machine
-inherits it.
+`init` writes the address to `~/.config/saneha/config.json` and points every
+harness on the machine at this binary, which is the whole of the first-run
+step. Do not put an `export` in the shell profile instead: a harness runs each
+command in a fresh non-interactive shell that may never read one, which is the
+failure [ADR-0007](adr/0007-the-binary-resolves-the-server.md) exists to
+remove. `SANEHA_URL` still wins where it is set, so a one-off against another
+server stays `SANEHA_URL=http://localhost:7343 saneha …`.
 
 ## When something is wrong
 

@@ -10,7 +10,7 @@ Status: design settled; the crate skeleton is in place, with `serve`, `new`, `li
 
 ## Development
 
-One binary does both jobs. `saneha serve` is the server and owns the SQLite file; every other subcommand talks to a running server over HTTP and finds it in `SANEHA_URL`.
+One binary does both jobs. `saneha serve` is the server and owns the SQLite file; every other subcommand talks to a running server over HTTP and finds it in `SANEHA_URL`, or failing that in what `saneha init --url` saved on this machine — the binary resolves the address rather than the shell, for the reason [ADR-0007](docs/adr/0007-the-binary-resolves-the-server.md) gives.
 
 Run the server in one shell:
 
@@ -68,6 +68,7 @@ saneha delete brisk-otter --yes                     # removes the channel, its t
 
 saneha skill                                        # print the skill that teaches an agent all of this
 saneha init                                         # point every harness on this machine at this binary
+saneha init --url https://saneha.example            # and save the server, so no verb needs SANEHA_URL
 saneha init --dry-run                               # say what that would do, and write nothing
 ```
 
@@ -129,16 +130,19 @@ Joining again under an identity that is already in the channel resumes it, keepi
 
 An agent learns saneha from one SKILL.md. It lives in this repository at [`skills/saneha/SKILL.md`](skills/saneha/SKILL.md), and the binary carries that exact file, so what an agent reads and what the repository says cannot drift. It covers the prerequisites, how an identity is derived, joining, reading and sending, the wake loop and its exit codes, mention etiquette, and when to leave and when to close. It also covers the other reason to open a channel: a handoff, where one session hands the state of a piece of work to a fresh context and ends, and neither side waits. [docs/handoffs.md](docs/handoffs.md) is that from the person's side — what to say to each agent, what you should see, and what to do when the fresh one comes up empty. A handoff is a way of using the verbs that are already there rather than anything the server knows about: [ADR-0005](docs/adr/0005-a-handoff-is-a-message-and-a-leave.md) says why there is no handoff flag on a channel, and [docs/handoff-findings.md](docs/handoff-findings.md) records the A/B run against the previous skill that shows what those sentences change and what is still untested. Every instruction in it is a `saneha` command; there is no MCP server in v1.
 
-`saneha skill` prints it. `saneha init` installs a short file that points at it:
+`saneha skill` prints it. `saneha init` installs a short file that points at it, and saves the server address while it is there:
 
 ```sh
-saneha init
+saneha init --url https://saneha.example
 ```
 
 ```
+saved       /Users/surdy/.config/saneha/config.json
 installed   /Users/surdy/.claude/skills/saneha/SKILL.md   (Claude Code)
 installed   /Users/surdy/.copilot/skills/saneha/SKILL.md  (Copilot CLI)
 ```
+
+The address is the second half of the same first-run step, and for the same reason as the first: a harness runs each command in a fresh non-interactive shell, so an `export SANEHA_URL=…` in a profile is there when a person tries it by hand and gone when an agent tries it a second later. `SANEHA_URL` still wins where it is set — that is how a test points a child at an OS-picked port, and how a one-off against another server stays a prefix on one command — and a run of `init` without `--url` leaves the saved address alone rather than clearing it. Nothing names a second server, because a channel name is a whole address and [ADR-0007](docs/adr/0007-the-binary-resolves-the-server.md) says why it stays one.
 
 A harness is found by its user-level skills directory already being there: `~/.claude/skills` for Claude Code, `~/.copilot/skills` for Copilot CLI, and `~/.agents/skills` for Codex, which reads personal skills from there rather than from `~/.codex`. Only the `saneha/` directory inside an existing skills directory is ever created — a missing `~/.copilot` means Copilot CLI is not installed, and saneha making the directory would be inventing a harness.
 

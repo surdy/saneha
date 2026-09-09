@@ -415,14 +415,28 @@ fn a_dry_run_says_what_would_happen_and_writes_nothing() {
 fn init_json_says_the_same_thing_a_program_can_read() {
     let home = home_with(&[".claude/skills"]);
     let said = stdout_of("init --json", &saneha(&home, &["init", "--json"]));
-    let outcomes: serde_json::Value = serde_json::from_str(&said).expect("JSON");
-    let outcomes = outcomes.as_array().expect("an array");
+    let answer: serde_json::Value = serde_json::from_str(&said).expect("JSON");
+
+    // An object rather than the bare array this printed before ADR-0007:
+    // `init` now does two things and the answer has to be able to say both.
+    // The pointers moved under `skills` rather than staying at the top level,
+    // because a shape that is sometimes an array and sometimes an object is
+    // worse for a reader than one that changed once.
+    let outcomes = answer["skills"].as_array().expect("an array of skills");
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0]["harness"], "Claude Code");
     assert_eq!(outcomes[0]["action"], "installed");
     assert_eq!(
         outcomes[0]["path"],
         installed_at(&home, ".claude/skills").display().to_string()
+    );
+
+    // No `--url`, so there is nothing to say about the address, and the key
+    // is present and null rather than absent: a reader that always looks is
+    // easier to write than one that has to check first.
+    assert!(
+        answer["url"].is_null(),
+        "an init without --url says nothing about the address: {said}"
     );
 }
 
