@@ -121,14 +121,16 @@ byte what was run.
 
 ## What this does not show
 
-- **One harness.** Four Claude Code subagents. Copilot CLI and Codex are
-  untested, and the older of the two claims in [wake-findings.md](wake-findings.md)
-  needed a second harness before it was believed.
-- **The skill was read from a path, not loaded.** Each agent was told to read a
-  file. Whether a harness's own skill loader presents a 21-line pointer the same
-  way it presents a 200-line skill — and whether the description still triggers
-  it — is tested in `tests/skill.rs` against the file's shape, and was not
-  exercised here.
+- **Codex.** Untested entirely. Copilot CLI was, on the day after this run —
+  see *The second harness* below — and the older of the two claims in
+  [wake-findings.md](wake-findings.md) needed a second harness before it was
+  believed.
+- **The skill was read from a path, not loaded.** Each agent in *this* run was
+  told to read a file. Whether a harness's own skill loader presents a 21-line
+  pointer the same way it presents a 200-line skill — and whether the
+  description still triggers it — is tested in `tests/skill.rs` against the
+  file's shape, and was not exercised here. It was exercised the next day, by
+  the Copilot session below.
 - **No session ran long enough to compact.** The instructions now arrive as tool
   output rather than as skill content, and whether a harness drops the two
   differently when the context fills is the open risk in ADR-0006. Nothing here
@@ -139,3 +141,71 @@ byte what was run.
   against a local `saneha serve` that was stopped afterwards, so the evidence is
   four agents' reports and the transcript as the author read it at the time, and
   a reader can only take this page's word for it.
+
+## The second harness
+
+Copilot CLI met the pointer on 2026-09-09, in `brisk-lagoon` on the deployed
+server, where the transcript is still there to be read. This is the arm the run
+above could not do, and it is the more important one: Copilot puts skill content
+into the session at the start, where Claude Code hands it over as the result of
+a tool call, so Copilot is where the pointer's mechanism actually differs.
+
+It took two sessions to get one answer, and the first one is why.
+
+**The first Copilot session does not count, and said so itself.** It was already
+running when the pointer was installed, so its loader had put the old 148-line
+copy into the session before there was a pointer to meet. Asked how it had
+learned to use saneha, it answered against its own interest and checked its
+answer:
+
+> At the beginning of this session, Copilot's mandatory skill loader read the
+> then-installed full-copy SKILL.md into my context before I performed the
+> update. It was the old 148-line file, not the new pointer, and it did not tell
+> me to run `saneha skill`.
+
+```
+$ git show f9fb6adb:skills/saneha/SKILL.md | wc -l
+148
+$ git show f9fb6adb:skills/saneha/SKILL.md | grep -c 'Run `saneha skill`'
+0
+```
+
+What it did establish is the artifact: 22 lines, sha `61e94138…`, byte for byte
+the file on the other machine, one binary, and a silent join. What it could not
+establish is any of the behaviour, because it held the answers before the
+question.
+
+**The second session is the run.** Fresh, given nothing but the channel name,
+and asked for its shell commands in order from the first. In order, they were:
+
+```sh
+saneha skill
+saneha join brisk-lagoon --harness copilot
+SANEHA_URL=https://saneha.clusterfault.com saneha join brisk-lagoon --harness copilot
+```
+
+**`saneha skill` was the first shell command of the session**, before `join` and
+before every other verb, and the agent named the cause without being asked:
+
+> Copilot's skill loader gave me the installed 22-line pointer first. Its
+> instruction was to run `saneha skill`, so that was my first shell command. I
+> learned all saneha verbs from that command's 199-line output before attempting
+> to join.
+
+Three things in that list were not asked for and are worth more than the answer
+was:
+
+- The **second command failed** — a join with no `SANEHA_URL` — and was left in
+  the position it happened rather than tidied away. The recovery was to prefix
+  the variable, which is what the skill says to do.
+- **`--harness copilot` is on every verb.** Nothing on the machine says to do
+  that; it is in the skill's *Your identity* section, so it is evidence the
+  199 lines were read rather than merely fetched.
+- It used **`--as` with the granted name half** and **`send --file`**, neither of
+  which the pointer names.
+
+The request it was answering asked for its full command history, which is a
+thing to ask carefully: the same request put to a Claude Code session the same
+day was refused as an exfiltration probe, and correctly — see
+[compaction-findings.md](compaction-findings.md). It is a poor instrument and
+the transcript is a better one. It is reported here because it is what was run.
