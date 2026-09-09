@@ -3,10 +3,17 @@ name: Build and push image
 # Every push to main publishes an image, tagged with the short commit SHA and
 # with the moving `main` tag. The SHA tag is what the Quadlet unit on quadhost
 # pins to, so a deploy always names one exact build.
+#
+# A `v*` tag publishes the same build again under its version — `0.2.0` and the
+# moving `0.2` — so a release is pullable by the number the notes are written
+# against. The unit goes on pinning the SHA: a version tag is a name somebody
+# could move, and the runbook's drift check is only worth anything if what the
+# repository says is deployed cannot have moved under it.
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 env:
@@ -40,6 +47,8 @@ jobs:
           tags: |
             type=sha,format=short
             type=raw,value=main,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
       - name: Build and push
         uses: docker/build-push-action@v6

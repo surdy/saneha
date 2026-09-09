@@ -236,7 +236,8 @@ fn init_installs_into_every_harness_that_is_there() {
 
     // The marker is the last field of the frontmatter, so name and description
     // stay where a harness and a reader both expect them.
-    let marker = format!("saneha-managed: {}\n---\n", env!("CARGO_PKG_VERSION"));
+    // No version in it: the pointer must not move when the version does.
+    let marker = "saneha-managed: true\n---\n".to_string();
     for harness in [".claude/skills", ".copilot/skills"] {
         let path = installed_at(&home, harness);
         let written = std::fs::read_to_string(&path).expect("the installed skill");
@@ -257,7 +258,7 @@ fn init_installs_into_every_harness_that_is_there() {
                 .next()
                 .expect("frontmatter")
                 .to_string()
-                + &format!("\nsaneha-managed: {}\n---\n", env!("CARGO_PKG_VERSION"))
+                + "\nsaneha-managed: true\n---\n"
         );
         assert!(written.contains("Run `saneha skill`"), "{written}");
         assert!(
@@ -305,6 +306,8 @@ fn an_older_saneha_skill_is_updated_in_place() {
     std::fs::create_dir_all(path.parent().expect("parent")).expect("the saneha directory");
     std::fs::write(
         &path,
+        // A version in the marker is the shape every pointer written before
+        // 0.2.0 has, so this is also the upgrade every machine will do once.
         "---\nname: saneha\nsaneha-managed: 0.0.1\n---\n\nwhatever it used to say\n",
     )
     .expect("an older skill");
@@ -313,10 +316,7 @@ fn an_older_saneha_skill_is_updated_in_place() {
     assert!(said.contains("updated"), "{said}");
     let written = std::fs::read_to_string(&path).expect("the installed skill");
     assert!(written.contains("Run `saneha skill`"), "{written}");
-    assert!(
-        written.contains(&format!("saneha-managed: {}\n", env!("CARGO_PKG_VERSION"))),
-        "{written}"
-    );
+    assert!(written.contains("saneha-managed: true\n"), "{written}");
 }
 
 #[test]

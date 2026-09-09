@@ -424,8 +424,7 @@ fn init(args: InitArgs) -> Result<()> {
     let home = home()
         .ok_or_else(|| anyhow!("HOME is not set, so there is no home directory to install into"))?;
 
-    let version = env!("CARGO_PKG_VERSION");
-    let outcomes = skill::install(&home, version, args.dry_run);
+    let outcomes = skill::install(&home, args.dry_run);
 
     // Before the outcomes are printed, so a failure to save the address is an
     // error rather than a line lost under the list of pointers that did land.
@@ -1353,7 +1352,7 @@ fn say_if_behind(remote: &Remote) {
     let Some(home) = home() else {
         return;
     };
-    let behind: Vec<String> = skill::install(&home, env!("CARGO_PKG_VERSION"), true)
+    let behind: Vec<String> = skill::install(&home, true)
         .into_iter()
         .filter(|outcome| matches!(outcome.action, skill::Action::Updated))
         .map(|outcome| outcome.harness.to_string())

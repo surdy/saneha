@@ -11,9 +11,17 @@
 //! and no copy is left to go stale (ADR-0006).
 //!
 //! The installed file is a file saneha owns. It carries a `saneha-managed`
-//! field in its frontmatter naming the version that wrote it, and `init` will
-//! only ever write over a file that carries it. A `SKILL.md` at the same path
-//! without the marker is somebody else's and is left exactly as it is.
+//! field in its frontmatter, and `init` will only ever write over a file that
+//! carries it. A `SKILL.md` at the same path without the marker is somebody
+//! else's and is left exactly as it is.
+//!
+//! The marker says only that the file is saneha's. It named the version that
+//! wrote it until 0.2.0, which was harmless while the version never moved and
+//! a chore the moment it did: the staleness check compares the whole file, so
+//! every release would have made every installed pointer stale and asked every
+//! machine to run `init` again — the per-change chore ADR-0006 exists to end.
+//! A pointer's whole claim is that the instructions are in the binary, so a
+//! version stamped into it was the one part of that claim it did not keep.
 
 use std::path::{Path, PathBuf};
 
@@ -26,11 +34,13 @@ pub const MARKER: &str = "saneha-managed";
 
 /// The digest of the skill this build carries.
 ///
-/// The crate version cannot answer "are we running the same saneha", because
-/// it has not moved since the first commit and a version nobody bumps is a
-/// check that never fires. The skill's own bytes do move, exactly when the
-/// instructions an agent follows move, which is the thing worth noticing. So
-/// this is what the server reports and what a client compares against its own.
+/// The crate version cannot answer "are we running the same saneha", even now
+/// that it moves: a release is cut when something is deployed, which is not
+/// the same event as the instructions changing, and a build from `main`
+/// between two releases carries the version of the older one. The skill's own
+/// bytes move exactly when the instructions an agent follows move, which is
+/// the thing worth noticing. So this is what the server reports and what a
+/// client compares against its own.
 pub fn digest() -> &'static str {
     static DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     DIGEST.get_or_init(|| crate::digest_hex(SKILL.as_bytes()))
@@ -158,7 +168,7 @@ commands, because nothing in this file says what they are.
 /// is what makes a harness load this at the right moment, so it is the one
 /// part that has to stay on disk — and a second copy of it, hand-maintained,
 /// would drift in exactly the way the body no longer can.
-pub fn installed(version: &str) -> String {
+pub fn installed() -> String {
     // The embedded skill has frontmatter and `the_skill_has_the_frontmatter_a_harness_reads`
     // says so, so this cannot fail in a build that passed its own tests. It is
     // an expect rather than a fallback because the obvious fallback — install
@@ -166,23 +176,26 @@ pub fn installed(version: &str) -> String {
     // and writes it without the marker, so no later `init` would ever touch it
     // again and nothing would ever say why.
     let end = frontmatter_end(SKILL).expect("the embedded skill has frontmatter; a test says so");
-    format!(
-        "{}{MARKER}: {version}\n---\n\n{POINTER_BODY}",
-        &SKILL[..end]
-    )
+    format!("{}{MARKER}: true\n---\n\n{POINTER_BODY}", &SKILL[..end])
 }
 
-/// The version saneha stamped into a file's frontmatter, or `None` when the
-/// file is not one of saneha's.
+/// Whether this file is one of saneha's, and so may be written over.
 ///
 /// Only the frontmatter is looked at: a `saneha-managed:` line in the body,
 /// which is exactly what a document *about* this marker would contain, does
 /// not make a file saneha's to overwrite.
-pub fn managed_version(text: &str) -> Option<String> {
-    let end = frontmatter_end(text)?;
-    text[..end].lines().find_map(|line| {
-        let value = line.strip_prefix(MARKER)?.strip_prefix(':')?;
-        Some(value.trim().to_string())
+///
+/// Any value counts, which is what makes the pointers written before 0.2.0 —
+/// the ones stamped `saneha-managed: 0.1.0` — still saneha's to replace. They
+/// are replaced once, by the next `init` on that machine, and then stop
+/// moving.
+pub fn managed(text: &str) -> bool {
+    let Some(end) = frontmatter_end(text) else {
+        return false;
+    };
+    text[..end].lines().any(|line| {
+        line.strip_prefix(MARKER)
+            .is_some_and(|rest| rest.starts_with(':'))
     })
 }
 
@@ -207,8 +220,8 @@ fn frontmatter_end(text: &str) -> Option<usize> {
 ///
 /// Nothing outside `<skills dir>/saneha/SKILL.md` is created, read or written.
 /// With `dry_run` the answer is what would happen and not one byte moves.
-pub fn install(home: &Path, version: &str, dry_run: bool) -> Vec<Outcome> {
-    let wanted = installed(version);
+pub fn install(home: &Path, dry_run: bool) -> Vec<Outcome> {
+    let wanted = installed();
     HARNESSES
         .iter()
         .filter(|harness| home.join(harness.skills_dir).is_dir())
@@ -241,7 +254,7 @@ fn one(path: &Path, wanted: &str, dry_run: bool) -> (Action, Option<String>) {
     }
     match std::fs::read_to_string(path) {
         Ok(there) => {
-            if managed_version(&there).is_none() {
+            if !managed(&there) {
                 return (
                     Action::Skipped,
                     Some("not ours: no saneha-managed marker".to_string()),
@@ -314,25 +327,41 @@ mod tests {
         assert!(front.contains("\nname: saneha\n"), "{front}");
         assert!(front.contains("\ndescription: "), "{front}");
         // The repository copy is not marked; only what init writes is.
-        assert_eq!(managed_version(SKILL), None);
+        assert!(!managed(SKILL));
     }
 
     #[test]
-    fn the_installed_file_carries_the_version_that_wrote_it() {
-        let text = installed("0.1.0");
-        assert_eq!(managed_version(&text).as_deref(), Some("0.1.0"));
+    fn the_installed_file_is_marked_as_saneha_s_and_says_no_version() {
+        let text = installed();
+        assert!(managed(&text), "{text}");
         assert!(text.starts_with("---\nname: saneha\n"), "{text}");
+        // The version is deliberately not in it: the pointer would otherwise
+        // go stale on every release and ask every machine to run `init` again.
+        assert!(
+            !text.contains(env!("CARGO_PKG_VERSION")),
+            "the pointer must not move when the version does: {text}"
+        );
+    }
+
+    #[test]
+    fn a_pointer_written_before_0_2_0_is_still_saneha_s_to_replace() {
+        // Those carry `saneha-managed: 0.1.0`. If the marker stopped counting
+        // them, every machine's pointer would become somebody else's file and
+        // `init` would refuse it forever.
+        assert!(managed(
+            "---\nname: saneha\nsaneha-managed: 0.1.0\n---\nbody\n"
+        ));
     }
 
     #[test]
     fn the_installed_file_is_the_skill_s_own_frontmatter_and_a_pointer() {
-        let text = installed("0.1.0");
+        let text = installed();
 
         // The frontmatter is lifted, not written out again, so the line that
         // decides when a harness loads this cannot drift from the skill's.
         let front_of = |s: &str| s.split("\n---\n").next().unwrap().to_string();
         let theirs = front_of(SKILL);
-        let mine = front_of(&text).replace("\nsaneha-managed: 0.1.0", "");
+        let mine = front_of(&text).replace("\nsaneha-managed: true", "");
         assert_eq!(mine, theirs);
 
         // And the body is a pointer rather than a copy: the instructions are
@@ -352,26 +381,21 @@ mod tests {
 
     #[test]
     fn a_marker_outside_the_frontmatter_marks_nothing() {
-        assert_eq!(managed_version("saneha-managed: 9.9.9\n"), None);
-        assert_eq!(
-            managed_version("---\nname: other\n---\n\nsaneha-managed: 9.9.9\n"),
-            None
-        );
+        assert!(!managed("saneha-managed: true\n"));
+        assert!(!managed("---\nname: other\n---\n\nsaneha-managed: true\n"));
         // An unterminated frontmatter block is not one.
-        assert_eq!(managed_version("---\nsaneha-managed: 9.9.9\n"), None);
+        assert!(!managed("---\nsaneha-managed: true\n"));
         // A file with no frontmatter at all.
-        assert_eq!(managed_version("# just a document\n"), None);
+        assert!(!managed("# just a document\n"));
     }
 
     #[test]
     fn a_marker_is_read_wherever_it_sits_in_the_frontmatter() {
-        assert_eq!(
-            managed_version("---\nname: saneha\nsaneha-managed:  0.2.0  \n---\nbody\n").as_deref(),
-            Some("0.2.0")
-        );
-        assert_eq!(
-            managed_version("---\nsaneha-managed: 0.2.0\nname: saneha\n---\n").as_deref(),
-            Some("0.2.0")
-        );
+        assert!(managed(
+            "---\nname: saneha\nsaneha-managed:  true  \n---\nbody\n"
+        ));
+        assert!(managed("---\nsaneha-managed: true\nname: saneha\n---\n"));
+        // A field that merely starts the same way is a different field.
+        assert!(!managed("---\nsaneha-managed-by: someone\n---\n"));
     }
 }
