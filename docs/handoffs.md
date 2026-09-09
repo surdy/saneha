@@ -100,8 +100,8 @@ on a join says so on standard error — see *Keeping up* — but not on a machin
 whose binary predates that too, which is the machine this happens on. Update it:
 
 ```sh
-cargo install --path .    # in the saneha repo, if the binary is behind
-saneha init               # rewrites the skill for every harness on this machine
+cargo install --path .    # in the saneha repo: this is what carries the change
+saneha init               # only needed the first time on a machine
 ```
 
 `saneha init` says what it did for each harness it found — `updated`, or `up to
@@ -121,13 +121,23 @@ file.
 
 ## Keeping up
 
-Two things go stale independently, and only one of them `saneha init` can fix.
+The instructions your agents follow are not kept in a file on your machine.
+They are in the `saneha` binary, and the file `saneha init` puts in each
+harness's skills directory is twenty-one lines saying so — it tells the agent to
+run `saneha skill` and follow what that prints. So **updating the binary updates
+what your agents are told**, and there is nothing to re-copy afterwards.
 
-`saneha join` says so on standard error, and there are two messages:
+That leaves `saneha init` as a first-run step per machine. Run it once, and
+again only if you are told to; a change to the line that decides *when* a
+harness loads the skill is the one thing the binary cannot deliver on its own.
+
+`saneha join` is what tells you, on standard error, and there are two messages:
 
 - **"the saneha skill installed for Claude Code is behind this binary"** — the
-  ordinary case, and the one `saneha init` fixes. It names the harness that
-  drifted so you do not have to go looking.
+  file in that harness's directory is not the one this binary would write.
+  Since that file is now a fixed twenty-one lines, this is rare and means the
+  frontmatter moved. `saneha init` fixes it, and names the harness so you do not
+  have to go looking.
 - **"this binary and the server were built from different saneha skills"** —
   the two are out of step. It does not say which is behind, because it cannot:
   a skill change and the deploy that ships it are separate pull requests, so
@@ -144,16 +154,16 @@ from before a change, reporting success the whole time, and nothing would say
 otherwise. A server too old to report its skill at all says nothing, which is
 right: it is the older of the two, so the skill you hold is the newer one.
 
-If you would rather never think about the first one, `saneha init` is
-idempotent, needs no server and runs in a few milliseconds, so it is fine in a
+`saneha init` is idempotent, needs no server and runs in a few milliseconds, so
+if you would rather not think about even the first-run step, it is fine in a
 shell profile:
 
 ```sh
 saneha init >/dev/null 2>&1
 ```
 
-That keeps the skill file level with whatever binary you have. It cannot tell
-you the binary is old — only the join warning does that.
+It cannot tell you the binary is old, and that is now the only staleness left
+that matters — only the join warning says so.
 
 ## When not to bother
 

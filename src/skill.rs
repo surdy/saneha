@@ -6,6 +6,10 @@
 //! ([`SKILL`]), so `saneha skill` and `saneha init` cannot drift from what CI
 //! checks and what a reader of the repository sees.
 //!
+//! What `init` writes is not that file. It is a short one saying where the
+//! instructions are, so that updating the binary updates what an agent is told
+//! and no copy is left to go stale (ADR-0006).
+//!
 //! The installed file is a file saneha owns. It carries a `saneha-managed`
 //! field in its frontmatter naming the version that wrote it, and `init` will
 //! only ever write over a file that carries it. A `SKILL.md` at the same path
@@ -129,19 +133,20 @@ pub struct Outcome {
 /// person opening the file learns what saneha is. And the fallback, because an
 /// agent that cannot run the binary can do nothing else this file might have
 /// told it, and should say so rather than invent verbs.
-const STUB_BODY: &str = r#"# saneha
+const POINTER_BODY: &str = r#"# saneha
 
 **Run `saneha skill` and follow what it prints.** Your instructions are not in
 this file. They live in the binary that will run your commands, so that what
-you are told and what will happen cannot drift apart. It is one page, it needs
-no server, and it is all of them: the verbs, how your identity is worked out,
-the wake loop, and how to hand work over to a fresh session.
+you are told and what will happen cannot drift apart. It is about two hundred
+lines, needs no server, and is the whole of it: the verbs, how your identity is
+worked out, the wake loop, and how to hand work over to a fresh session.
 
 saneha is a self-hosted channel where coding agents on different machines, and
 the person running them, talk to each other. Every instruction in it is a
 `saneha` command in a shell; there is no MCP server.
 
-If `saneha` is not on your PATH, try `~/.cargo/bin/saneha`, and ask the person
+If `saneha` is not on your PATH, it is usually at `~/.cargo/bin/saneha`, which
+is where `cargo install` puts it. If it is not there either, ask the person
 where it is. If it cannot be run at all, tell them — do not guess at the
 commands, because nothing in this file says what they are.
 "#;
@@ -154,12 +159,17 @@ commands, because nothing in this file says what they are.
 /// part that has to stay on disk — and a second copy of it, hand-maintained,
 /// would drift in exactly the way the body no longer can.
 pub fn installed(version: &str) -> String {
-    let Some(end) = frontmatter_end(SKILL) else {
-        // No frontmatter to lift. The embedded skill has one and a test says
-        // so; this is only here so a malformed file installs as itself.
-        return SKILL.to_string();
-    };
-    format!("{}{MARKER}: {version}\n---\n\n{STUB_BODY}", &SKILL[..end])
+    // The embedded skill has frontmatter and `the_skill_has_the_frontmatter_a_harness_reads`
+    // says so, so this cannot fail in a build that passed its own tests. It is
+    // an expect rather than a fallback because the obvious fallback — install
+    // the skill whole — writes the one file this module exists to stop writing,
+    // and writes it without the marker, so no later `init` would ever touch it
+    // again and nothing would ever say why.
+    let end = frontmatter_end(SKILL).expect("the embedded skill has frontmatter; a test says so");
+    format!(
+        "{}{MARKER}: {version}\n---\n\n{POINTER_BODY}",
+        &SKILL[..end]
+    )
 }
 
 /// The version saneha stamped into a file's frontmatter, or `None` when the
@@ -193,7 +203,7 @@ fn frontmatter_end(text: &str) -> Option<usize> {
     None
 }
 
-/// Installs the skill into every harness found under `home`.
+/// Points every harness found under `home` at this binary.
 ///
 /// Nothing outside `<skills dir>/saneha/SKILL.md` is created, read or written.
 /// With `dry_run` the answer is what would happen and not one byte moves.

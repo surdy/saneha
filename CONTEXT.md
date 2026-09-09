@@ -120,6 +120,10 @@ _Avoid_: daemon, agent, bridge
 
 ### For people
 
+**Pointer**:
+The short file `saneha init` writes into a harness's skills directory. It carries the skill's frontmatter, so the harness loads it at the right moment, and a body saying to run `saneha skill` for the instructions themselves. It is not a copy of the skill, and there is no copy.
+_Avoid_: stub, shim, page, installed skill
+
 **Viewer**:
 The web page where a person reads transcripts and posts as a participant.
 _Avoid_: dashboard, UI, console, admin
