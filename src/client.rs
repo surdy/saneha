@@ -10,6 +10,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use ureq::http::Response;
+use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::transport::{
+    Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
+};
 use ureq::{Agent, Body, SendBody};
 
 use crate::api::{
@@ -109,7 +113,7 @@ impl Remote {
             .build();
         Ok(Remote {
             base,
-            agent: Agent::new_with_config(config),
+            agent: Agent::with_parts(config, Restartable::connector(), DefaultResolver::default()),
         })
     }
 
@@ -123,13 +127,22 @@ impl Remote {
     }
 
     /// Creates a channel. A `name` of `None` asks the server to mint one.
+    ///
+    /// Made once, like an upload and for the same reason. A named create that
+    /// reached the server and is made again comes back as `409 already
+    /// exists`, which reports a failure for work that succeeded; an unnamed
+    /// one comes back with a *second* channel and reports nothing at all,
+    /// which is worse. There is nothing on the request that says which create
+    /// it is, so the server cannot tell a repeat from a new one.
     pub fn create_channel(&self, name: Option<&str>, purpose: Option<&str>) -> Result<Channel> {
         let body = crate::api::NewChannel {
             name: name.map(str::to_string),
             purpose: purpose.map(str::to_string),
         };
         let response = self.check(
-            retrying(|| self.agent.post(self.url("/channels")).send_json(&body))
+            self.agent
+                .post(self.url("/channels"))
+                .send_json(&body)
                 .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "channel")
@@ -206,14 +219,15 @@ impl Remote {
     /// Removes a channel and everything in it. The confirmation is in the URL
     /// because a `DELETE` body is a thing that gets dropped on the way, and a
     /// deletion must not be decided by something that went missing.
+    /// Made once, for the same reason a create is: the channel is gone after
+    /// the first one, so a second says `no such channel` and reports a failure
+    /// for a deletion that happened.
     pub fn delete_channel(&self, channel: &str) -> Result<Deleted> {
         let response = self.check(
-            retrying(|| {
-                self.agent
-                    .delete(self.url(&format!("/channels/{channel}?confirm=true")))
-                    .call()
-            })
-            .map_err(|err| self.unreachable(&err))?,
+            self.agent
+                .delete(self.url(&format!("/channels/{channel}?confirm=true")))
+                .call()
+                .map_err(|err| self.unreachable(&err))?,
         )?;
         read_json(response, "deletion")
     }
@@ -770,6 +784,94 @@ fn interrupted(err: &ureq::Error) -> bool {
     matches!(err, ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::Interrupted)
 }
 
+/// A connection whose reads survive a signal.
+///
+/// `EINTR` is not something the HTTP layer should ever have to see: a `read`
+/// cut short by a signal has consumed nothing, and making it again is not a
+/// second request but the same one, on the same socket, still waiting for the
+/// same answer. Absorbing it here is therefore safe for every call, including
+/// the ones [`retrying`] cannot touch because repeating them would be a second
+/// upload or a second channel.
+///
+/// It has to be done at all because of the timeout two lines above: ureq
+/// implements `timeout_global` with `SO_RCVTIMEO`, and a socket carrying a
+/// receive timeout is one the kernel will not restart after a handler,
+/// whatever `SA_RESTART` says. Without the timeout the signal would never have
+/// been visible; with it, every response read is a place a signal can land,
+/// which is why the failures on CI are all on the answer to a write and never
+/// on the write itself.
+///
+/// Only reads are made again. A write must not be: the transport is handed a
+/// byte count rather than a position, so a second `transmit_output` would put
+/// those bytes on the wire twice. Nothing is lost by leaving it — both
+/// transports underneath use `write_all`, which absorbs `EINTR` itself.
+#[derive(Debug)]
+struct Restartable(Box<dyn Transport>);
+
+impl Restartable {
+    /// The default connector, wrapping whatever it produces.
+    fn connector() -> impl Connector<()> {
+        RestartableConnector(DefaultConnector::new())
+    }
+}
+
+impl Transport for Restartable {
+    fn buffers(&mut self) -> &mut dyn Buffers {
+        self.0.buffers()
+    }
+
+    fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+        self.0.transmit_output(amount, timeout)
+    }
+
+    fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+        // The same budget a whole request gets, spent on one read. A signal
+        // that arrives five times running on a single read is not a signal
+        // this can wait out, and the caller is better told.
+        for _ in 0..INTERRUPTED_RETRIES {
+            match self.0.await_input(timeout) {
+                Err(err) if interrupted(&err) => continue,
+                outcome => return outcome,
+            }
+        }
+        self.0.await_input(timeout)
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.0.is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        self.0.is_tls()
+    }
+}
+
+/// Hands back [`Restartable`] wrapped around what the default chain produced.
+///
+/// The wrap is outermost, so over TLS it is the rustls transport whose read is
+/// made again rather than the socket's. That is the same read: rustls consumes
+/// nothing from a read that failed, and it is written to be called again, which
+/// is how it already works with `WouldBlock`. Over plain HTTP — which is every
+/// test, and the connection this was found on — the outermost transport is the
+/// socket, so the read made again is the one the signal hit.
+#[derive(Debug)]
+struct RestartableConnector(DefaultConnector);
+
+impl Connector<()> for RestartableConnector {
+    type Out = Box<dyn Transport>;
+
+    fn connect(
+        &self,
+        details: &ConnectionDetails,
+        chained: Option<()>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        Ok(self
+            .0
+            .connect(details, chained)?
+            .map(|transport| Box::new(Restartable(transport)) as Box<dyn Transport>))
+    }
+}
+
 /// One line saying why the request never got an answer. ureq's own Display
 /// prefixes the transport kind, which is noise next to the address we name.
 fn describe(err: &ureq::Error) -> String {
@@ -781,6 +883,11 @@ fn describe(err: &ureq::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use ureq::unversioned::transport::LazyBuffers;
+
     use super::*;
 
     /// A `Content-Disposition` as the server writes one, as a header map.
@@ -925,6 +1032,113 @@ mod tests {
         &body[..to]
     }
 
+    /// A transport that is interrupted a fixed number of times and then
+    /// answers, counting on the caller's behalf how often it was asked.
+    #[derive(Debug)]
+    struct Interrupting {
+        left: usize,
+        reads: Arc<AtomicUsize>,
+        writes: Arc<AtomicUsize>,
+        buffers: LazyBuffers,
+    }
+
+    /// One of them, and the two counters it will report through.
+    fn interrupting(left: usize) -> (Restartable, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let transport = Interrupting {
+            left,
+            reads: Arc::clone(&reads),
+            writes: Arc::clone(&writes),
+            buffers: LazyBuffers::new(16, 16),
+        };
+        (Restartable(Box::new(transport)), reads, writes)
+    }
+
+    /// The error a signal arriving mid-syscall turns into.
+    fn signal() -> ureq::Error {
+        ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::Interrupted))
+    }
+
+    impl Transport for Interrupting {
+        fn buffers(&mut self) -> &mut dyn Buffers {
+            &mut self.buffers
+        }
+
+        fn transmit_output(
+            &mut self,
+            _amount: usize,
+            _timeout: NextTimeout,
+        ) -> Result<(), ureq::Error> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            Err(signal())
+        }
+
+        fn await_input(&mut self, _timeout: NextTimeout) -> Result<bool, ureq::Error> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            if self.left > 0 {
+                self.left -= 1;
+                return Err(signal());
+            }
+            Ok(true)
+        }
+
+        fn is_open(&mut self) -> bool {
+            true
+        }
+    }
+
+    /// No timeout, which is all `Restartable` does with one: it hands it down.
+    fn no_timeout() -> NextTimeout {
+        NextTimeout {
+            after: ureq::unversioned::transport::time::Duration::NotHappening,
+            reason: ureq::Timeout::Global,
+        }
+    }
+
+    #[test]
+    fn a_read_a_signal_cut_short_is_made_again() {
+        // Every interruption inside the budget is absorbed, and the answer
+        // that follows is the one the caller gets. This is the case CI hits:
+        // one signal on the read of a response the server has already sent.
+        let (mut transport, reads, _) = interrupting(INTERRUPTED_RETRIES);
+        assert!(
+            transport.await_input(no_timeout()).expect("the answer"),
+            "an interrupted read is made again until it answers"
+        );
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            INTERRUPTED_RETRIES + 1,
+            "the budget is spent and then the read answers"
+        );
+    }
+
+    #[test]
+    fn a_read_interrupted_past_the_budget_is_reported() {
+        // A signal on every attempt is not one to wait out: the caller is told
+        // the server could not be reached rather than being retried forever.
+        let (mut transport, reads, _) = interrupting(usize::MAX);
+        let err = transport
+            .await_input(no_timeout())
+            .expect_err("past the budget it is reported");
+        assert!(interrupted(&err), "and reported as what it was: {err:?}");
+        assert_eq!(reads.load(Ordering::Relaxed), INTERRUPTED_RETRIES + 1);
+    }
+
+    #[test]
+    fn a_write_is_never_made_again() {
+        // The transport is handed a byte count, not a position, so a second
+        // `transmit_output` would put the same bytes on the wire twice. Both
+        // transports underneath use `write_all`, which absorbs the signal
+        // itself, so there is nothing here worth that risk.
+        let (mut transport, _, writes) = interrupting(0);
+        assert!(
+            transport.transmit_output(1, no_timeout()).is_err(),
+            "an interrupted write is handed back, not repeated"
+        );
+        assert_eq!(writes.load(Ordering::Relaxed), 1, "and made exactly once");
+    }
+
     #[test]
     fn what_cannot_be_repeated_safely_is_made_once() {
         // An interruption is not proof that nothing reached the server: it can
@@ -933,10 +1147,23 @@ mod tests {
         // is, so making that one again leaves a second attachment behind and
         // it does not go through `retrying`. The exclusion is the absence of a
         // call, which is why this is asserted over the source.
-        assert!(
-            !body_of("pub fn upload_attachment").contains("retrying("),
-            "an upload must not be made again: a second one is a second file"
-        );
+        //
+        // Stating it for one method was not enough: `create_channel` and
+        // `delete_channel` were both wrapped in `retrying` and neither is
+        // repeatable, which is how a signal on 2026-09-05 turned 400 creates
+        // into `a channel named "channel-2" already exists`. The rule needs
+        // both halves — what must be made once, and what is safe to make
+        // again — because only the first half is checkable here.
+        for once in [
+            "pub fn upload_attachment",
+            "pub fn create_channel",
+            "pub fn delete_channel",
+        ] {
+            assert!(
+                !body_of(once).contains("retrying("),
+                "{once} must be made once: a second one is a second thing"
+            );
+        }
 
         // And the rule says nothing unless the helper is used where repeating
         // a request only asks the same question twice. A send is in that list
