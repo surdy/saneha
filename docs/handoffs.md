@@ -133,8 +133,8 @@ harness loads the skill is the one thing the binary cannot deliver on its own.
 
 `saneha join` is what tells you, on standard error, and there are two messages:
 
-- **"the saneha skill installed for Claude Code is behind this binary"** — the
-  file in that harness's directory is not the one this binary would write.
+- **"the saneha pointer installed for Claude Code is behind this binary"** —
+  the file in that harness's directory is not the one this binary would write.
   Since that file is now a fixed twenty-one lines, this is rare and means the
   frontmatter moved. `saneha init` fixes it, and names the harness so you do not
   have to go looking.

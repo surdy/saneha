@@ -1299,11 +1299,15 @@ fn different_skill(theirs: Option<&str>, mine: &str) -> Option<&'static str> {
 /// the ones this saneha was built with.
 ///
 /// The two ways of being behind need different answers, so they are two
-/// messages. An installed file that no longer matches this binary's skill is
-/// the ordinary one, and `saneha init` fixes it. A server built from another
-/// skill is the one `init` cannot fix: on an old binary it reinstalls the old
-/// skill and reports `up to date`, which is the failure this exists to make
+/// messages. An installed pointer that no longer matches the one this binary
+/// would write is the ordinary one, and `saneha init` fixes it — and it is the
+/// pointer that is behind, not the skill, which since [ADR-0006] lives only in
+/// the binary and cannot be behind itself. A server built from another skill
+/// is the one `init` cannot fix: on an old binary it reinstalls the old
+/// pointer and reports `up to date`, which is the failure this exists to make
 /// visible.
+///
+/// [ADR-0006]: ../docs/adr/0006-the-installed-skill-is-a-pointer.md
 ///
 /// This hangs off `join` because a join is the first thing an agent does, and
 /// the skill already teaches it to read what a join says on standard error.
@@ -1329,7 +1333,7 @@ fn say_if_behind(remote: &Remote) {
         .collect();
     if !behind.is_empty() {
         warn(&format!(
-            "the saneha skill installed for {} is behind this binary; run: saneha init",
+            "the saneha pointer installed for {} is behind this binary; run: saneha init",
             behind.join(" and ")
         ));
     }

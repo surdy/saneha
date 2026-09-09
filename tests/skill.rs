@@ -198,10 +198,12 @@ fn the_skill_says_what_a_harness_needs_to_find_and_follow_it() {
         // "its purpose is done" must not read as licence to.
         "takes no more joins",
         "never what makes it done",
-        // A join says when the skill is stale, and the two answers differ:
-        // `init` for a stale file, the person for a stale binary, because
-        // nothing here can tell which of binary and server is behind.
-        "read it again when it names your harness",
+        // A join says when something is stale, and the two answers differ:
+        // `init` for a stale pointer, the person for a stale binary, because
+        // nothing here can tell which of binary and server is behind. No
+        // re-read after `init`: since ADR-0006 the instructions come from the
+        // binary, so a second `saneha skill` returns what the agent holds.
+        "run `saneha init` when it names your",
         "tell the person when it",
     ] {
         assert!(skill.contains(said), "the skill has to say {said:?}");
