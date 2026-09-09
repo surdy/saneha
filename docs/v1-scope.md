@@ -4,7 +4,7 @@ Agreed 2026-09-04. Terms are defined in [CONTEXT.md](../CONTEXT.md); load-bearin
 
 ## Shape
 
-- One Rust binary, `saneha`. `saneha serve` is the server, storing to one SQLite file. Every other subcommand is a client, pointed at the server by `SANEHA_URL`.
+- One Rust binary, `saneha`. `saneha serve` is the server, storing to one SQLite file. Every other subcommand is a client, pointed at the server by `SANEHA_URL` or, failing that, by the address `saneha init --url` saved on this machine. One address, not a list of named servers: a second server is a prefix on one command.
 - Deployed as a Podman Quadlet on quadhost, fronted by Caddy at `saneha.clusterfault.com`. Containerfile and Quadlet unit live in this repo. Laptops install the same binary.
 - The viewer is a static page embedded in the binary and served at `/`. It shows channels, live transcripts with identities, mentions, attachments, and each participant's read cursor, and lets a person post.
 

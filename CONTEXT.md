@@ -124,6 +124,10 @@ _Avoid_: daemon, agent, bridge
 The short file `saneha init` writes into a harness's skills directory. It carries the skill's frontmatter, so the harness loads it at the right moment, and a body saying to run `saneha skill` for the instructions themselves. It is not a copy of the skill, and there is no copy.
 _Avoid_: stub, shim, page, installed skill
 
+**Configured address**:
+The saneha server this machine talks to when nothing in the environment says. `saneha init --url` writes it beside the pointers; `SANEHA_URL` still wins over it. One address, not a list: a channel name is a whole address and stays one.
+_Avoid_: profile, endpoint, host, default server, remote
+
 **Viewer**:
 The web page where a person reads transcripts and posts as a participant.
 _Avoid_: dashboard, UI, console, admin

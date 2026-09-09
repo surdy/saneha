@@ -241,10 +241,18 @@ fn the_binary_reports_a_duplicate_on_one_line() {
 }
 
 #[test]
-fn subcommands_need_saneha_url() {
+fn subcommands_with_no_server_anywhere_say_both_ways_to_give_one() {
+    // A home nobody has run `init` in, and no `XDG_CONFIG_HOME` pointing
+    // anywhere else. Both are needed since ADR-0007: without them this test
+    // reads the configuration of whoever is running it, and on a machine that
+    // has been `init`ed it would reach that person's real server instead of
+    // failing.
+    let nowhere = std::env::temp_dir().join(format!("saneha-unconfigured-{}", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_saneha"))
         .arg("list")
         .env_remove("SANEHA_URL")
+        .env_remove("XDG_CONFIG_HOME")
+        .env("HOME", &nowhere)
         .output()
         .expect("run the saneha binary");
 
@@ -252,7 +260,10 @@ fn subcommands_need_saneha_url() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
     assert!(stderr.contains("SANEHA_URL is not set"), "{stderr}");
-    assert!(stderr.contains("export SANEHA_URL="), "{stderr}");
+    // Both fixes, because they answer different questions: one machine for
+    // good, or one command right now.
+    assert!(stderr.contains("saneha init --url"), "{stderr}");
+    assert!(stderr.contains("SANEHA_URL=<URL>"), "{stderr}");
 }
 
 #[test]

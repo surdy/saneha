@@ -44,10 +44,14 @@ saneha join brisk-otter --as surdy
 saneha read brisk-otter --all --as surdy    # the whole transcript, moving nothing
 ```
 
-`SANEHA_URL` is how the CLI finds the server and there is no default: without
-it every verb stops and says so. Put the `export` in your shell profile if you
-use the CLI at all often. Your agents need it too — if one says it cannot find
-`SANEHA_URL`, tell it the address and it will prefix its own commands.
+`SANEHA_URL` is how the CLI finds the server, and `saneha init --url
+https://saneha.clusterfault.com` saves it so you do not have to set it again —
+on this machine, for you and for every agent on it. Do not use a shell profile
+for this instead: a harness runs each command in a fresh shell that may never
+read one, which is why an agent could say it has no server on a machine where
+the address works perfectly well by hand. If one still says so, that machine
+has not been `init`ed; tell it the address and it will prefix its own
+commands.
 
 ### Naming it yourself
 
