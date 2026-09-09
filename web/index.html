@@ -219,6 +219,15 @@ button, input, textarea { font: inherit; color: inherit }
 .grp span:first-of-type { font-family: var(--ui); font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--rail-head) }
 .grp .i { color: var(--rail-head) }
 .grp .ln2 { flex: 1; height: 1px; background: var(--rail-line) }
+/* the closed group folds away: a finished conversation costs a row of
+   attention it has stopped earning, and the count says how many without
+   spending one row each. The arrow is the right-pointing one turned a quarter
+   turn when open, so no second glyph is needed. */
+button.grp { width: 100%; background: none; border: 0; cursor: pointer; font: inherit; text-align: left }
+button.grp:hover span:first-of-type, button.grp:hover .i { color: var(--ink) }
+button.grp .i { transition: transform .12s ease }
+button.grp[aria-expanded="true"] .i { transform: rotate(90deg) }
+.grp .ct { font-family: var(--ui); font-size: 10px; font-weight: 600; color: var(--rail-head) }
 #channels .empty { color: var(--rail-head) }
 
 /* the row menu, and the palette: both are panels floating over the page, so
@@ -1135,6 +1144,27 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
       "<span>" + label + '</span><span class="ln2"></span></div>';
   }
 
+  /// The closed group's heading, which is a button because it folds.
+  ///
+  /// The count is on it rather than a few names being shown instead: any
+  /// number of names to show is a guess, and the one you want is the one past
+  /// it, whereas the count is true at every size. Nothing is hidden that was
+  /// being drawn — a closed row carries no unread badge by design, see
+  /// `channelRow` — so folding costs the rail no information.
+  function closedGroup(count, open) {
+    return '<button type="button" class="grp" id="cg" aria-expanded="' + (open ? "true" : "false") +
+      '" aria-controls="channels">' + icon("ar") +
+      '<span>Closed</span><span class="ct">' + count + '</span><span class="ln2"></span></button>';
+  }
+
+  /// Whether the closed group is unfolded. Shut by default: the pile is what
+  /// this is for. Kept per browser beside the theme and the pins, because
+  /// which conversations you are done with is a fact about the person looking
+  /// and not about the channel — the same reason ADR-0005 refused a mode.
+  function closedOpen() {
+    return kept("saneha.closed", "") === "open";
+  }
+
   function renderChannels() {
     if (!state.channels.length) {
       ui.channelList.innerHTML = '<p class="empty">No channels yet.</p>';
@@ -1145,25 +1175,54 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     const kept = new Set(pins);
     // What is not pinned sorts itself: open first, then by name. What is
     // pinned keeps the order it was put in, which is the point of pinning.
+    const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
     const rest = state.channels
       .filter((channel) => !kept.has(channel.name))
       .sort((a, b) => {
         if (a.state !== b.state) return a.state === "open" ? -1 : 1;
-        return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+        // Among the closed, newest closed first, which is what `saneha list`
+        // does. `closed_at` is a second, so two closed in the same one tie and
+        // the name breaks it — the same arbitrary order every time.
+        if (a.state === "closed") {
+          const at = (c) => c.closed_at || "";
+          if (at(a) !== at(b)) return at(a) < at(b) ? 1 : -1;
+        }
+        return byName(a, b);
       });
+
+    // A closed channel being read must not vanish from under the reader, so
+    // the group is forced open while one of its rows is the current channel.
+    const current = state.channels.find((channel) => channel.name === state.current);
+    const forced = !!(current && current.state === "closed" && !kept.has(current.name));
+    const showClosed = closedOpen() || forced;
 
     const html = [];
     if (pins.length) {
       html.push(group("Pinned", "pinf"));
       for (const name of pins) html.push(channelRow(by.get(name), name === state.current));
     }
+    const closedCount = rest.filter((channel) => channel.state === "closed").length;
     let heading = "";
     for (const channel of rest) {
-      const want = channel.state === "closed" ? "Closed" : pins.length ? "Open" : "";
-      if (want && want !== heading) { html.push(group(want)); heading = want; }
+      const closed = channel.state === "closed";
+      const want = closed ? "Closed" : pins.length ? "Open" : "";
+      if (want && want !== heading) {
+        html.push(closed ? closedGroup(closedCount, showClosed) : group(want));
+        heading = want;
+      }
+      if (closed && !showClosed) continue;
       html.push(channelRow(channel, channel.name === state.current));
     }
     ui.channelList.innerHTML = html.join("");
+    const fold = ui.channelList.querySelector("#cg");
+    if (fold) {
+      fold.onclick = () => {
+        // Forced open by the current channel: the click still records the
+        // preference, so it takes effect the moment that channel is left.
+        keep("saneha.closed", closedOpen() ? "" : "open", "");
+        renderChannels();
+      };
+    }
     for (const button of ui.channelList.querySelectorAll(".op")) {
       button.onclick = () => openChannel(button.dataset.open, true);
     }
