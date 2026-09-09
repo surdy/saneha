@@ -67,7 +67,15 @@ function element(id) {
       for (const fn of node.listeners[type] || []) fn(event);
     },
     querySelectorAll: (selector) => (node.groups && node.groups[selector]) || [],
-    querySelector: () => null,
+    // One stub per selector, kept, so a handler the page attaches to something
+    // it found can be invoked by a test. The page checks the HTML it wrote
+    // before it looks, so a stub for a selector that matched nothing is never
+    // reached by anything but a test that went looking for it.
+    querySelector(selector) {
+      node.found = node.found || {};
+      if (!node.found[selector]) node.found[selector] = element(selector);
+      return node.found[selector];
+    },
     getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }),
     scrollIntoView() {},
     attributes: {},
@@ -150,6 +158,9 @@ function world(options) {
   const channels = options.channels || CHANNELS;
 
   const kept = { "saneha.pins": JSON.stringify(options.pins || []) };
+  // The closed group is shut unless a test says otherwise, which is how a
+  // browser meets it.
+  if (options.showClosed) kept["saneha.closed"] = "open";
   if (options.name !== null) kept["saneha.name"] = "surdy";
   if (options.theme) kept["saneha.theme"] = options.theme;
 
@@ -212,6 +223,12 @@ function world(options) {
     requests,
     el: byId,
     rail: () => byId("channelList").innerHTML,
+    /// The closed group's heading, clicked.
+    foldClosed() {
+      const button = byId("channelList").found && byId("channelList").found["#cg"];
+      assert.ok(button && button.onclick, "the closed heading is there to click");
+      button.onclick();
+    },
     /// One segment of one settings control, clicked.
     pick(which, value) {
       const key = which === "theme" ? "[data-theme-pick]" : "[data-rows-pick]";
@@ -253,13 +270,15 @@ function rows(html) {
 
 /// The group headings, in order.
 function groups(html) {
-  return [...html.matchAll(/<div class="grp">.*?<span>([^<]+)<\/span>/g)].map((match) => match[1]);
+  return [...html.matchAll(/<(?:div|button)[^>]*class="grp"[^>]*>.*?<span>([^<]+)<\/span>/g)].map(
+    (match) => match[1]
+  );
 }
 
 (async () => {
   // ---- every channel is a hash and a name -------------------------------
   {
-    const it = await run({});
+    const it = await run({ showClosed: true });
     const html = it.rail();
     assert.ok(
       html.includes('<span class="hs">#</span><span class="cc">'),
@@ -274,7 +293,7 @@ function groups(html) {
 
   // ---- unread is weight and a badge, and only for open channels ---------
   {
-    const it = await run({});
+    const it = await run({ showClosed: true });
     const by = new Map(rows(it.rail()).map((row) => [row.name, row.classes]));
     assert.ok(by.get("ops").includes("un"), "a channel with unread messages is marked unread");
     assert.ok(by.get("brisk-otter").includes("un"), "and so is the other one");
@@ -289,7 +308,7 @@ function groups(html) {
 
   // ---- with no pins, the order is the one it always was ------------------
   {
-    const it = await run({});
+    const it = await run({ showClosed: true });
     assert.deepStrictEqual(
       rows(it.rail()).map((row) => row.name),
       ["brisk-otter", "deploy-quadhost", "madari-relay", "ops", "xlaptop-1", "notes-method"],
@@ -298,9 +317,60 @@ function groups(html) {
     assert.deepStrictEqual(groups(it.rail()), ["Closed"], "and no headings above them");
   }
 
+  // ---- the closed group folds, and is shut when nobody has said ---------
+  {
+    const it = await run({});
+    const html = it.rail();
+    assert.deepStrictEqual(
+      rows(html).map((row) => row.name),
+      ["brisk-otter", "deploy-quadhost", "madari-relay", "ops", "xlaptop-1"],
+      "the closed one is not drawn until it is asked for"
+    );
+    assert.ok(html.includes('aria-expanded="false"'), "and the heading says so: " + html);
+    assert.ok(
+      html.includes('<span class="ct">1</span>'),
+      "the count stands in for the names: " + html
+    );
+  }
+
+  // ---- clicking it unfolds it, and the browser keeps that ---------------
+  {
+    const it = await run({});
+    it.foldClosed();
+    assert.ok(
+      rows(it.rail()).some((row) => row.name === "notes-method"),
+      "the closed one is drawn after the heading is clicked"
+    );
+    assert.ok(it.rail().includes('aria-expanded="true"'));
+    assert.strictEqual(it.kept["saneha.closed"], "open", "and the browser keeps it");
+
+    it.foldClosed();
+    assert.ok(
+      !rows(it.rail()).some((row) => row.name === "notes-method"),
+      "clicking again folds it back"
+    );
+    assert.ok(
+      !("saneha.closed" in it.kept),
+      "and shut is the absence of a preference rather than a second value"
+    );
+  }
+
+  // ---- a closed channel being read does not vanish under its own group --
+  {
+    const it = await run({ at: "notes-method" });
+    assert.ok(
+      rows(it.rail()).some((row) => row.name === "notes-method"),
+      "the channel on screen is in the rail even with the group shut"
+    );
+    assert.ok(
+      it.rail().includes('aria-expanded="true"'),
+      "the heading admits it is open rather than lying about the fold"
+    );
+  }
+
   // ---- pinned channels come first, in the order they were pinned --------
   {
-    const it = await run({ pins: ["ops", "xlaptop-1"] });
+    const it = await run({ pins: ["ops", "xlaptop-1"], showClosed: true });
     assert.deepStrictEqual(
       rows(it.rail()).map((row) => row.name),
       ["ops", "xlaptop-1", "brisk-otter", "deploy-quadhost", "madari-relay", "notes-method"],
