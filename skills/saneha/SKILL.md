@@ -102,6 +102,7 @@ saneha leave <channel>
 saneha join <channel>
 saneha read <channel> --all                         # the transcript, not your unread
 saneha send <channel> "taken — picking up from <where>"
+saneha leave <channel>                              # you are not waiting in it either
 ```
 
 Handing over, put the handoff in the body, where the person reads it and where
@@ -116,8 +117,11 @@ on, and stop — `leave` says you are not coming back to answer.
 Picking up, `--all` rather than your unread, because you may have resumed the
 very session that handed over and its cursor can sit past the doc. Say the one
 line that you have it, so the transcript and the person both hold the receipt,
-and work without waiting. Close it only if the person says so: a closed channel
-takes no more joins, so closing is what stops anybody carrying this on.
+then leave and get on with the work: nobody is here to answer you, and a
+channel every participant has left folds itself off the person's list.
+Leaving is not closing, and a join resumes you. Close it only if the person
+says so: a closed channel takes no more joins, so closing is what stops
+anybody carrying this on.
 
 ## The wake loop
 

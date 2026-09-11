@@ -198,6 +198,13 @@ fn the_skill_says_what_a_harness_needs_to_find_and_follow_it() {
         // "its purpose is done" must not read as licence to.
         "takes no more joins",
         "never what makes it done",
+        // What does take a taken handoff off the person's list: both sides
+        // leave, and a channel nobody is in folds itself away. The receipt is
+        // not the end of the recipe, so the leave is in it as a line.
+        "you are not waiting in it either",
+        "folds itself off the person's list",
+        // And the one thing a leave must not be read as.
+        "Leaving is not closing",
         // A join says when something is stale, and the two answers differ:
         // `init` for a stale pointer, the person for a stale binary, because
         // nothing here can tell which of binary and server is behind. No
@@ -215,10 +222,16 @@ fn the_skill_says_what_a_harness_needs_to_find_and_follow_it() {
     // so the skill carries the whole cost of it. The margin over the current
     // length is deliberate: the first run of the handoff sentences found a
     // defect that needed a line, and the next one will too.
+    //
+    // 200 became 205 when the agent picking up a handoff was told to leave.
+    // The alternative was compressing sentences that were written deliberately
+    // and are asserted above, which buys five lines by making the thing an
+    // agent has to read harder to read — the opposite of what the budget is
+    // for. A raise costs something and so is recorded; this is the second one.
     let lines = skill.lines().count();
     assert!(
-        lines <= 200,
-        "the skill is {lines} lines; keep it under 200"
+        lines <= 205,
+        "the skill is {lines} lines; keep it under 205"
     );
 
     // CONTEXT.md's avoid-list: the machine part of an identity is the host.

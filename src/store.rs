@@ -577,6 +577,9 @@ impl Store {
                 created_at,
                 closed_at: None,
                 newest_id: 0,
+                // Minted, and joined by nobody: `new` joins no one, so a
+                // channel is born with nobody present and no transcript.
+                present: 0,
                 read_cursor: None,
             }),
             Err(err) if is_unique_violation(&err) => {
@@ -619,7 +622,7 @@ impl Store {
                FROM channels ORDER BY created_at, id"
         ))?;
         let rows = statement.query_map([identity], |row| {
-            Ok((read_row(row)?, row.get::<_, Option<i64>>(6)?))
+            Ok((read_row(row)?, row.get::<_, Option<i64>>(7)?))
         })?;
         rows.collect::<Result<Vec<_>, _>>()?
             .into_iter()
@@ -2428,9 +2431,25 @@ fn echo(value: &str) -> String {
 /// them. `last_message_id` is the allocator the schema already keeps, and is
 /// the channel's newest message id read straight off the row rather than
 /// counted out of the transcript.
-const CHANNEL_COLUMNS: &str = "name, purpose, state, created_at, closed_at, last_message_id";
+///
+/// The last of them is not a column but a count of the participants that have
+/// not left, which every reader of a channel gets because it is a fact about
+/// the channel and not a question the listing alone asks. Every statement here
+/// selects from `channels`, so the correlated subquery is written once and is
+/// right in all of them — a channel by name, by id, and the whole list.
+const CHANNEL_COLUMNS: &str = "name, purpose, state, created_at, closed_at, last_message_id, \
+     (SELECT COUNT(*) FROM participants \
+       WHERE participants.channel_id = channels.id AND participants.away = 0)";
 
-type ChannelRow = (String, Option<String>, String, String, Option<String>, i64);
+type ChannelRow = (
+    String,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    i64,
+    i64,
+);
 
 fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelRow> {
     Ok((
@@ -2440,11 +2459,12 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelRow> {
         row.get(3)?,
         row.get(4)?,
         row.get(5)?,
+        row.get(6)?,
     ))
 }
 
 fn build_channel(row: ChannelRow) -> Result<Channel, StoreError> {
-    let (name, purpose, state, created_at, closed_at, newest_id) = row;
+    let (name, purpose, state, created_at, closed_at, newest_id, present) = row;
     Ok(Channel {
         name,
         purpose,
@@ -2454,6 +2474,7 @@ fn build_channel(row: ChannelRow) -> Result<Channel, StoreError> {
         created_at,
         closed_at,
         newest_id,
+        present,
         read_cursor: None,
     })
 }
@@ -2877,6 +2898,64 @@ mod tests {
     }
 
     #[test]
+    fn a_channel_counts_the_participants_that_have_not_left() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("saneha.db")).expect("open");
+        store
+            .create_channel(Some("quiet-heron"), None)
+            .expect("create");
+
+        // Minted and joined by nobody. Nobody is present, and that is not the
+        // same thing as everybody having left: the transcript has not started.
+        let new = store.channel("quiet-heron").expect("read").expect("there");
+        assert_eq!(new.present, 0);
+        assert_eq!(new.newest_id, 0);
+
+        let mut request = request_without_a_directory();
+        store.join("quiet-heron", &request).expect("join");
+        request.name = "handing-over".to_string();
+        store.join("quiet-heron", &request).expect("the other join");
+        let both = store.channel("quiet-heron").expect("read").expect("there");
+        assert_eq!(both.present, 2);
+
+        store
+            .leave("quiet-heron", "handing-over@web")
+            .expect("leave");
+        assert_eq!(
+            store
+                .channel("quiet-heron")
+                .expect("read")
+                .expect("there")
+                .present,
+            1,
+            "one left, one still here"
+        );
+
+        store.leave("quiet-heron", "reviewer@web").expect("leave");
+        let empty = store.channel("quiet-heron").expect("read").expect("there");
+        assert_eq!(empty.present, 0, "a channel nobody is in");
+        assert!(empty.newest_id > 0, "and one that has been used");
+
+        // A resume is a join, so it undoes this without anything being
+        // reopened: the count is of the participants and not a state of the
+        // channel.
+        store.join("quiet-heron", &request).expect("resume");
+        assert_eq!(
+            store
+                .channel("quiet-heron")
+                .expect("read")
+                .expect("there")
+                .present,
+            1
+        );
+
+        // The listing carries it too, and from the same subquery.
+        let listed = store.list_channels(None).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].present, 1);
+    }
+
+    #[test]
     fn a_close_names_who_closed_it_in_the_body_and_nobody_in_the_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::open(&dir.path().join("saneha.db")).expect("open");
@@ -3005,6 +3084,7 @@ mod tests {
             "2026-09-04T09:00:00Z".to_string(),
             None,
             0,
+            0,
         );
         let err = build_channel(row).expect_err("unknown state");
         assert!(
@@ -3019,6 +3099,7 @@ mod tests {
             "2026-09-04T09:00:00Z".to_string(),
             Some("2026-09-04T10:00:00Z".to_string()),
             7,
+            0,
         );
         assert_eq!(
             build_channel(known).expect("closed is understood").state,

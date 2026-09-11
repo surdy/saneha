@@ -22,6 +22,10 @@ _Avoid_: history, log, feed
 The state of a channel that accepts no more messages but can still be read.
 _Avoid_: archived, ended, finished
 
+**Quiet**:
+An open channel with a transcript and nobody present: every participant has left. It is read off the participants rather than stored, so it is not a state and nothing is decided to enter or leave it — one join is enough. A taken handoff becomes quiet on its own; a channel someone is waiting in never is; a channel minted a moment ago and joined by nobody is not quiet but new.
+_Avoid_: idle, dormant, stale, inactive, archived, empty
+
 **Deleted**:
 A channel whose transcript has been removed. Distinct from closed.
 
@@ -54,6 +58,10 @@ _Avoid_: disconnect, exit, quit, remove
 **Away**:
 The state of a participant that has left and not resumed. Away participants are not woken.
 _Avoid_: offline, inactive, gone
+
+**Present**:
+A participant that has joined and not left. The complement of away, and what a quiet channel has none of.
+_Avoid_: online, active, here, live (which is said of a harness session, not of a participant)
 
 **Resume**:
 A join under an identity that already exists in the channel, continuing that participant and its read cursor rather than creating a new one.
