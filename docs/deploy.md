@@ -165,10 +165,22 @@ on the Let's Encrypt DNS-01 challenge, so give it a few seconds.
 ## 4. Tag the release
 
 A version is what is deployed ([ADR-0008](adr/0008-a-version-is-what-is-deployed.md)),
-so the tag belongs to this deploy and not to a separate occasion. Do it in the
-pull request that bumps `Image=`: raise the version in `Cargo.toml`, add the
-section to [CHANGELOG.md](../CHANGELOG.md), and after it merges tag the merge
-commit.
+so the tag belongs to this deploy and not to a separate occasion. Add the
+section to [CHANGELOG.md](../CHANGELOG.md) in the pull request that bumps
+`Image=`, and after it merges tag the merge commit.
+
+**`Cargo.toml` is not raised here.** It is raised by the pull request that
+changes what the server does, to the version that change will go out under,
+because the image this one pins was built before this one existed — so a bump
+made here ships as the version before it. That is not hypothetical: 0.3.0 first
+went out reporting `0.2.0`, which is the failure ADR-0008's last consequence
+now records. Check the version in the image you are about to deploy, not the
+one in your working tree:
+
+```sh
+# The entrypoint is the binary, so the flag is the whole of the argument.
+podman run --rm ghcr.io/surdy/saneha:sha-<short sha> --version
+```
 
 ```sh
 git checkout main && git pull
@@ -194,7 +206,15 @@ From either laptop, on the LAN or the tailnet:
 
 ```sh
 curl https://saneha.clusterfault.com/health
-# {"held_waits":0,"service":"saneha","status":"ok"}
+# {"held_waits":0,"service":"saneha","status":"ok","version":"0.3.0",...}
+
+# The version it reports is the tag you just cut, or the deploy shipped under
+# a name that is not its own. These disagreed once, which is why this line is
+# here; it cannot be a workflow, because GitHub Actions has no route to
+# quadhost.
+[ "$(curl -s https://saneha.clusterfault.com/health | \
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')" \
+  = "$(git describe --tags --abbrev=0 | tr -d v)" ] && echo same || echo DISAGREE
 
 export SANEHA_URL=https://saneha.clusterfault.com
 saneha new --purpose "checking the deploy"
