@@ -61,6 +61,23 @@ pub struct Channel {
     /// predates the field reads 0 rather than failing the whole listing.
     #[serde(default)]
     pub newest_id: i64,
+    /// How many participants have joined this channel and not left: the ones
+    /// that are present, which is the complement of away.
+    ///
+    /// A fact about the channel in the same way `newest_id` is, so it is here
+    /// wherever a channel is described rather than only in the listing. It is
+    /// what the viewer folds a quiet channel away on — nobody present and a
+    /// transcript that has started — and it is deliberately a count of the
+    /// participants rather than a state of the channel: one join makes it not
+    /// quiet, and nothing had to be decided or undone for that.
+    ///
+    /// Defaulted as well as serialised, for the same reason `newest_id` is. A
+    /// client meeting a server that predates the field reads 0, which reads as
+    /// nobody present — the page and the server that serves it are always the
+    /// same build, so the only readers of a 0 that means "not said" are
+    /// clients that do not look at this.
+    #[serde(default)]
+    pub present: i64,
     /// The read cursor of the identity `GET /channels?as=<identity>` asked
     /// about, in this channel: a read of what ADR-0004 already stores, which
     /// moves nothing.

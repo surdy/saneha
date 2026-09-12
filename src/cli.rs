@@ -1795,6 +1795,7 @@ mod tests {
             created_at: "2026-09-04T09:00:00Z".to_string(),
             closed_at: None,
             newest_id: 0,
+            present: 0,
             read_cursor: None,
         }
     }

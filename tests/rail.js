@@ -29,13 +29,19 @@ const script = page.slice(open + "<script>".length, page.indexOf("</script>", op
 
 /// The channels this world serves, with the unread the page draws a badge
 /// from: `newest_id` less `read_cursor`, as `GET /channels?as=` carries them.
+//
+// `present` is the count of participants that have not left, which is what a
+// quiet channel has none of: `still-heron` is a handoff that has been taken
+// and left by both sides, and `madari-relay` is minted and joined by nobody,
+// which is the case the fold must not swallow.
 const CHANNELS = [
-  { name: "xlaptop-1", state: "open", purpose: "cross-laptop wake test", newest_id: 6, read_cursor: 6 },
-  { name: "ops", state: "open", purpose: "backup failures land here", newest_id: 13, read_cursor: 1 },
-  { name: "brisk-otter", state: "open", purpose: "the auth refactor", newest_id: 4, read_cursor: 1 },
-  { name: "madari-relay", state: "open", purpose: null, newest_id: 0, read_cursor: 0 },
-  { name: "notes-method", state: "closed", purpose: "how the vault gets written", newest_id: 1, read_cursor: 0 },
-  { name: "deploy-quadhost", state: "open", purpose: "rolling it out", newest_id: 0, read_cursor: 0 }
+  { name: "xlaptop-1", state: "open", purpose: "cross-laptop wake test", newest_id: 6, read_cursor: 6, present: 2 },
+  { name: "ops", state: "open", purpose: "backup failures land here", newest_id: 13, read_cursor: 1, present: 1 },
+  { name: "brisk-otter", state: "open", purpose: "the auth refactor", newest_id: 4, read_cursor: 1, present: 2 },
+  { name: "madari-relay", state: "open", purpose: null, newest_id: 0, read_cursor: 0, present: 0 },
+  { name: "notes-method", state: "closed", purpose: "how the vault gets written", newest_id: 1, read_cursor: 0, present: 0 },
+  { name: "deploy-quadhost", state: "open", purpose: "rolling it out", newest_id: 0, read_cursor: 0, present: 1 },
+  { name: "still-heron", state: "open", purpose: "handoff: the importer", newest_id: 3, read_cursor: 3, present: 0 }
 ];
 
 function element(id) {
@@ -158,9 +164,10 @@ function world(options) {
   const channels = options.channels || CHANNELS;
 
   const kept = { "saneha.pins": JSON.stringify(options.pins || []) };
-  // The closed group is shut unless a test says otherwise, which is how a
-  // browser meets it.
+  // Both folding groups are shut unless a test says otherwise, which is how a
+  // browser meets them.
   if (options.showClosed) kept["saneha.closed"] = "open";
+  if (options.showQuiet) kept["saneha.quiet"] = "open";
   if (options.name !== null) kept["saneha.name"] = "surdy";
   if (options.theme) kept["saneha.theme"] = options.theme;
 
@@ -223,6 +230,13 @@ function world(options) {
     requests,
     el: byId,
     rail: () => byId("channelList").innerHTML,
+    /// The quiet group's heading, clicked.
+    foldQuiet() {
+      const button = byId("channelList").found && byId("channelList").found["#qg"];
+      assert.ok(button && button.onclick, "the quiet heading is there to click");
+      button.onclick();
+    },
+
     /// The closed group's heading, clicked.
     foldClosed() {
       const button = byId("channelList").found && byId("channelList").found["#cg"];
@@ -314,7 +328,7 @@ function groups(html) {
       ["brisk-otter", "deploy-quadhost", "madari-relay", "ops", "xlaptop-1", "notes-method"],
       "open first and then by name, with the closed ones under their heading"
     );
-    assert.deepStrictEqual(groups(it.rail()), ["Closed"], "and no headings above them");
+    assert.deepStrictEqual(groups(it.rail()), ["Quiet", "Closed"], "and no headings above them");
   }
 
   // ---- the closed group folds, and is shut when nobody has said ---------
@@ -355,6 +369,76 @@ function groups(html) {
     );
   }
 
+  // ---- a channel nobody is in folds away under Quiet --------------------
+  //
+  // This is what a taken handoff looks like the moment it is taken: both
+  // sides have left, nothing is closed, and the rail stops showing it. The
+  // row is otherwise an ordinary open one — no struck hash, no state — since
+  // one join brings it straight back.
+  {
+    const it = await run({});
+    assert.ok(
+      !rows(it.rail()).some((row) => row.name === "still-heron"),
+      "a channel every participant has left is not drawn until it is asked for"
+    );
+    assert.ok(
+      groups(it.rail()).includes("Quiet"),
+      "but its heading is, with the count on it: " + it.rail()
+    );
+
+    const shown = await run({ showQuiet: true });
+    const row = rows(shown.rail()).find((each) => each.name === "still-heron");
+    assert.ok(row, "and unfolding draws it");
+    assert.ok(
+      !row.classes.includes("cl"),
+      "a quiet channel is open: it carries no closed mark, because nothing was closed"
+    );
+  }
+
+  // ---- a channel nobody has joined yet is not quiet ----------------------
+  //
+  // The guard on the fold. `madari-relay` has been minted and joined by
+  // nobody, so it has nobody present — and folding it would take a channel
+  // away from the person who just made it, which is the opposite of the point.
+  {
+    const it = await run({});
+    assert.ok(
+      rows(it.rail()).some((row) => row.name === "madari-relay"),
+      "a channel with no transcript stays where the person who minted it is looking"
+    );
+  }
+
+  // ---- the two folds are kept apart from each other ---------------------
+  {
+    const it = await run({});
+    it.foldQuiet();
+    assert.ok(
+      rows(it.rail()).some((row) => row.name === "still-heron"),
+      "the quiet one is drawn after its own heading is clicked"
+    );
+    assert.ok(
+      !rows(it.rail()).some((row) => row.name === "notes-method"),
+      "and the closed pile stays shut: wanting one is not wanting the other"
+    );
+    assert.strictEqual(it.kept["saneha.quiet"], "open", "the browser keeps them separately");
+    assert.ok(!("saneha.closed" in it.kept));
+
+    it.foldQuiet();
+    assert.ok(
+      !("saneha.quiet" in it.kept),
+      "and shut is the absence of a preference rather than a second value"
+    );
+  }
+
+  // ---- a quiet channel being read does not vanish under its own group ---
+  {
+    const it = await run({ at: "still-heron" });
+    assert.ok(
+      rows(it.rail()).some((row) => row.name === "still-heron"),
+      "the channel on screen is in the rail even with the group shut"
+    );
+  }
+
   // ---- a closed channel being read does not vanish under its own group --
   {
     const it = await run({ at: "notes-method" });
@@ -376,7 +460,7 @@ function groups(html) {
       ["ops", "xlaptop-1", "brisk-otter", "deploy-quadhost", "madari-relay", "notes-method"],
       "the pinned two are first, in their kept order and not sorted"
     );
-    assert.deepStrictEqual(groups(it.rail()), ["Pinned", "Open", "Closed"]);
+    assert.deepStrictEqual(groups(it.rail()), ["Pinned", "Open", "Quiet", "Closed"]);
   }
 
   // ---- a pin naming a channel that is gone holds no place ---------------
@@ -395,7 +479,7 @@ function groups(html) {
     const it = await run({});
     it.kept["saneha.pins"] = "{not json";
     const again = await run({});
-    assert.deepStrictEqual(groups(again.rail()), ["Closed"], "nothing is pinned and nothing is broken");
+    assert.deepStrictEqual(groups(again.rail()), ["Quiet", "Closed"], "nothing is pinned and nothing is broken");
   }
 
   // ---- the head of an open channel ---------------------------------------
@@ -548,7 +632,7 @@ function groups(html) {
     const it = await run({
       at: "xlaptop-1",
       joined: false,
-      channels: [{ name: "xlaptop-1", state: "open", purpose: "the wake test", newest_id: 6 }]
+      channels: [{ name: "xlaptop-1", state: "open", purpose: "the wake test", newest_id: 6, present: 1 }]
     });
     const [row] = rows(it.rail());
     assert.strictEqual(row.name, "xlaptop-1");
@@ -677,7 +761,7 @@ function groups(html) {
   {
     const it = await run({ refuseStorage: true });
     assert.strictEqual(it.sandbox.document.documentElement.dataset.theme, "light");
-    assert.deepStrictEqual(groups(it.rail()), ["Closed"], "nothing pinned, nothing broken");
+    assert.deepStrictEqual(groups(it.rail()), ["Quiet", "Closed"], "nothing pinned, nothing broken");
     it.pick("theme", "dark");
     assert.strictEqual(
       it.sandbox.document.documentElement.dataset.theme,

@@ -9,7 +9,9 @@ expected back.
 
 This page is for the person running the agents. What the agents themselves do
 is in [the skill](../skills/saneha/SKILL.md); why it works this way rather than
-with a `--handoff` flag is [ADR-0005](adr/0005-a-handoff-is-a-message-and-a-leave.md).
+with a `--handoff` flag is [ADR-0005](adr/0005-a-handoff-is-a-message-and-a-leave.md),
+and why a taken handoff drops out of your channel list without anything being
+closed is [ADR-0009](adr/0009-quiet-is-a-view-of-the-participants.md).
 
 ## Your part is carrying the name
 
@@ -67,9 +69,18 @@ mints, so the name is one you chose and can remember.
 ## What you should see
 
 In the viewer, a handoff is a short transcript: a join, one message with the
-state of the work, a leave, then later another join and a line saying it has
-been taken. The message is the handoff — it is in the transcript rather than in
-an attachment, so you can read it yourself without downloading anything.
+state of the work, a leave, then later another join, a line saying it has been
+taken, and a second leave. The message is the handoff — it is in the transcript
+rather than in an attachment, so you can read it yourself without downloading
+anything.
+
+That second leave is what tidies up after itself. Both sides have now left, so
+nobody is present, and the viewer folds a channel nobody is in under **Quiet**,
+the same way it folds the closed ones — shut until you click the heading, which
+your browser then remembers. So a taken handoff leaves your channel list on its
+own, without anything being closed and without you deciding anything. A channel
+someone is still waiting in never goes quiet, because a participant parked on
+`saneha wait` has not left.
 
 The purpose line reads `handoff: <something>`, which is how you tell handoff
 channels from conversations in a long list. `⌘K` in the viewer filters on
@@ -82,7 +93,9 @@ Two things that are **not** signs of trouble:
 - **The channel stays open.** Nobody closes it when the doc is taken. That is
   deliberate: a closed channel refuses new joins, so closing it would stop a
   third session carrying the work on, and stop you asking a follow-up question
-  in the viewer. Close it when the work is genuinely finished, or leave it.
+  in the viewer. Close it when the work is genuinely finished, or leave it —
+  quiet is what keeps it out of your way in the meantime, and one join brings
+  it back with nothing to undo.
 
 ## When something goes wrong
 
@@ -181,8 +194,22 @@ that matters — only the join warning says so.
 ## Tidying up
 
 Handoff channels accumulate: nothing in saneha expires, and one channel per
-handoff adds up faster than one per project. `saneha list` shows them all, and
-closed ones sink to their own group in the viewer.
+handoff adds up faster than one per project. The viewer keeps the taken ones
+out of sight on its own — they are quiet, since nobody is in them — so this is
+about the disk and about `saneha list`, which shows them all.
+
+If you hand off often, the other half of the answer is to stop minting a
+channel each time. Name one and use it for every handoff in a repository:
+
+> Hand this off through saneha in `saneha-handoffs`.
+
+An agent told a name joins that channel rather than minting one, so the list
+stops growing, the name is one you never have to carry again, and the
+transcript becomes that repository's handoff log. What you give up is the clean
+sweep: one transcript holds hops of unrelated work, and whoever picks up reads
+the lot.
+
+To remove one for good:
 
 ```sh
 saneha delete brisk-otter          # says what would go, and removes nothing
