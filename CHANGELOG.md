@@ -48,6 +48,12 @@ those channels stay out of the quiet pile.
 - A quiet row is drawn as an ordinary open row — no struck hash, no mark of
   state — because nothing was closed and the channel still takes messages. One
   join puts it back above with nothing to undo.
+- **The row menu can leave a channel**, which is how a person makes one quiet
+  without a terminal. It is spelled *leave* rather than *quiet* because that is
+  the verb it runs: the leave goes into the transcript under the name this
+  browser posts as, and posting again joins again, which undoes it. Offered
+  only where this browser has posted — reading a channel in the viewer never
+  joins it — and never on a closed channel, since a leave is a message.
 - A channel minted a moment ago and joined by nobody is **not** quiet. The
   transcript has to have started, or the fold would swallow a channel from the
   person who has just made it.
