@@ -1290,6 +1290,10 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     if (!channel) return;
     const on = isPinned(name);
     const closed = channel.state === "closed";
+    // A cursor is in the listing only for an identity that has joined, so its
+    // absence is this browser having never posted here — and there is nothing
+    // to leave. A closed channel takes no more messages, and a leave is one.
+    const joined = channel.read_cursor !== undefined;
 
     const pop = document.createElement("div");
     pop.className = "pop";
@@ -1298,6 +1302,8 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
       (on ? "Unpin channel" : "Pin channel") + "</button>" +
       '<button type="button" class="mi" data-do="copy">' + icon("cp") +
       '<span class="sub">#' + esc(name) + "</span></button>" +
+      (closed || !joined ? "" : '<button type="button" class="mi" data-do="leave">' +
+        icon("out") + "Leave channel</button>") +
       (closed ? "" : '<div class="msep"></div><button type="button" class="mi dg" data-do="close">' +
         icon("sk") + "Close channel</button>");
     document.body.append(pop);
@@ -1326,6 +1332,8 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
       if (navigator.clipboard) navigator.clipboard.writeText("#" + name).catch(() => {});
       closeOver();
     };
+    const away = pop.querySelector('[data-do="leave"]');
+    if (away && !closed && joined) away.onclick = () => { closeOver(); leaveChannel(name); };
     const end = pop.querySelector('[data-do="close"]');
     if (end) end.onclick = () => { closeOver(); closeChannel(name); };
     pop.querySelector(".mi").focus();
@@ -2054,6 +2062,36 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
   /// Closes a channel, which is now reachable from the row menu as well as
   /// from the head of the one being read — so closing something no longer
   /// means opening it first.
+  /// Leaves a channel as the identity this browser posts under.
+  ///
+  /// This is the only way a person makes a channel quiet, and it is spelled
+  /// `leave` rather than `quiet` because that is the verb it runs: a leave is
+  /// a message, so it goes in the transcript under this name. Quiet is what
+  /// follows when the last participant has gone, and is nobody's to set.
+  ///
+  /// Not confirmed, where closing is. Closing is one-way and ends every wait;
+  /// this is undone by a join, and the join is what posting again does — which
+  /// is why the record of having joined goes with it, or `ensureJoined` would
+  /// take the early way out and leave this participant away while it talks.
+  /// Leaving twice does nothing the second time, as it does from the CLI.
+  async function leaveChannel(name) {
+    if (!name) return;
+    if (!(await ensureName())) return;
+    try {
+      await api("/channels/" + enc(name) + "/participants/" + enc(identity()) + "/leave", {
+        method: "POST"
+      });
+      state.joined.delete(name);
+      await loadChannels();
+      // The transcript gains a leave line, and the panel an away participant,
+      // so the channel on screen is looked at again. A row left from the rail
+      // has no follower to restart.
+      if (name === state.current) resume();
+    } catch (failure) {
+      ui.status.textContent = failure.message;
+    }
+  }
+
   async function closeChannel(name) {
     if (!name) return;
     if (!(await ensureName())) return;
