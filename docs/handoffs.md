@@ -82,6 +82,10 @@ own, without anything being closed and without you deciding anything. A channel
 someone is still waiting in never goes quiet, because a participant parked on
 `saneha wait` has not left.
 
+If you posted into the channel yourself, you are a participant too, and the
+channel stays out of the quiet pile until you leave as well — **leave channel**
+in the row's menu, which is reversible: posting again joins you again.
+
 The purpose line reads `handoff: <something>`, which is how you tell handoff
 channels from conversations in a long list. `⌘K` in the viewer filters on
 purposes, so typing `handoff` finds them all.

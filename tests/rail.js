@@ -114,7 +114,11 @@ function world(options) {
     // What the theme is stamped on, before the stylesheet is read.
     documentElement: { dataset: {}, style: {} },
     querySelector: () => null,
-    createElement: () => element("made"),
+    // The row menu is built with createElement and appended to a body that
+    // keeps nothing, so the last one made is held here: it is the only handle
+    // a test has on a popup the page owns.
+    createElement: () => (document.made = element("made")),
+    made: null,
     body: { append() {} },
     addEventListener(type, fn) {
       (document.listeners[type] = document.listeners[type] || []).push(fn);
@@ -133,6 +137,16 @@ function world(options) {
   function fetch(url, init) {
     requests.push({ url, init });
     if (url.split("?")[0] === "/channels") return json({ channels: channels });
+    const leaving = url.match(/^\/channels\/([^/]+)\/participants\/([^/]+)\/leave$/);
+    if (leaving) {
+      return json({
+        channel: leaving[1],
+        identity: decodeURIComponent(leaving[2]),
+        left: true,
+        channel_state: "open",
+        participant: { identity: decodeURIComponent(leaving[2]), away: true }
+      });
+    }
     if (/\/messages\?.*hold=/.test(url)) return held();
     if (/\/messages\?/.test(url)) return json({ messages: [] });
     if (/\/participants$/.test(url)) {
@@ -179,6 +193,18 @@ function world(options) {
     node.setAttribute = (name, on) => { node.pressed = on; };
     return node;
   };
+  // The handle on every row, one per channel this world serves. The rail
+  // attaches the menu to these after it draws, and without them the row menu
+  // — where pinning, copying, leaving and closing all live — is unreachable
+  // from a test, which is why nothing had ever driven it.
+  byId("channelList").groups = {
+    ".more2": channels.map((channel) => {
+      const node = element("more2:" + channel.name);
+      node.dataset.menu = channel.name;
+      return node;
+    })
+  };
+
   byId("settingsDialog").groups = {
     "[data-theme-pick]": ["system", "light", "dark"].map((v) => segment("data-theme-pick", v)),
     "[data-rows-pick]": ["purpose", "name"].map((v) => segment("data-rows-pick", v))
@@ -192,7 +218,9 @@ function world(options) {
   };
   const sandbox = {
     document,
-    window: { addEventListener() {}, matchMedia: () => media },
+    // The menu is placed against the handle and pulled back inside the window,
+    // so the window has to have a size for the arithmetic to mean anything.
+    window: { addEventListener() {}, matchMedia: () => media, innerWidth: 1280, innerHeight: 900 },
     location: { pathname: options.at ? "/c/" + options.at : "/", reload() {} },
     history: { pushState() {} },
     localStorage: {
@@ -230,6 +258,22 @@ function world(options) {
     requests,
     el: byId,
     rail: () => byId("channelList").innerHTML,
+    /// One row's handle, clicked: the menu the page then builds is the last
+    /// element it made.
+    openMenu(name) {
+      const handle = byId("channelList").groups[".more2"].find((node) => node.dataset.menu === name);
+      assert.ok(handle && handle.onclick, "the row for " + name + " has a handle to click");
+      handle.onclick({ stopPropagation() {} });
+      assert.ok(document.made, "a menu was built");
+      return document.made;
+    },
+
+    /// One item of the menu now open, by what it does.
+    menuItem(what) {
+      assert.ok(document.made, "no menu is open");
+      return document.made.found && document.made.found['[data-do="' + what + '"]'];
+    },
+
     /// The quiet group's heading, clicked.
     foldQuiet() {
       const button = byId("channelList").found && byId("channelList").found["#qg"];
@@ -437,6 +481,57 @@ function groups(html) {
       rows(it.rail()).some((row) => row.name === "still-heron"),
       "the channel on screen is in the rail even with the group shut"
     );
+  }
+
+  // ---- leaving from the rail is how a person makes a channel quiet ------
+  //
+  // The row menu had never been driven by a test at all; these are the first,
+  // and the reason is that leaving is the one thing in it that a person could
+  // not do from the viewer before.
+  {
+    const it = await run({});
+    const menu = it.openMenu("ops");
+    assert.ok(
+      menu.innerHTML.includes('data-do="leave"'),
+      "an open channel this browser has posted in offers to leave it: " + menu.innerHTML
+    );
+    assert.ok(
+      menu.innerHTML.indexOf('data-do="leave"') < menu.innerHTML.indexOf('data-do="close"'),
+      "above close, which is the one-way half of the pair"
+    );
+
+    it.menuItem("leave").onclick();
+    await it.settle();
+    const asked = it.requests.filter((request) => /\/leave$/.test(request.url));
+    assert.strictEqual(asked.length, 1, "one leave, for this identity in this channel");
+    assert.strictEqual(asked[0].url, "/channels/ops/participants/surdy%40web/leave");
+    assert.strictEqual(asked[0].init.method, "POST");
+    assert.ok(!asked[0].init.body, "the identity is in the path, so there is no body to send");
+  }
+
+  // ---- nothing to leave where this browser has never posted -------------
+  //
+  // A read cursor is in the listing only for an identity that has joined, and
+  // the viewer joins on its first message rather than on being opened — so
+  // reading a channel here never puts the item in the menu.
+  {
+    const it = await run({
+      channels: [{ name: "xlaptop-1", state: "open", purpose: "the wake test", newest_id: 6, present: 1 }]
+    });
+    const menu = it.openMenu("xlaptop-1");
+    assert.ok(
+      !menu.innerHTML.includes('data-do="leave"'),
+      "a channel with no cursor for this browser has nothing to leave: " + menu.innerHTML
+    );
+    assert.ok(menu.innerHTML.includes('data-do="close"'), "and closing, which takes no participant, stays");
+  }
+
+  // ---- a closed channel is not left, because a leave is a message -------
+  {
+    const it = await run({ showClosed: true });
+    const menu = it.openMenu("notes-method");
+    assert.ok(!menu.innerHTML.includes('data-do="leave"'));
+    assert.ok(!menu.innerHTML.includes('data-do="close"'), "nor closed twice");
   }
 
   // ---- a closed channel being read does not vanish under its own group --
