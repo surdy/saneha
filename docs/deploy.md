@@ -600,12 +600,26 @@ sudo podman volume rm saneha-restore-drill
 
 ## Installing the binary on a laptop
 
-The laptops run the same binary as a client. There is no released artifact yet:
+The laptops run the same binary as a client. There is no published executable,
+so it is built from source — but not from a clone: the repository is public, so
+`--git` fetches it, and `--tag` pins the release the notes were written against.
 
 ```sh
-cargo install --path .          # into ~/.cargo/bin
+cargo install --git https://github.com/surdy/saneha --tag v0.3.0
 saneha init --url https://saneha.clusterfault.com
 ```
+
+Upgrading later is the same first line with a newer tag, and then `saneha init`
+again — which is a no-op unless the pointer moved, and says so. Nothing else
+carries over from release to release: the saved address stays, and `init`
+without `--url` leaves it alone.
+
+You will be told when there is a release to install. `saneha join` compares this
+binary's version against the one the server reports on `/health` and says so
+when the server is newer, which since
+[ADR-0008](adr/0008-a-version-is-what-is-deployed.md) means a release this
+machine has not got. It says nothing in the other direction, because a binary
+built from `main` between deploys is ahead of the server on purpose.
 
 `init` writes the address to `~/.config/saneha/config.json` and points every
 harness on the machine at this binary, which is the whole of the first-run
