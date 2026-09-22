@@ -1,0 +1,104 @@
+name: Publish the release
+
+# A `v*` tag publishes the release: the notes out of CHANGELOG.md, and a
+# built executable for each machine that runs saneha as a client.
+#
+# The server is a container and takes no asset from here — `image.yml` tags the
+# same commit with its version. What needs an executable is a laptop, and both
+# of them are macOS, so those are the targets. Nothing needs a Linux build
+# today: quadhost runs the container, and its backup alerting depends on curl,
+# jq and logger rather than on saneha being able to run. Adding a target later
+# is a line in the matrix; carrying one nothing installs is a build that can
+# break without anybody noticing.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The existing tag to publish
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    # An Apple Silicon runner, which cross-compiles the Intel target with the
+    # SDK it already has. The other direction would need a second runner.
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Name the release
+        id: name
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      # Before anything is built, so a release with no notes fails in seconds
+      # rather than after two compiles. Every release says what changed.
+      - name: Take the notes out of the changelog
+        run: |
+          set -euo pipefail
+          version='${{ steps.name.outputs.version }}'
+          awk -v want="## $version " '
+            index($0 " ", want) == 1 { found = 1; next }
+            /^## / { found = 0 }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+
+      - name: Check the tag and the crate agree
+        run: |
+          set -euo pipefail
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          want='${{ steps.name.outputs.version }}'
+          if [ "$crate" != "$want" ]; then
+            echo "the tag says $want and Cargo.toml says $crate" >&2
+            exit 1
+          fi
+
+      - name: Build both macOS targets
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "$target"
+          done
+
+      - name: Wrap each one up, with its checksum
+        run: |
+          set -euo pipefail
+          tag='${{ steps.name.outputs.tag }}'
+          mkdir -p dist
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            tar -czf "dist/saneha-$tag-$target.tar.gz" \
+              -C "target/$target/release" saneha
+          done
+          cd dist && shasum -a 256 ./*.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      # Created here rather than by hand, so the tag is the only thing a person
+      # pushes and the notes cannot be forgotten between the two.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.name.outputs.tag }}'
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --notes-file notes.md
+          else
+            gh release create "$tag" --title "saneha ${{ steps.name.outputs.version }}" \
+              --notes-file notes.md
+          fi
+          gh release upload "$tag" dist/*.tar.gz dist/SHA256SUMS --clobber

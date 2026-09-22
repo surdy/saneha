@@ -182,23 +182,30 @@ one in your working tree:
 podman run --rm ghcr.io/surdy/saneha:sha-<short sha> --version
 ```
 
+Pushing the tag is the whole of it. `release.yml` takes the notes out of
+`CHANGELOG.md`, builds an executable for each macOS architecture, and publishes
+the release with both and their checksums:
+
 ```sh
 git checkout main && git pull
-git tag -a v0.2.0 -m "saneha 0.2.0"
-git push origin v0.2.0
-gh release create v0.2.0 --title "saneha 0.2.0" --notes-file <(
-  awk '/^## 0\.2\.0/{f=1;next} /^## /{f=0} f' CHANGELOG.md)
+git tag -a v0.3.0 -m "saneha 0.3.0"
+git push origin v0.3.0
 ```
 
-The tag publishes the same image again under `0.2.0` and the moving `0.2`, so a
+It refuses rather than publishes something wrong: no section in the changelog
+for that version, or a `Cargo.toml` that disagrees with the tag, and it stops —
+before building, so it stops in seconds. That is also the check that the bump
+went in the right pull request, which is the mistake 0.3.0 made.
+
+The tag publishes the same image again under `0.3.0` and the moving `0.3`, so a
 release is pullable by the number its notes are written against. The unit goes
 on pinning the SHA: a version tag is a name somebody could move, and the drift
 check below only means something if what the repository says is deployed cannot
 have moved under it.
 
 The notes are what the deploy pull request already had to say — what changed,
-whether a migration is involved, whether mixed versions are safe. Publishing
-them is the only new work.
+whether a migration is involved, whether mixed versions are safe. Writing them
+into the changelog is the only new work; publishing them is not work at all.
 
 ## 5. Verify
 
@@ -600,19 +607,36 @@ sudo podman volume rm saneha-restore-drill
 
 ## Installing the binary on a laptop
 
-The laptops run the same binary as a client. There is no published executable,
-so it is built from source — but not from a clone: the repository is public, so
-`--git` fetches it, and `--tag` pins the release the notes were written against.
+The laptops run the same binary as a client. Each release carries a built one
+for both macOS architectures, so installing it needs no Rust toolchain and no
+clone:
 
 ```sh
-cargo install --git https://github.com/surdy/saneha --tag v0.3.0
+TAG=v0.3.0
+curl -fsSLO "https://github.com/surdy/saneha/releases/download/$TAG/saneha-$TAG-$(uname -m | sed s/arm64/aarch64/)-apple-darwin.tar.gz"
+curl -fsSLO "https://github.com/surdy/saneha/releases/download/$TAG/SHA256SUMS"
+shasum -a 256 -c --ignore-missing SHA256SUMS      # check it before running it
+tar -xzf saneha-$TAG-*.tar.gz -C ~/.cargo/bin     # or anywhere on PATH
 saneha init --url https://saneha.clusterfault.com
 ```
 
-Upgrading later is the same first line with a newer tag, and then `saneha init`
-again — which is a no-op unless the pointer moved, and says so. Nothing else
-carries over from release to release: the saved address stays, and `init`
-without `--url` leaves it alone.
+`uname -m` says `arm64` where the target triple says `aarch64`, which is what
+the `sed` is for. Nothing is signed or notarised, so a Mac may refuse a
+downloaded executable depending on how it arrived; `curl` does not mark it the
+way a browser does, and `xattr -d com.apple.quarantine` is the way out if one
+ever does.
+
+Building it instead stays available and needs no clone either, since the
+repository is public:
+
+```sh
+cargo install --git https://github.com/surdy/saneha --tag v0.3.0
+```
+
+Upgrading later is the same again with a newer tag, and then `saneha init` —
+which is a no-op unless the pointer moved, and says so. Nothing else carries
+over from release to release: the saved address stays, and `init` without
+`--url` leaves it alone.
 
 You will be told when there is a release to install. `saneha join` compares this
 binary's version against the one the server reports on `/health` and says so
