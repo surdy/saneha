@@ -1321,6 +1321,55 @@ fn different_skill(theirs: Option<&str>, mine: &str) -> Option<&'static str> {
     }
 }
 
+/// A version as three numbers, or nothing when it is not one.
+///
+/// Anything after the patch number is dropped, so `0.3.0-rc1` sorts as `0.3.0`
+/// rather than refusing to sort at all. That is wrong in the direction that
+/// says nothing: a release candidate and its release compare equal and neither
+/// is reported as behind the other.
+fn numbers(version: &str) -> Option<(u64, u64, u64)> {
+    let version = version.trim();
+    let version = version.split(['-', '+']).next()?;
+    let mut parts = version.split('.');
+    let mut next = || parts.next()?.parse::<u64>().ok();
+    let three = (next()?, next()?, next()?);
+    // A fourth part is not a version this knows how to read.
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(three)
+}
+
+/// What to say when the server is running a saneha newer than this one.
+///
+/// Since [ADR-0008] a version is what is deployed, so a server reporting a
+/// higher one is a release this machine has not installed — which is the one
+/// direction worth saying, because it is the only one the person reading it
+/// can act on. The other direction is the ordinary state of things between a
+/// merge and the deploy that ships it, and saying it would be telling somebody
+/// to do nothing.
+///
+/// This is also what resolves [`different_skill`]'s admission that it cannot
+/// tell which of the two is behind. When the versions can be compared they
+/// answer exactly that, so the caller prefers this message and drops the other
+/// rather than printing a vaguer sentence beside a precise one.
+///
+/// Nothing is said when either version cannot be read as three numbers. A join
+/// is not the place to be pedantic about a string that was only ever meant for
+/// a person to read.
+///
+/// [ADR-0008]: ../docs/adr/0008-a-version-is-what-is-deployed.md
+fn older_than_server(mine: &str, theirs: Option<&str>) -> Option<String> {
+    let theirs = theirs?;
+    if numbers(theirs)? <= numbers(mine)? {
+        return None;
+    }
+    Some(format!(
+        "the server is running saneha {theirs} and this binary is {mine}; update it: \
+         cargo install --git https://github.com/surdy/saneha --tag v{theirs}"
+    ))
+}
+
 /// Says so, once, when the instructions an agent is about to follow are not
 /// the ones this saneha was built with.
 ///
@@ -1342,7 +1391,13 @@ fn different_skill(theirs: Option<&str>, mine: &str) -> Option<&'static str> {
 /// never needed the server.
 fn say_if_behind(remote: &Remote) {
     if let Ok(health) = remote.health() {
-        if let Some(line) = different_skill(health.skill.as_deref(), skill::digest()) {
+        // The version first, and instead: when it says the server is newer,
+        // it has answered the question the skill message says it cannot, and
+        // two sentences about the same cause are worse than the precise one.
+        if let Some(line) = older_than_server(env!("CARGO_PKG_VERSION"), health.version.as_deref())
+        {
+            warn(&line);
+        } else if let Some(line) = different_skill(health.skill.as_deref(), skill::digest()) {
             warn(line);
         }
     }
@@ -1721,6 +1776,48 @@ fn short_name(identity: &str, participants: &[Participant]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_newer_server_is_the_one_direction_worth_saying() {
+        // The case the second laptop sits in: a release it has not installed.
+        let said = older_than_server("0.2.0", Some("0.3.0")).expect("a newer server is said");
+        assert!(said.contains("0.3.0") && said.contains("0.2.0"), "{said}");
+        assert!(
+            said.contains("--tag v0.3.0"),
+            "and names the command that fixes it, pinned to the release: {said}"
+        );
+
+        // The ordinary state between a merge and the deploy that ships it.
+        // Saying it would be telling somebody to do nothing.
+        assert_eq!(older_than_server("0.3.0", Some("0.2.0")), None);
+        assert_eq!(older_than_server("0.3.0", Some("0.3.0")), None);
+
+        // Every part counts, not just the minor.
+        assert!(older_than_server("0.3.0", Some("0.3.1")).is_some());
+        assert!(older_than_server("0.9.0", Some("1.0.0")).is_some());
+        assert!(
+            older_than_server("0.10.0", Some("0.9.0")).is_none(),
+            "ten is after nine"
+        );
+    }
+
+    #[test]
+    fn a_version_that_cannot_be_read_says_nothing() {
+        // A join is not the place to be pedantic about a string that was only
+        // ever meant for a person to read, and a server too old to report one
+        // at all is the same silence.
+        assert_eq!(older_than_server("0.2.0", None), None);
+        assert_eq!(older_than_server("0.2.0", Some("")), None);
+        assert_eq!(older_than_server("0.2.0", Some("next")), None);
+        assert_eq!(older_than_server("0.2.0", Some("0.3")), None);
+        assert_eq!(older_than_server("0.2.0", Some("0.3.0.1")), None);
+        assert_eq!(older_than_server("not-a-version", Some("0.3.0")), None);
+
+        // A pre-release sorts as its release, which errs towards silence: it
+        // is never reported as behind the release it is a candidate for.
+        assert_eq!(numbers("0.3.0-rc1"), numbers("0.3.0"));
+        assert_eq!(older_than_server("0.3.0-rc1", Some("0.3.0")), None);
+    }
+
     /// The names in the order the table printed them.
     fn order(table: &str, names: &[&str]) -> Vec<String> {
         let mut found: Vec<(usize, String)> = names
