@@ -26,9 +26,10 @@ Nothing is needed on the server. There is no migration and no wire type
 changed: the session id the lookup uses has been recorded on every Claude Code
 join since participants existed.
 
-**Run `cargo install --path .` on each machine.** The lookup, the refusal and
-the new names are all in the CLI, and the skill change arrives with it.
-Participants that already exist keep the names they were granted.
+**Install this release's binary on each machine**, as `docs/deploy.md` says
+under "Installing the binary on a laptop". The lookup, the refusal and the new
+names are all in the CLI, and the skill change comes with it. Participants that
+already exist keep the names they were granted.
 
 ### For the person
 
@@ -60,6 +61,9 @@ Participants that already exist keep the names they were granted.
 - **The skill has an agent name itself by its job**, as
   `--as <repo>-<role>`. Harnesses other than Claude Code still pass the granted
   name to every verb.
+- **`join`'s warning about a newer server names the release to install**, not a
+  `cargo install`. 0.4.0 shipped the executable in the release and the warning
+  in the same version, but the warning still sent people to the toolchain.
 
 ### Decided
 
