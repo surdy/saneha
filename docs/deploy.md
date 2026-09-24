@@ -645,6 +645,15 @@ when the server is newer, which since
 machine has not got. It says nothing in the other direction, because a binary
 built from `main` between deploys is ahead of the server on purpose.
 
+**It cannot tell a machine that is behind by more than the check itself.** The
+comparison shipped in 0.4.0, so a binary older than that does not make it — it
+says nothing at all, however far behind it is. Watched happening: a 0.3.0
+binary against the 0.4.0 server joined in silence, because 0.3.0 was tagged
+eleven days before the check was written. Every machine therefore needs one
+update it was not told about, and reports for itself from then on. If a laptop
+has been quiet for a while, check `saneha --version` against `/health` by hand
+rather than reading its silence as agreement.
+
 `init` writes the address to `~/.config/saneha/config.json` and points every
 harness on the machine at this binary, which is the whole of the first-run
 step. Do not put an `export` in the shell profile instead: a harness runs each
