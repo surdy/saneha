@@ -285,10 +285,42 @@ fn basename(path: &Path) -> Option<&str> {
     path.file_name().and_then(|name| name.to_str())
 }
 
-/// The derived name: the project basename and the harness, joined, folded into
-/// the characters a name may hold and cut to `max` characters.
+/// The derived name: the project basename, folded into the characters a name
+/// may hold and cut to `max` characters.
+///
+/// The harness is not in it (ADR-0010). It is a field of the participant
+/// already, and in the name it made two sessions of one repository differ by
+/// a `-2` and nothing else. It is the fallback only when there is no project
+/// to name, so that a name is never empty.
 pub fn derived_name(project: &str, harness: &str, max: usize) -> String {
-    cut(sanitize(&format!("{project}-{harness}")), max)
+    let name = cut(sanitize(project), max);
+    if name.is_empty() {
+        cut(sanitize(harness), max)
+    } else {
+        name
+    }
+}
+
+/// The hour and minute in a process start time as `ps -o lstart=` gives it
+/// (`Wed Sep 23 11:48:53 2026`), as `1148`, and the same with the seconds as
+/// `114853`. These are what a second live session under one name is told
+/// apart by: not random, and something a person can match against the
+/// terminal the session started in. `None` when there is no clock time in it.
+pub fn start_clock(started_at: &str) -> Option<(String, String)> {
+    started_at.split_whitespace().find_map(|word| {
+        let parts: Vec<&str> = word.split(':').collect();
+        let [hours, minutes, seconds] = parts.as_slice() else {
+            return None;
+        };
+        let two = |part: &str| part.len() == 2 && part.bytes().all(|b| b.is_ascii_digit());
+        if !(two(hours) && two(minutes) && two(seconds)) {
+            return None;
+        }
+        Some((
+            format!("{hours}{minutes}"),
+            format!("{hours}{minutes}{seconds}"),
+        ))
+    })
 }
 
 /// A value cut to `max` characters without leaving a hyphen dangling at the
@@ -406,17 +438,28 @@ mod tests {
     }
 
     #[test]
-    fn a_derived_name_is_the_project_and_the_harness() {
-        assert_eq!(
-            derived_name("notes-method", "claude", 64),
-            "notes-method-claude"
-        );
-        assert_eq!(
-            derived_name("saneha", UNKNOWN_HARNESS, 64),
-            "saneha-unknown"
-        );
-        assert_eq!(derived_name("My_Repo", "claude", 64), "my-repo-claude");
+    fn a_derived_name_is_the_project_and_not_the_harness() {
+        assert_eq!(derived_name("notes-method", "claude", 64), "notes-method");
+        assert_eq!(derived_name("saneha", UNKNOWN_HARNESS, 64), "saneha");
+        assert_eq!(derived_name("My_Repo", "claude", 64), "my-repo");
+        // With no project to name, the harness is better than nothing.
         assert_eq!(derived_name("", "claude", 64), "claude");
+    }
+
+    #[test]
+    fn a_start_time_gives_its_clock() {
+        assert_eq!(
+            start_clock("Wed Sep 23 11:48:53 2026"),
+            Some(("1148".to_string(), "114853".to_string()))
+        );
+        // `ps` pads a single-digit day with a second space.
+        assert_eq!(
+            start_clock("Thu Jan  1 00:00:00 2015"),
+            Some(("0000".to_string(), "000000".to_string()))
+        );
+        assert_eq!(start_clock("not a time"), None);
+        assert_eq!(start_clock("1:2:3"), None);
+        assert_eq!(start_clock(""), None);
     }
 
     #[test]
@@ -427,6 +470,6 @@ mod tests {
         assert!(!name.ends_with('-'), "{name}");
 
         // The cut lands exactly on a hyphen, which must not be left dangling.
-        assert_eq!(derived_name(&"b".repeat(9), "claude", 10), "bbbbbbbbb");
+        assert_eq!(derived_name("bbbbbbbbb-c", "claude", 10), "bbbbbbbbb");
     }
 }

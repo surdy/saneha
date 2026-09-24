@@ -52,11 +52,12 @@ pub struct Cli {
 pub struct IdentityArgs {
     /// The name half of this identity, as `saneha join` works it out
     ///
-    /// Without it the name is derived from the repository this is run in and
-    /// the harness it is run under, as <repo-basename>-<harness>. Every
-    /// worktree of a repository derives the same name, so two live checkouts
-    /// are told apart by the suffix rather than by where they happen to sit.
-    /// `SANEHA_AS=<name> saneha ...` says the same thing.
+    /// Without it the name is derived from the repository this is run in, as
+    /// <repo-basename>. Every worktree of a repository derives the same name,
+    /// so two live checkouts are told apart by the suffix rather than by where
+    /// they happen to sit. Under Claude Code a verb after `join` finds the
+    /// participant by its session instead, so this is only needed to name
+    /// somebody else. `SANEHA_AS=<name> saneha ...` says the same thing.
     #[arg(long = "as", value_name = "NAME", env = "SANEHA_AS", global = true)]
     pub as_name: Option<String>,
 
@@ -648,7 +649,7 @@ fn join(args: JoinArgs, me: &IdentityArgs) -> Result<()> {
 
     let caller = caller(me)?;
     let Caller {
-        name,
+        mut name,
         host,
         harness,
         harness_given,
@@ -662,6 +663,23 @@ fn join(args: JoinArgs, me: &IdentityArgs) -> Result<()> {
     let session_id = identity::session_id(&harness);
     let pid = identity::pid(&harness);
     let pid_started_at = pid.and_then(identity::process_start);
+
+    // A session already in this channel under the name it was granted joins
+    // again as that name, rather than deriving one it does not hold and being
+    // granted a third (ADR-0010). A listing that fails is left to the probe
+    // below, which says why in the words every join has always used.
+    if !name_given {
+        if let Some(mine) = session_id.as_deref() {
+            if let Ok(participants) = remote.list_participants(&args.channel) {
+                if let Some(me) = participants
+                    .iter()
+                    .find(|p| p.host == host && p.session_id.as_deref() == Some(mine))
+                {
+                    name = me.name.clone();
+                }
+            }
+        }
+    }
 
     let wanted = store::identity_of(&name, &host);
     let mut held = None;
@@ -680,9 +698,14 @@ fn join(args: JoinArgs, me: &IdentityArgs) -> Result<()> {
             pid_started_at: pid_started_at.clone(),
             cwd: Some(cwd.clone()),
             madari_pane: None,
-            same_host_session_live: held
-                .as_ref()
-                .is_some_and(|held| session_is_live(held, session_id.as_deref())),
+            // Under a derived name, a participant another harness joined is
+            // never this one coming back, running or not: the name no longer
+            // carries the harness (ADR-0010), so it is kept apart the way a
+            // live one is. A name that was given is the caller's to reuse.
+            same_host_session_live: held.as_ref().is_some_and(|held| {
+                (!name_given && held.harness != harness)
+                    || session_is_live(held, session_id.as_deref())
+            }),
             held_session_id: held.as_ref().and_then(|held| held.session_id.clone()),
         };
         match remote.join(&args.channel, &request)? {
@@ -704,16 +727,39 @@ fn join(args: JoinArgs, me: &IdentityArgs) -> Result<()> {
     }
 
     if joined.suffixed {
-        let pid = held
-            .as_ref()
-            .and_then(|held| held.pid)
-            .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let holder = held.as_ref().map_or(wanted.as_str(), |held| &held.identity);
+        match held.as_ref().filter(|held| held.harness != harness) {
+            Some(other) => warn(&format!(
+                "{holder} was joined under {}, not {harness}; joined as {} instead",
+                other.harness, joined.identity
+            )),
+            None => {
+                let pid = held
+                    .as_ref()
+                    .and_then(|held| held.pid)
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                warn(&format!(
+                    "{holder} is held by a harness session still running on this host \
+                     (pid {pid}); joined as {} instead",
+                    joined.identity
+                ));
+            }
+        }
+    }
+    // A resume of a participant some other session left behind hands this
+    // one that participant's read cursor, and whatever it had read is no
+    // longer unread here. That is ADR-0005's hazard; it is allowed, since a
+    // join is the explicit act and the only way back in for a harness with no
+    // session id, but it is not silent (ADR-0010).
+    if let Some(held) = held
+        .as_ref()
+        .filter(|held| joined.resumed && held.session_id.is_some() && held.session_id != session_id)
+    {
         warn(&format!(
-            "{} is held by a harness session still running on this host (pid {pid}); \
-             joined as {} instead",
-            held.as_ref().map_or(wanted.as_str(), |held| &held.identity),
-            joined.identity
+            "resumed {}, which another session left, at read cursor {}; what it had read is \
+             not unread for you — saneha read {} --all prints the whole transcript",
+            held.identity, joined.participant.read_cursor, args.channel
         ));
     }
     say_if_behind(&remote);
@@ -751,6 +797,63 @@ fn session_is_live(held: &Participant, mine: Option<&str>) -> bool {
     }
 }
 
+/// The identity a verb acts as, and why (ADR-0010).
+///
+/// A name that was given is the answer. Otherwise the harness session is: the
+/// participant in this channel carrying this session's id is this session,
+/// whatever name `join` granted it, so a bare `saneha read` after a join that
+/// was granted `-1148` reads as `-1148` and not as whoever holds the name the
+/// CLI would have derived. That is the `fond-ivory` mistake, and the CLI keeps
+/// nothing between commands that could have prevented it; the server already
+/// had the session id.
+///
+/// With a session id and no participant carrying it, this session has not
+/// joined. The derived name may still be in the channel, held by another
+/// session, running or finished; acting as it would read that participant's
+/// messages and move its cursor, so it is refused rather than guessed at. A
+/// harness that publishes no session id has nothing to compare, and gets the
+/// derived name as it always has.
+fn acting_as(channel: &str, caller: &Caller, participants: &[Participant]) -> Result<String> {
+    let derived = caller.identity();
+    if caller.name_given {
+        return Ok(derived);
+    }
+    let Some(mine) = identity::session_id(&caller.harness) else {
+        return Ok(derived);
+    };
+    if let Some(me) = participants
+        .iter()
+        .find(|p| p.host == caller.host && p.session_id.as_deref() == Some(mine.as_str()))
+    {
+        return Ok(me.identity.clone());
+    }
+    if participants.iter().any(|p| p.identity == derived) {
+        return Err(anyhow!(
+            "this session has not joined {channel:?}: {derived} is another session's \
+             participant, and acting as it would read its messages and move its read cursor; \
+             join it first: saneha join {channel}"
+        ));
+    }
+    Ok(derived)
+}
+
+/// Whether [`acting_as`] needs the roster to answer. Only a session that can
+/// be looked up does: a given name is its own answer, and a harness with no
+/// session id is answered by the name alone.
+fn looks_itself_up(caller: &Caller) -> bool {
+    !caller.name_given && identity::session_id(&caller.harness).is_some()
+}
+
+/// [`acting_as`] for a verb that does not otherwise list the participants,
+/// which only pays for the listing when there is a session to look up.
+fn acting_as_fetched(remote: &Remote, channel: &str, caller: &Caller) -> Result<String> {
+    if !looks_itself_up(caller) {
+        return Ok(caller.identity());
+    }
+    let participants = remote.list_participants(channel)?;
+    acting_as(channel, caller, &participants)
+}
+
 fn participants(args: ParticipantsArgs) -> Result<()> {
     let remote = Remote::from_env()?;
     let participants = remote.list_participants(&args.channel)?;
@@ -779,6 +882,9 @@ fn send(args: SendArgs, me: &IdentityArgs) -> Result<()> {
     let remote = Remote::from_env()?;
     let caller = caller(me)?;
     let body = message_body(&args.body)?;
+    // Before the uploads: a send refused for acting as somebody else should
+    // not leave files behind for the sweep.
+    let from = acting_as_fetched(&remote, &args.channel, &caller)?;
 
     let mut attachments = Vec::with_capacity(args.file.len());
     for file in &args.file {
@@ -788,7 +894,7 @@ fn send(args: SendArgs, me: &IdentityArgs) -> Result<()> {
     let message = remote.send_message(
         &args.channel,
         &NewMessage {
-            from: caller.identity(),
+            from,
             body,
             to: args.to,
             attachments,
@@ -852,11 +958,11 @@ fn message_body(words: &[String]) -> Result<String> {
 fn read(args: ReadArgs, me: &IdentityArgs) -> Result<()> {
     let remote = Remote::from_env()?;
     let caller = caller(me)?;
-    let identity = caller.identity();
 
     // One request answers three questions: does the channel exist, is this
     // caller in it, and how far has it read.
     let participants = remote.list_participants(&args.channel)?;
+    let identity = acting_as(&args.channel, &caller, &participants)?;
     let me = participants
         .iter()
         .find(|participant| participant.identity == identity)
@@ -1046,12 +1152,12 @@ const LONGEST_BACKOFF: Duration = Duration::from_secs(2);
 fn wait(args: WaitArgs, me: &IdentityArgs) -> Result<ExitCode> {
     let remote = Remote::from_env()?;
     let caller = caller(me)?;
-    let identity = caller.identity();
 
     // The same one request `read` makes, for the same three answers: the
     // channel is there, this caller is in it, and here is the roster that
     // recipients are printed short against.
     let participants = remote.list_participants(&args.channel)?;
+    let identity = acting_as(&args.channel, &caller, &participants)?;
     if !participants
         .iter()
         .any(|participant| participant.identity == identity)
@@ -1142,7 +1248,8 @@ fn wait(args: WaitArgs, me: &IdentityArgs) -> Result<ExitCode> {
 fn leave(args: LeaveArgs, me: &IdentityArgs) -> Result<()> {
     let remote = Remote::from_env()?;
     let caller = caller(me)?;
-    let left = remote.leave(&args.channel, &caller.identity())?;
+    let identity = acting_as_fetched(&remote, &args.channel, &caller)?;
+    let left = remote.leave(&args.channel, &identity)?;
 
     if args.json {
         return say(&serde_json::to_string_pretty(&left)?);
@@ -1170,7 +1277,12 @@ fn leave(args: LeaveArgs, me: &IdentityArgs) -> Result<()> {
 fn close(args: CloseArgs, me: &IdentityArgs) -> Result<()> {
     let remote = Remote::from_env()?;
     let caller = caller(me)?;
-    let closed = remote.close_channel(&args.channel, &caller.identity())?;
+    // A session that has joined closes under the name it was granted. One
+    // that has not is not refused: the scope lets anybody close, and the name
+    // is only what the transcript records.
+    let identity =
+        acting_as_fetched(&remote, &args.channel, &caller).unwrap_or_else(|_| caller.identity());
+    let closed = remote.close_channel(&args.channel, &identity)?;
 
     if args.json {
         return say(&serde_json::to_string_pretty(&closed)?);

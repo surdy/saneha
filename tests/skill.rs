@@ -93,7 +93,11 @@ fn the_skill_says_what_a_harness_needs_to_find_and_follow_it() {
         "SANEHA_URL",
         "saneha leave",
         "saneha close",
-        "<repo>-<harness>@<host>",
+        "<repo>@<host>",
+        // Names say the job, and Claude Code is found by its session
+        // (ADR-0010); every other harness still passes the grant.
+        "--as <repo>-<role>",
+        "a bare `saneha read` is you",
     ] {
         assert!(skill.contains(said), "the skill has to say {said:?}");
     }
@@ -104,7 +108,7 @@ fn the_skill_says_what_a_harness_needs_to_find_and_follow_it() {
         // The CLI does not carry a granted name from one command to the next.
         "the CLI does not remember the grant",
         // Two hosts running the same repository derive the same short name.
-        "@saneha-claude@otherhost",
+        "@saneha-review@otherhost",
         // Shell state does not survive between harness tool calls.
         "does not reach the next",
         // An unrecognised harness needs telling on every verb, not just join.
