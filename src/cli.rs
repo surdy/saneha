@@ -1358,6 +1358,14 @@ fn numbers(version: &str) -> Option<(u64, u64, u64)> {
 /// is not the place to be pedantic about a string that was only ever meant for
 /// a person to read.
 ///
+/// What this cannot do is tell a machine that is behind by more than itself.
+/// It shipped in 0.4.0, so a binary older than that has no comparison to make
+/// and joins in silence however far behind it is — seen happening, with a
+/// 0.3.0 binary against the 0.4.0 server. Every machine needs one update
+/// nothing told it about, and reports for itself after that. It is the floor
+/// under this check rather than a fault in it, and `docs/deploy.md` says so
+/// where somebody would meet it.
+///
 /// [ADR-0008]: ../docs/adr/0008-a-version-is-what-is-deployed.md
 fn older_than_server(mine: &str, theirs: Option<&str>) -> Option<String> {
     let theirs = theirs?;
