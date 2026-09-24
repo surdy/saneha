@@ -15,17 +15,17 @@ After=network-online.target
 # SIGTERM fix (issue #15). An older tag ignores SIGTERM as PID 1: rolling back
 # past that fix means restoring StopSignal=SIGINT in the same commit, or every
 # stop stalls for TimeoutStopSec and ends in SIGKILL.
-Image=ghcr.io/surdy/saneha:sha-b176d69
+Image=ghcr.io/surdy/saneha:sha-b5f66a6
 ContainerName=saneha
 
 # The database. saneha creates saneha.db here on first start.
 Volume=saneha-data.volume:/data:z,U
 
 # Close a channel once nobody has been present in it for this many days,
-# checked at start and then hourly (ADR-0011). Off while this line is a
-# comment; uncomment it, or change the number, and restart. /health reports
+# checked at start and then hourly (ADR-0011). Comment the line out to turn
+# it off, or change the number, and restart. /health reports
 # close_quiet_after_days so the running server can be checked.
-#Environment=SANEHA_CLOSE_QUIET_AFTER=7
+Environment=SANEHA_CLOSE_QUIET_AFTER=7
 
 # Loopback only. There is no authentication (ADR-0003), so nothing reaches the
 # server except through Caddy, which is host-networked and so finds it on

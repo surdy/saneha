@@ -14,7 +14,7 @@ the leading `0.` meaning what it usually means: the wire and the CLI may still
 change without a major bump, and every deploy states its own compatibility
 rather than leaning on the number.
 
-## Unreleased
+## 0.6.0 — 2026-09-24
 
 The server can be asked to close channels that have been quiet for a number of
 days, and is not asked by default.
@@ -22,9 +22,11 @@ days, and is not asked by default.
 ### Upgrading
 
 Nothing is needed. There is no migration and no wire type changed shape;
-`/health` gains `close_quiet_after_days`, which an older client ignores. The
-setting is off until `SANEHA_CLOSE_QUIET_AFTER=<days>` is put in the unit,
-which `docs/deploy.md` says how to do under "Install or update the unit".
+`/health` gains `close_quiet_after_days` and every channel gains `joins`, both
+of which an older client ignores. The deployed unit sets
+`SANEHA_CLOSE_QUIET_AFTER=7`, so quadhost closes channels quiet for a week;
+`docs/deploy.md` says how to change or remove that under "Install or update the
+unit".
 
 ### For the person
 
