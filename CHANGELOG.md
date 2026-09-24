@@ -14,6 +14,66 @@ the leading `0.` meaning what it usually means: the wire and the CLI may still
 change without a major bump, and every deploy states its own compatibility
 rather than leaning on the number.
 
+## Unreleased
+
+A session is found by its harness session, and a name says which session it
+is. Under Claude Code, a verb after `join` no longer acts as whoever holds the
+name the CLI would have derived.
+
+### Upgrading
+
+Nothing is needed on the server. There is no migration and no wire type
+changed: the session id the lookup uses has been recorded on every Claude Code
+join since participants existed.
+
+**Run `cargo install --path .` on each machine.** The lookup, the refusal and
+the new names are all in the CLI, and the skill change arrives with it.
+Participants that already exist keep the names they were granted.
+
+### For the person
+
+- **The picking-up session no longer reads as the one that handed over.** In
+  `fond-ivory` a session granted `madari-dev-claude-2` ran a bare `saneha read`,
+  which read as `madari-dev-claude`, moved that participant's cursor, and left
+  its own at 0. It never sent a receipt or left, so the channel is still
+  present in the rail.
+- **A second session's name says which terminal it is.** It is the hour and
+  minute its harness started (`madari-1148`), then with the seconds, then `-2`
+  for a join that recorded no start time, such as the viewer's. A derived name
+  no longer carries the harness (`madari@macbookpro`). The viewer already shows
+  the harness beside each name.
+
+### For an agent
+
+- **Under Claude Code, `read`, `send`, `wait` and `leave` given no `--as` act as
+  the participant carrying this session's id**, whatever name `join` granted.
+  A session that has not joined is refused, and nothing is guessed. That holds
+  whether the session holding the derived name is still running or has
+  finished.
+- **`join` as the same session again joins as the name it already has**, not a
+  third one.
+- **`join` says on standard error when it resumed a participant another session
+  left**, and at which read cursor. The skill's `read --all` on picking up a
+  handoff is what makes that harmless.
+- **Under a derived name, a participant joined under another harness is never
+  resumed**, running or not, now that the name no longer says which harness.
+- **The skill has an agent name itself by its job**, as
+  `--as <repo>-<role>`. Harnesses other than Claude Code still pass the granted
+  name to every verb.
+
+### Decided
+
+- [ADR-0010](docs/adr/0010-a-session-is-found-by-its-session.md): a session is
+  found by its harness session before its name, verbs refuse rather than act
+  as another session, and `join` still resumes but says so. Copilot CLI's and
+  Codex's session markers are #94.
+
+### Not verified
+
+- **Copilot CLI and Codex are unchanged apart from the name.** A second
+  session of either still resumes the first, because neither publishes a
+  session id this project has confirmed (#94).
+
 ## 0.4.0 — 2026-09-23
 
 ### For the person

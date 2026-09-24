@@ -100,6 +100,13 @@ impl Drop for Session {
     }
 }
 
+/// The clock a second session under one name is told apart by: the hour and
+/// minute this process started, and the same with the seconds.
+fn clock_of(pid: u32) -> (String, String) {
+    let started = saneha::identity::process_start(pid).expect("the process is running");
+    saneha::identity::start_clock(&started).expect("a start time has a clock in it")
+}
+
 /// A join made the way a harness makes one: through a shell that is gone as
 /// soon as the command returns, with the harness publishing its own pid.
 fn join_as_harness(
@@ -173,7 +180,7 @@ fn a_closed_channel_refuses_a_join() {
 }
 
 #[test]
-fn an_identity_is_the_directory_the_harness_and_the_host() {
+fn an_identity_is_the_directory_and_the_host() {
     let server = TestServer::start();
     server
         .remote()
@@ -190,7 +197,7 @@ fn an_identity_is_the_directory_the_harness_and_the_host() {
     );
     assert_eq!(
         joined["identity"],
-        serde_json::json!(format!("notes-method-claude@{}", host()))
+        serde_json::json!(format!("notes-method@{}", host()))
     );
     assert_eq!(joined["resumed"], serde_json::json!(false));
     assert_eq!(joined["suffixed"], serde_json::json!(false));
@@ -213,10 +220,16 @@ fn an_identity_is_the_directory_the_harness_and_the_host() {
     );
 
     // With no harness marker the identity still forms, and the CLI says what
-    // that costs: a name nothing tells apart from itself.
-    let output = server.run_in(&directory, &["join", "brisk-otter"], &[]);
+    // that costs: a name nothing tells apart from itself. In a channel of its
+    // own, since under a derived name a participant of another harness is
+    // somebody else, and that is a test of its own below.
+    server
+        .remote()
+        .create_channel(Some("quiet-fern"), None)
+        .expect("create");
+    let output = server.run_in(&directory, &["join", "quiet-fern"], &[]);
     let identity = stdout_of("saneha join", &output);
-    assert_eq!(identity, format!("notes-method-unknown@{}", host()));
+    assert_eq!(identity, format!("notes-method@{}", host()));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
     assert!(stderr.contains("no harness was recognised"), "{stderr}");
@@ -267,7 +280,7 @@ fn a_name_that_was_given_gets_no_hint_about_naming() {
     let output = server.run_in(&directory, &["join", "brisk-otter"], &[("CLAUDECODE", "1")]);
     assert_eq!(
         stdout_of("saneha join under a harness", &output),
-        format!("notes-method-claude@{}", host())
+        format!("notes-method@{}", host())
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
@@ -300,7 +313,7 @@ fn an_identity_inside_a_repository_uses_the_repository_name() {
     let output = server.run_in(&nested, &["join", "brisk-otter"], &[("CLAUDECODE", "1")]);
     assert_eq!(
         stdout_of("saneha join", &output),
-        format!("my-repo-claude@{}", host())
+        format!("my-repo@{}", host())
     );
 }
 
@@ -356,7 +369,7 @@ fn every_worktree_of_a_repository_derives_the_repository_name() {
     let output = server.run_in(&checkout, &["join", "brisk-otter"], &[("CLAUDECODE", "1")]);
     assert_eq!(
         stdout_of("saneha join from a second checkout", &output),
-        format!("my-repo-claude@{}", host())
+        format!("my-repo@{}", host())
     );
 }
 
@@ -424,7 +437,7 @@ fn the_harness_can_be_overridden() {
     );
     assert_eq!(
         joined["identity"],
-        serde_json::json!(format!("notes-method-codex@{}", host()))
+        serde_json::json!(format!("notes-method@{}", host()))
     );
     assert_eq!(joined["participant"]["harness"], serde_json::json!("codex"));
     // A harness this build does not know publishes no session id, so none is
@@ -567,7 +580,9 @@ fn a_live_session_on_this_host_gets_a_suffixed_identity() {
         "{first:?}"
     );
 
-    // Another session, while the first is still running: a name of its own.
+    // Another session, while the first is still running: a name of its own,
+    // told apart by the hour and minute its harness started (ADR-0010).
+    let (minute, _) = clock_of(two.pid());
     let second = join_as_harness(
         &server,
         &directory,
@@ -577,19 +592,26 @@ fn a_live_session_on_this_host_gets_a_suffixed_identity() {
     );
     assert_eq!(
         second["identity"],
-        serde_json::json!(format!("reviewer-2@{}", host()))
+        serde_json::json!(format!("reviewer-{minute}@{}", host()))
     );
     assert_eq!(second["suffixed"], serde_json::json!(true));
     assert_eq!(second["resumed"], serde_json::json!(false));
     assert_eq!(
         second["participant"]["name"],
-        serde_json::json!("reviewer-2")
+        serde_json::json!(format!("reviewer-{minute}"))
     );
     assert_eq!(second["participant"]["pid"], serde_json::json!(two.pid()));
 
-    // A third walks past the name already taken. The suffix is explained on
-    // standard error, so the identity is still the only thing on standard
-    // output.
+    // A third walks past the name already taken. Started in the same minute,
+    // as it was, the seconds tell it apart; in some other minute, the minute
+    // does. The suffix is explained on standard error, so the identity is
+    // still the only thing on standard output.
+    let (third_minute, third_second) = clock_of(three.pid());
+    let third_name = if third_minute == minute {
+        format!("reviewer-{third_second}")
+    } else {
+        format!("reviewer-{third_minute}")
+    };
     let third = server
         .shell("\"$SANEHA\" join brisk-otter --as reviewer")
         .current_dir(&directory)
@@ -600,7 +622,7 @@ fn a_live_session_on_this_host_gets_a_suffixed_identity() {
         .expect("run the saneha binary through a shell");
     assert_eq!(
         stdout_of("saneha join", &third),
-        format!("reviewer-3@{}", host())
+        format!("{third_name}@{}", host())
     );
     let stderr = String::from_utf8_lossy(&third.stderr);
     assert!(
@@ -608,7 +630,7 @@ fn a_live_session_on_this_host_gets_a_suffixed_identity() {
         "{stderr}"
     );
     assert!(
-        stderr.contains(&format!("reviewer-3@{}", host())),
+        stderr.contains(&format!("{third_name}@{}", host())),
         "{stderr}"
     );
 

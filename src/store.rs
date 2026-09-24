@@ -2188,19 +2188,35 @@ fn resume_participant(conn: &Connection, id: i64, request: &JoinRequest) -> Resu
     Ok(())
 }
 
-/// The first free `name-2`, `name-3`, ... on this host. The base is cut short
-/// enough that the suffix always fits inside the name cap.
+/// A name of its own for a second live session under one name: the hour and
+/// minute its harness started (`name-1148`), then with the seconds
+/// (`name-114853`), then the first free `name-2`, `name-3`, ... on this host
+/// (ADR-0010). The clock is tried first because it tells the person which
+/// terminal this is, where an ordinal only says who joined first; the ordinal
+/// is left for a join that recorded no start time, such as the viewer's, and
+/// for two sessions started in the same second. The base is cut short enough
+/// that the longest suffix always fits inside the name cap.
 fn insert_suffixed(
     conn: &Connection,
     channel_id: i64,
     channel: &str,
     request: &JoinRequest,
 ) -> Result<(i64, String), StoreError> {
-    let room = PARTICIPANT_NAME.max - (MAX_SUFFIX.to_string().len() + 1);
+    // Six digits of clock and a hyphen is the longest suffix there is.
+    let room = PARTICIPANT_NAME.max - 7;
     let base: String = request.name.chars().take(room).collect();
     let base = base.trim_end_matches('-');
 
-    for suffix in 2..=MAX_SUFFIX {
+    let clock = request
+        .pid_started_at
+        .as_deref()
+        .and_then(crate::identity::start_clock);
+    let by_clock = clock
+        .into_iter()
+        .flat_map(|(minute, second)| [minute, second]);
+    let by_order = (2..=MAX_SUFFIX).map(|suffix| suffix.to_string());
+
+    for suffix in by_clock.chain(by_order) {
         let name = format!("{base}-{suffix}");
         let identity = identity_of(&name, &request.host);
         if participant_id(conn, channel_id, &identity)?.is_none() {
