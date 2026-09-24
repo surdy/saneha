@@ -78,6 +78,20 @@ pub struct Channel {
     /// clients that do not look at this.
     #[serde(default)]
     pub present: i64,
+    /// How many joins the transcript holds: every join, including a resume,
+    /// writes one. It is the other half of quiet ([ADR-0012]): nobody present
+    /// says everyone has left, and a second join says somebody arrived after
+    /// the first, so the channel is a conversation that has run rather than a
+    /// handoff nobody has come for. A channel with one join and nobody present
+    /// is waiting, and the viewer keeps it in view.
+    ///
+    /// Defaulted for the same reason `present` is; a 0 from a server that
+    /// predates it reads as "not quiet", which keeps a channel in view rather
+    /// than hiding one.
+    ///
+    /// [ADR-0012]: ../docs/adr/0012-quiet-needs-a-second-arrival.md
+    #[serde(default)]
+    pub joins: i64,
     /// The read cursor of the identity `GET /channels?as=<identity>` asked
     /// about, in this channel: a read of what ADR-0004 already stores, which
     /// moves nothing.

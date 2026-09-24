@@ -118,8 +118,9 @@ on, and stop — `leave` says you are not coming back to answer.
 Picking up, `--all` rather than your unread, because you may have resumed the
 very session that handed over and its cursor can sit past the doc. Say the one
 line that you have it, so the transcript and the person both hold the receipt,
-then leave and get on with the work: nobody is here to answer you, and a
-channel every participant has left folds itself off the person's list.
+then leave and get on with the work: nobody is here to answer you, and once
+you have joined and left too the channel folds itself off the person's list —
+until then it stays in view as a handoff waiting to be taken.
 Leaving is not closing, and a join resumes you. Close it only if the person
 says so: a closed channel takes no more joins, so closing is what stops
 anybody carrying this on.

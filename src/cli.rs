@@ -2049,6 +2049,7 @@ mod tests {
             closed_at: None,
             newest_id: 0,
             present: 0,
+            joins: 0,
             read_cursor: None,
         }
     }

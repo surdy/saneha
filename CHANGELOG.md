@@ -39,6 +39,15 @@ which `docs/deploy.md` says how to do under "Install or update the unit".
   is the reasoning, and what turning it on accepts.
 - **`/health` says whether this server does that**, as `close_quiet_after_days`:
   the number, or `null`.
+- **A handoff nobody has taken stays in view.** The rail folded it as quiet
+  the moment the handing-over session left, since it had a transcript and
+  nobody present — `steady-osprey` sat hidden for a week. Quiet now also needs
+  a second join: someone arrived after the first participant. A taken handoff
+  still folds, since the taker's join is the second; an untaken one stays
+  under Open, and the sweep above leaves it alone. Every channel the server
+  describes now carries `joins`, beside `present`; `--json` shows it and the
+  table does not.
+  [ADR-0012](docs/adr/0012-quiet-needs-a-second-arrival.md).
 
 ## 0.5.0 — 2026-09-24
 

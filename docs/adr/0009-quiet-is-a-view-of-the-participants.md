@@ -16,6 +16,8 @@ The signal was already half there. `leave` marks a participant away, and *away* 
 
 One guard earns its place. A channel minted a moment ago and joined by nobody also has nobody present, and folding it would hide a channel from the person who has just made it and is looking for it — the worst thing this could do, and a case a fixture with no unjoined channel in it would never reach. So the transcript has to have started: `newest_id > 0`. A channel with nothing in it is new, not quiet.
 
+There was a second such case this guard did not reach: a handoff posted and not yet taken has a transcript and nobody present, and folding it hid the channel from the person carrying its name. [ADR-0012](0012-quiet-needs-a-second-arrival.md) amends the definition by one clause — quiet needs at least two joins — which covers both cases and leaves the rest of this ADR standing.
+
 ## Consequences
 
 - **Nothing is added to the schema, and no verb or message kind is added to the wire.** The change is `web/index.html`, one field on `Channel` in `src/api.rs` filled by the subquery in `src/store.rs`, and a line of the handoff recipe in the skill with the paragraph under it. `present` defaults on deserialisation as `newest_id` does, so a client meeting a server that predates the field reads 0; the page and the server that serves it are always the same build, so nothing that matters reads that 0 as "nobody present".

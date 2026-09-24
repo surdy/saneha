@@ -580,6 +580,7 @@ impl Store {
                 // Minted, and joined by nobody: `new` joins no one, so a
                 // channel is born with nobody present and no transcript.
                 present: 0,
+                joins: 0,
                 read_cursor: None,
             }),
             Err(err) if is_unique_violation(&err) => {
@@ -622,7 +623,8 @@ impl Store {
                FROM channels ORDER BY created_at, id"
         ))?;
         let rows = statement.query_map([identity], |row| {
-            Ok((read_row(row)?, row.get::<_, Option<i64>>(7)?))
+            // The cursor sits after every column `CHANNEL_COLUMNS` selects.
+            Ok((read_row(row)?, row.get::<_, Option<i64>>(8)?))
         })?;
         rows.collect::<Result<Vec<_>, _>>()?
             .into_iter()
@@ -907,8 +909,11 @@ impl Store {
     /// Closes every open channel that has been quiet for `days` or more, and
     /// answers with the names it closed, in name order.
     ///
-    /// Quiet is [ADR-0009]'s word and is read the way the viewer reads it: the
-    /// transcript has started and nobody is present. How long that has been so
+    /// Quiet is [ADR-0009]'s word and is read the way the viewer reads it:
+    /// nobody is present, and at least two joins have happened, so somebody
+    /// arrived after the first participant and this is a conversation that has
+    /// run rather than a handoff nobody has taken ([ADR-0012]). How long it
+    /// has been so
     /// is measured from the newest message, because the last thing to happen
     /// before a channel goes quiet is a leave, and a leave is a message — so
     /// the newest message is never older than the moment the last participant
@@ -926,6 +931,7 @@ impl Store {
     ///
     /// [ADR-0009]: ../docs/adr/0009-quiet-is-a-view-of-the-participants.md
     /// [ADR-0011]: ../docs/adr/0011-the-server-may-be-asked-to-close-quiet-channels.md
+    /// [ADR-0012]: ../docs/adr/0012-quiet-needs-a-second-arrival.md
     pub fn close_quiet_channels(&self, days: u32) -> Result<Vec<String>, StoreError> {
         let quiet_since = format!("-{days} days");
         let unit = if days == 1 { "day" } else { "days" };
@@ -936,7 +942,9 @@ impl Store {
         let mut statement = tx.prepare(
             "SELECT channels.id, channels.name FROM channels
                   WHERE channels.state = 'open'
-                    AND channels.last_message_id > 0
+                    AND (SELECT COUNT(*) FROM messages
+                          WHERE messages.channel_id = channels.id
+                            AND messages.kind = 'join') >= 2
                     AND NOT EXISTS (SELECT 1 FROM participants
                                      WHERE participants.channel_id = channels.id
                                        AND participants.away = 0)
@@ -2509,14 +2517,22 @@ fn echo(value: &str) -> String {
 /// the channel's newest message id read straight off the row rather than
 /// counted out of the transcript.
 ///
-/// The last of them is not a column but a count of the participants that have
-/// not left, which every reader of a channel gets because it is a fact about
-/// the channel and not a question the listing alone asks. Every statement here
-/// selects from `channels`, so the correlated subquery is written once and is
-/// right in all of them — a channel by name, by id, and the whole list.
+/// The last two are not columns but counts, which every reader of a channel
+/// gets because they are facts about the channel and not questions the
+/// listing alone asks: the participants that have not left, and the joins the
+/// transcript holds. The second is what tells a conversation that has run
+/// from a note one participant left for somebody who has not arrived
+/// ([ADR-0012]): a channel with one join and nobody present is waiting, not
+/// quiet. Every statement here selects from `channels`, so each correlated
+/// subquery is written once and is right in all of them — a channel by name,
+/// by id, and the whole list.
+///
+/// [ADR-0012]: ../docs/adr/0012-quiet-needs-a-second-arrival.md
 const CHANNEL_COLUMNS: &str = "name, purpose, state, created_at, closed_at, last_message_id, \
      (SELECT COUNT(*) FROM participants \
-       WHERE participants.channel_id = channels.id AND participants.away = 0)";
+       WHERE participants.channel_id = channels.id AND participants.away = 0), \
+     (SELECT COUNT(*) FROM messages \
+       WHERE messages.channel_id = channels.id AND messages.kind = 'join')";
 
 type ChannelRow = (
     String,
@@ -2524,6 +2540,7 @@ type ChannelRow = (
     String,
     String,
     Option<String>,
+    i64,
     i64,
     i64,
 );
@@ -2537,11 +2554,12 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelRow> {
         row.get(4)?,
         row.get(5)?,
         row.get(6)?,
+        row.get(7)?,
     ))
 }
 
 fn build_channel(row: ChannelRow) -> Result<Channel, StoreError> {
-    let (name, purpose, state, created_at, closed_at, newest_id, present) = row;
+    let (name, purpose, state, created_at, closed_at, newest_id, present, joins) = row;
     Ok(Channel {
         name,
         purpose,
@@ -2552,6 +2570,7 @@ fn build_channel(row: ChannelRow) -> Result<Channel, StoreError> {
         closed_at,
         newest_id,
         present,
+        joins,
         read_cursor: None,
     })
 }
@@ -3162,6 +3181,7 @@ mod tests {
             None,
             0,
             0,
+            0,
         );
         let err = build_channel(row).expect_err("unknown state");
         assert!(
@@ -3177,6 +3197,7 @@ mod tests {
             Some("2026-09-04T10:00:00Z".to_string()),
             7,
             0,
+            2,
         );
         assert_eq!(
             build_channel(known).expect("closed is understood").state,
