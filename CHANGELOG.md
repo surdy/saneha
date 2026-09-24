@@ -14,6 +14,32 @@ the leading `0.` meaning what it usually means: the wire and the CLI may still
 change without a major bump, and every deploy states its own compatibility
 rather than leaning on the number.
 
+## Unreleased
+
+The server can be asked to close channels that have been quiet for a number of
+days, and is not asked by default.
+
+### Upgrading
+
+Nothing is needed. There is no migration and no wire type changed shape;
+`/health` gains `close_quiet_after_days`, which an older client ignores. The
+setting is off until `SANEHA_CLOSE_QUIET_AFTER=<days>` is put in the unit,
+which `docs/deploy.md` says how to do under "Install or update the unit".
+
+### For the person
+
+- **`saneha serve --close-quiet-after <DAYS>`**, or `SANEHA_CLOSE_QUIET_AFTER`.
+  With it, a channel that has had a transcript and nobody present for that
+  many days is closed by the server, at start and then hourly, with the same
+  close a `saneha close` writes: `saneha closed the channel, quiet for 7
+  days`. Quiet rather than idle, so a channel somebody is parked in on
+  `saneha wait` is never closed under them. Zero is refused. Without the
+  flag nothing changes: quiet stays a view, and nothing closes on its own.
+  [ADR-0011](docs/adr/0011-the-server-may-be-asked-to-close-quiet-channels.md)
+  is the reasoning, and what turning it on accepts.
+- **`/health` says whether this server does that**, as `close_quiet_after_days`:
+  the number, or `null`.
+
 ## 0.5.0 — 2026-09-24
 
 A session is found by its harness session, and a name says which session it

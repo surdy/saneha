@@ -23,7 +23,7 @@ The state of a channel that accepts no more messages but can still be read.
 _Avoid_: archived, ended, finished
 
 **Quiet**:
-An open channel with a transcript and nobody present: every participant has left. It is read off the participants rather than stored, so it is not a state and nothing is decided to enter or leave it — one join is enough. A taken handoff becomes quiet on its own; a channel someone is waiting in never is; a channel minted a moment ago and joined by nobody is not quiet but new.
+An open channel with a transcript and nobody present: every participant has left. It is read off the participants rather than stored, so it is not a state and nothing is decided to enter or leave it — one join is enough. A taken handoff becomes quiet on its own; a channel someone is waiting in never is; a channel minted a moment ago and joined by nobody is not quiet but new. A server started with `--close-quiet-after <DAYS>` closes a channel once it has been quiet that long; one started without, which is the default, never does.
 _Avoid_: idle, dormant, stale, inactive, archived, empty
 
 **Deleted**:

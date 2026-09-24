@@ -38,9 +38,23 @@ pub struct TestServer {
 
 impl TestServer {
     pub fn start() -> TestServer {
+        TestServer::start_with(saneha::server::Options::default(), |_| {})
+    }
+
+    /// A server started the way `saneha serve` would be with these options,
+    /// over a database `seed` has already written to.
+    ///
+    /// The seed runs before the server opens the file, which is the only
+    /// moment a test can put the database into a state the server then finds
+    /// at start — a channel that went quiet last week, say — because the
+    /// housekeeping that runs at start is the thing being tested. It is given
+    /// the path rather than a store so it can open both a `Store`, for the
+    /// verbs, and a bare connection, for the backdating no verb does.
+    pub fn start_with(options: saneha::server::Options, seed: impl FnOnce(&Path)) -> TestServer {
         let database = tempfile::tempdir().expect("temporary directory");
         let home = tempfile::tempdir().expect("temporary home");
         let path = database.path().join("saneha.db");
+        seed(&path);
         let store = Arc::new(Store::open(&path).expect("open the database"));
 
         let (send_address, receive_address) = mpsc::channel::<SocketAddr>();
@@ -56,7 +70,9 @@ impl TestServer {
                 send_address
                     .send(listener.local_addr().expect("local address"))
                     .expect("hand the address back");
-                saneha::server::run(listener, store).await.expect("serve");
+                saneha::server::run(listener, store, options)
+                    .await
+                    .expect("serve");
             });
         });
 

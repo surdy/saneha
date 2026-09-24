@@ -119,6 +119,21 @@ pub struct ServeArgs {
     /// ~/.local/share/saneha/saneha.db when XDG_DATA_HOME is unset]
     #[arg(long, value_name = "PATH", env = "SANEHA_DB")]
     pub db: Option<PathBuf>,
+
+    /// Close a channel once nobody has been present in it for this many days
+    ///
+    /// Off unless set. A quiet channel is one with a transcript that every
+    /// participant has left; the viewer folds those away, and this is the one
+    /// thing that changes their state. The check runs at start and then every
+    /// hour, and each close writes the same system message a `saneha close`
+    /// does, naming the server and the threshold.
+    #[arg(
+        long,
+        value_name = "DAYS",
+        env = "SANEHA_CLOSE_QUIET_AFTER",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub close_quiet_after: Option<u32>,
 }
 
 #[derive(Debug, Args)]
@@ -509,6 +524,11 @@ fn serve(args: ServeArgs) -> Result<()> {
 
         say(&format!("saneha is serving on http://{address}"))?;
         say(&format!("database: {}", database.display()))?;
+        if let Some(days) = args.close_quiet_after {
+            say(&format!(
+                "closing channels quiet for {days} day(s), checked hourly"
+            ))?;
+        }
         if address.ip().is_unspecified() {
             // http://0.0.0.0:7343 is not an address anything can connect to.
             say(&format!(
@@ -522,7 +542,14 @@ fn serve(args: ServeArgs) -> Result<()> {
             ))?;
         }
 
-        server::run(listener, store).await
+        server::run(
+            listener,
+            store,
+            server::Options {
+                close_quiet_after_days: args.close_quiet_after,
+            },
+        )
+        .await
     })
 }
 
