@@ -81,11 +81,29 @@ fn env_path(key: &str) -> Option<PathBuf> {
 /// `TimeoutStopSec=30`, so the process stops itself rather than being killed.
 const DRAIN_LIMIT: Duration = Duration::from_secs(20);
 
+/// What `saneha serve` was told beyond where to listen and what to open:
+/// the housekeeping it does on its own, none of it on by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Options {
+    /// Close a channel once it has been quiet — a transcript, and nobody
+    /// present — for this many days. `None`, the default, closes nothing:
+    /// quiet stays a view of the participants and no channel changes state
+    /// unless somebody closes it ([ADR-0009]). Set, it is [ADR-0011], and the
+    /// number is whoever runs the server saying how long a channel nobody is
+    /// in should stay joinable.
+    ///
+    /// [ADR-0009]: ../docs/adr/0009-quiet-is-a-view-of-the-participants.md
+    /// [ADR-0011]: ../docs/adr/0011-the-server-may-be-asked-to-close-quiet-channels.md
+    pub close_quiet_after_days: Option<u32>,
+}
+
 /// Everything a request handler is given: the database, the waiters to wake
-/// when a transcript changes, and the switch that ends every held wait.
+/// when a transcript changes, the options the server was started with, and
+/// the switch that ends every held wait.
 pub struct Serving {
     store: Arc<Store>,
     waiters: Waiters,
+    options: Options,
     /// Flipped once, when the server has been asked to stop. Held as the
     /// sender so it outlives every receiver and a waiter's `changed()` only
     /// ever resolves because the server really is stopping.
@@ -93,10 +111,11 @@ pub struct Serving {
 }
 
 impl Serving {
-    fn new(store: Arc<Store>) -> Serving {
+    fn new(store: Arc<Store>, options: Options) -> Serving {
         Serving {
             store,
             waiters: Waiters::default(),
+            options,
             stopping: watch::channel(false).0,
         }
     }
@@ -336,16 +355,19 @@ where
 /// long as an hour and a drain that waited for those would stall until the
 /// supervisor lost patience and sent SIGKILL. [`DRAIN_LIMIT`] is the backstop
 /// under all of it.
-pub async fn run(listener: TcpListener, store: Arc<Store>) -> anyhow::Result<()> {
+pub async fn run(listener: TcpListener, store: Arc<Store>, options: Options) -> anyhow::Result<()> {
+    let serving = Arc::new(Serving::new(store, options));
+    let stopping = serving.stopping();
+
     // Once at the start, and then on the hour. A stop the server took part in
     // finishes the uploads in flight, so what the start finds is what a kill
     // left: a file part-written and never recorded, which the sweep's walk of
-    // the directories is what catches.
-    sweep(&store);
-    let sweeper = tokio::spawn(sweep_hourly(Arc::clone(&store)));
-
-    let serving = Arc::new(Serving::new(store));
-    let stopping = serving.stopping();
+    // the directories is what catches. The quiet channels, when the server
+    // was asked to close them, are swept on the same clock: a channel that
+    // crossed the threshold while the server was down is closed as it comes
+    // up rather than an hour later.
+    sweep(&serving);
+    let sweeper = tokio::spawn(sweep_hourly(Arc::clone(&serving)));
 
     let stop = Arc::clone(&serving);
     let serve = axum::serve(listener, routes().with_state(serving))
@@ -372,30 +394,58 @@ pub async fn run(listener: TcpListener, store: Arc<Store>) -> anyhow::Result<()>
     Ok(())
 }
 
-/// How often the unbound attachments are swept up.
+/// How often the unbound attachments, and the quiet channels when asked, are
+/// swept up.
 const SWEEP_EVERY: Duration = Duration::from_secs(UNBOUND_ATTACHMENT_TTL as u64);
 
 /// The sweep, for as long as the server is serving.
-async fn sweep_hourly(store: Arc<Store>) {
+async fn sweep_hourly(serving: Arc<Serving>) {
     let mut every = tokio::time::interval(SWEEP_EVERY);
     // The first tick is immediate, and the start has just swept.
     every.tick().await;
     loop {
         every.tick().await;
-        sweep(&store);
+        sweep(&serving);
     }
 }
 
 /// Removes the uploads nobody bound to a message and the files no row names,
-/// once they are old enough that nobody is coming back for them. A sweep that
-/// fails is worth saying out loud and nothing more: the next one is an hour
-/// away, and a server that stopped serving over a file it could not delete
-/// would be worse than the file.
-fn sweep(store: &Store) {
-    match store.sweep_unbound_attachments(UNBOUND_ATTACHMENT_TTL) {
+/// once they are old enough that nobody is coming back for them; and, when
+/// the server was started with a threshold, closes the channels that have
+/// been quiet for longer than it. A sweep that fails is worth saying out loud
+/// and nothing more: the next one is an hour away, and a server that stopped
+/// serving over a file it could not delete would be worse than the file.
+fn sweep(serving: &Serving) {
+    match serving
+        .store
+        .sweep_unbound_attachments(UNBOUND_ATTACHMENT_TTL)
+    {
         Ok(swept) if swept.is_empty() => {}
         Ok(swept) => say(&format!("swept up {swept}")),
         Err(err) => say(&format!("could not sweep unbound attachments: {err}")),
+    }
+
+    let Some(days) = serving.options.close_quiet_after_days else {
+        return;
+    };
+    match serving.store.close_quiet_channels(days) {
+        Ok(closed) if closed.is_empty() => {}
+        Ok(closed) => {
+            // The same wake a `close` from a participant sends, after the
+            // commit and for the same reason. Nobody is present in a quiet
+            // channel, so no participant's wait is held on it; what may be is
+            // a viewer following the transcript, and it is told the channel
+            // closed the way it would be told anything else.
+            for channel in &closed {
+                serving.waiters.wake(channel);
+            }
+            say(&format!(
+                "closed {} channel(s) quiet for {days} day(s): {}",
+                closed.len(),
+                closed.join(", ")
+            ));
+        }
+        Err(err) => say(&format!("could not close the quiet channels: {err}")),
     }
 }
 
@@ -536,6 +586,10 @@ async fn health(State(serving): State<Arc<Serving>>) -> Json<serde_json::Value> 
         "status": "ok",
         "service": "saneha",
         "held_waits": serving.waiters.held(),
+        // Whether this server closes quiet channels on its own, and after how
+        // many days: null when it does not. Read here so a person can tell a
+        // close nobody made from a server that was asked to make it.
+        "close_quiet_after_days": serving.options.close_quiet_after_days,
         "version": env!("CARGO_PKG_VERSION"),
         // Which skill this build carries, so a client can tell that the
         // instructions its agents follow are not the ones this server was
@@ -1392,9 +1446,10 @@ mod tests {
     /// server is asked to stop it never resolves.
     #[tokio::test]
     async fn the_drain_limit_waits_for_the_shutdown_before_it_starts() {
-        let serving = Arc::new(Serving::new(Arc::new(
-            Store::open_in_memory().expect("a database"),
-        )));
+        let serving = Arc::new(Serving::new(
+            Arc::new(Store::open_in_memory().expect("a database")),
+            Options::default(),
+        ));
         let limit = drain_limit(serving.stopping());
         tokio::pin!(limit);
 

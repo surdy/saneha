@@ -904,6 +904,67 @@ impl Store {
         })
     }
 
+    /// Closes every open channel that has been quiet for `days` or more, and
+    /// answers with the names it closed, in name order.
+    ///
+    /// Quiet is [ADR-0009]'s word and is read the way the viewer reads it: the
+    /// transcript has started and nobody is present. How long that has been so
+    /// is measured from the newest message, because the last thing to happen
+    /// before a channel goes quiet is a leave, and a leave is a message — so
+    /// the newest message is never older than the moment the last participant
+    /// left. A participant parked on `wait` is present, so its channel is
+    /// never among these, and no held wait is ended here that its holder did
+    /// not leave first.
+    ///
+    /// The server runs this only when `saneha serve` was told to, with
+    /// `--close-quiet-after`, at start and then hourly ([ADR-0011]). Each
+    /// close is the write `close` makes, with the server named in the body
+    /// where an identity would be and the threshold beside it, so the one
+    /// line a close gets in a transcript says who ended it and why. Every
+    /// close in one call is one transaction: a sweep that fails halfway closes
+    /// nothing rather than some.
+    ///
+    /// [ADR-0009]: ../docs/adr/0009-quiet-is-a-view-of-the-participants.md
+    /// [ADR-0011]: ../docs/adr/0011-the-server-may-be-asked-to-close-quiet-channels.md
+    pub fn close_quiet_channels(&self, days: u32) -> Result<Vec<String>, StoreError> {
+        let quiet_since = format!("-{days} days");
+        let unit = if days == 1 { "day" } else { "days" };
+        let body = format!("saneha closed the channel, quiet for {days} {unit}");
+
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let mut statement = tx.prepare(
+            "SELECT channels.id, channels.name FROM channels
+                  WHERE channels.state = 'open'
+                    AND channels.last_message_id > 0
+                    AND NOT EXISTS (SELECT 1 FROM participants
+                                     WHERE participants.channel_id = channels.id
+                                       AND participants.away = 0)
+                    AND (SELECT created_at FROM messages
+                          WHERE messages.channel_id = channels.id
+                            AND messages.id = channels.last_message_id)
+                        <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)
+                  ORDER BY channels.name",
+        )?;
+        let quiet = statement
+            .query_map([&quiet_since], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        for (channel_id, _) in &quiet {
+            tx.execute(
+                &format!("UPDATE channels SET state = 'closed', closed_at = {NOW} WHERE id = ?1"),
+                [channel_id],
+            )?;
+            write_system_message(&tx, *channel_id, "close", None, &body, None)?;
+        }
+        tx.commit()?;
+
+        Ok(quiet.into_iter().map(|(_, name)| name).collect())
+    }
+
     /// Sets, changes or clears the purpose of an open channel.
     ///
     /// The purpose is the one line a channel is listed with, and until now it

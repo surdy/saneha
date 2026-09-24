@@ -245,6 +245,11 @@ pub struct Health {
     pub version: Option<String>,
     #[serde(default)]
     pub skill: Option<String>,
+    /// After how many quiet days this server closes a channel on its own, and
+    /// `None` when it was not asked to (ADR-0011). Defaulted, so a server that
+    /// predates the field reads as one that does not.
+    #[serde(default)]
+    pub close_quiet_after_days: Option<u32>,
 }
 
 /// The body of `GET /channels/{name}/participants`.

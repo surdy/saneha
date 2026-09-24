@@ -143,6 +143,16 @@ Enforcing.
 restart without it runs the old definition. The volume outlives the unit, so
 restarting and re-tagging never touch the database.
 
+The server's own settings go in the same file, as `Environment=` lines under
+`[Container]`, and take effect on the same restart. There is one worth knowing
+about: `SANEHA_CLOSE_QUIET_AFTER=<days>` asks the server to close any channel
+that has been quiet — a transcript, and nobody present — for that many days,
+at start and then hourly ([ADR-0011](adr/0011-the-server-may-be-asked-to-close-quiet-channels.md)).
+It is off unless the line is there, and the unit in the repo carries it
+commented out, so turning it on is a one-line edit to `deploy/saneha.container`
+that goes through this same step. `/health` answers `close_quiet_after_days`
+with the number or `null`, which is how to check the running server has it.
+
 ```sh
 ssh core@192.168.16.169 'systemctl status saneha.service --no-pager'
 ssh core@192.168.16.169 'journalctl -u saneha.service -n 30 --no-pager'
