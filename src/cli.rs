@@ -1478,6 +1478,10 @@ fn numbers(version: &str) -> Option<(u64, u64, u64)> {
 /// under this check rather than a fault in it, and `docs/deploy.md` says so
 /// where somebody would meet it.
 ///
+/// It names the release rather than a `cargo install`: since 0.4.0 a release
+/// carries the executable, so updating needs no toolchain, and the lines that
+/// fetch and check it live in one place, `docs/deploy.md`, rather than here too.
+///
 /// [ADR-0008]: ../docs/adr/0008-a-version-is-what-is-deployed.md
 fn older_than_server(mine: &str, theirs: Option<&str>) -> Option<String> {
     let theirs = theirs?;
@@ -1485,8 +1489,9 @@ fn older_than_server(mine: &str, theirs: Option<&str>) -> Option<String> {
         return None;
     }
     Some(format!(
-        "the server is running saneha {theirs} and this binary is {mine}; update it: \
-         cargo install --git https://github.com/surdy/saneha --tag v{theirs}"
+        "the server is running saneha {theirs} and this binary is {mine}; update it from \
+         the release, https://github.com/surdy/saneha/releases/tag/v{theirs} — \
+         docs/deploy.md, \"Installing the binary on a laptop\", has the lines"
     ))
 }
 
@@ -1902,8 +1907,12 @@ mod tests {
         let said = older_than_server("0.2.0", Some("0.3.0")).expect("a newer server is said");
         assert!(said.contains("0.3.0") && said.contains("0.2.0"), "{said}");
         assert!(
-            said.contains("--tag v0.3.0"),
-            "and names the command that fixes it, pinned to the release: {said}"
+            said.contains("releases/tag/v0.3.0"),
+            "and names the release that fixes it: {said}"
+        );
+        assert!(
+            !said.contains("cargo"),
+            "which needs no toolchain since 0.4.0: {said}"
         );
 
         // The ordinary state between a merge and the deploy that ships it.
