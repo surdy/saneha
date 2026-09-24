@@ -14,7 +14,7 @@ the leading `0.` meaning what it usually means: the wire and the CLI may still
 change without a major bump, and every deploy states its own compatibility
 rather than leaning on the number.
 
-## Unreleased
+## 0.4.0 — 2026-09-23
 
 ### For the person
 
@@ -27,6 +27,10 @@ rather than leaning on the number.
   staleness check moves on a skill digest or a stale pointer, and since 0.2.0
   took the version out of the pointer, neither moves on an ordinary release —
   so a machine could sit several releases behind in silence.
+- **0.3.0 was deployed reporting `0.2.0`**, and now reports what it is. A
+  deploy pins an image built before its own pull request existed, so the bump
+  it carried shipped as the version before it. The runbook says where the bump
+  goes instead, and the release refuses a tag its `Cargo.toml` disagrees with.
 - Pushing a `v*` tag now publishes the release itself, notes and all. The notes
   come out of this file, and the tag is refused if there is no section for it
   or if `Cargo.toml` disagrees with it.
