@@ -5,10 +5,31 @@ the number in `/health` answers "what is this server" and the notes under it
 say what changed since the one before. [ADR-0008](docs/adr/0008-a-version-is-what-is-deployed.md)
 says why it is done that way.
 
+Work lands under **Unreleased** and is renamed to its version in the pull
+request that deploys it. The tag will not publish without a section named for
+it, so a release cannot go out with nothing said about it.
+
 Dates are the day the release was tagged. Numbers are semantic versioning, with
 the leading `0.` meaning what it usually means: the wire and the CLI may still
 change without a major bump, and every deploy states its own compatibility
 rather than leaning on the number.
+
+## Unreleased
+
+### For the person
+
+- **A release carries a built executable for each macOS architecture**, with
+  checksums, so installing saneha needs no Rust toolchain and no clone.
+  `docs/deploy.md` has the three lines. Building it from source stays
+  available and needs no clone either, since the repository is public.
+- **`saneha join` says when the server is running a release this binary is
+  not**, and names the command that installs it. Nothing said so before: the
+  staleness check moves on a skill digest or a stale pointer, and since 0.2.0
+  took the version out of the pointer, neither moves on an ordinary release —
+  so a machine could sit several releases behind in silence.
+- Pushing a `v*` tag now publishes the release itself, notes and all. The notes
+  come out of this file, and the tag is refused if there is no section for it
+  or if `Cargo.toml` disagrees with it.
 
 ## 0.3.0 — 2026-09-11
 
