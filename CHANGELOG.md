@@ -14,7 +14,7 @@ the leading `0.` meaning what it usually means: the wire and the CLI may still
 change without a major bump, and every deploy states its own compatibility
 rather than leaning on the number.
 
-## Unreleased
+## 0.5.0 — 2026-09-24
 
 A session is found by its harness session, and a name says which session it
 is. Under Claude Code, a verb after `join` no longer acts as whoever holds the
