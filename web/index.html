@@ -1172,19 +1172,22 @@ dialog p { font-size: 12px; color: var(--muted); margin: 8px 0 0 }
     return kept(key, "") === "open";
   }
 
-  /// Quiet: an open channel nobody is in. Every participant has left, and the
-  /// transcript has started, so this is a conversation that has run rather
-  /// than one that has not begun — a channel minted a moment ago and joined by
-  /// nobody stays under Open, where the person who just made it is looking.
+  /// Quiet: an open channel nobody is in, that somebody arrived at after the
+  /// first participant. Every participant has left, and the transcript holds
+  /// at least two joins, so this is a conversation that has run rather than a
+  /// note left for someone who has not come — a handoff posted and not yet
+  /// taken has one join and nobody present, and stays under Open where the
+  /// person waiting on it is looking (ADR-0012). So does a channel minted a
+  /// moment ago and joined by nobody, which has no joins at all.
   ///
-  /// It is read off the participants and nothing else. A handoff that has been
-  /// taken becomes quiet on its own, because both sides leave; a channel in
-  /// the wake loop never is, because a participant parked on `saneha wait` has
-  /// not left. Nothing is decided, closed or undone, and one join is enough to
-  /// bring a row back — which is the whole reason this is a fold and not a
-  /// state.
+  /// It is read off the transcript and the participants and nothing else. A
+  /// handoff that has been taken becomes quiet on its own, because the taker
+  /// is the second join and both sides leave; a channel in the wake loop
+  /// never is, because a participant parked on `saneha wait` has not left.
+  /// Nothing is decided, closed or undone, and one join is enough to bring a
+  /// row back — which is the whole reason this is a fold and not a state.
   function quiet(channel) {
-    return channel.state === "open" && channel.newest_id > 0 && !channel.present;
+    return channel.state === "open" && channel.joins >= 2 && !channel.present;
   }
 
   /// Where a channel sits in the rail: present first, then quiet, then closed.

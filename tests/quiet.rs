@@ -66,13 +66,24 @@ fn send(remote: &Remote, channel: &str, from: &str, body: &str) {
         .expect("send");
 }
 
-/// A handoff-shaped transcript: one participant joins, says something and
-/// leaves, so the channel is quiet the moment this returns.
-fn quiet_channel(remote: &Remote, name: &str) {
+/// A handoff posted and not yet taken: one participant joins, writes it and
+/// leaves. One join and nobody present, which is waiting rather than quiet
+/// (ADR-0012).
+fn untaken_handoff(remote: &Remote, name: &str) {
     channel(remote, name);
     let who = join(remote, name, "alice");
     send(remote, name, &who, "handoff: where things stand");
     remote.leave(name, &who).expect("leave");
+}
+
+/// A taken handoff: the one above, then a second participant joins, says it
+/// has the work and leaves too. Two joins and nobody present, so the channel
+/// is quiet the moment this returns.
+fn quiet_channel(remote: &Remote, name: &str) {
+    untaken_handoff(remote, name);
+    let taker = join(remote, name, "bob");
+    send(remote, name, &taker, "taken");
+    remote.leave(name, &taker).expect("leave");
 }
 
 /// Makes every message in `name` look `days` old. The sweep measures from the
@@ -142,6 +153,11 @@ fn the_sweep_closes_what_has_been_quiet_long_enough_and_leaves_the_rest() {
     // quiet, however long ago it was minted.
     channel(&remote, "new-otter");
     backdate(&database, "new-otter", AFTER + 1);
+    // Old, with a transcript and nobody present — but one join. A handoff
+    // nobody has come for is waiting, not quiet, and the rail keeps it in
+    // view; the sweep reads quiet the same way and leaves it (ADR-0012).
+    untaken_handoff(&remote, "lone-otter");
+    backdate(&database, "lone-otter", AFTER + 1);
     // Already closed: nothing to do, and nothing written twice.
     quiet_channel(&remote, "done-otter");
     remote
@@ -159,7 +175,18 @@ fn the_sweep_closes_what_has_been_quiet_long_enough_and_leaves_the_rest() {
     assert_eq!(state(&remote, "young-otter"), ChannelState::Open);
     assert_eq!(state(&remote, "held-otter"), ChannelState::Open);
     assert_eq!(state(&remote, "new-otter"), ChannelState::Open);
+    assert_eq!(state(&remote, "lone-otter"), ChannelState::Open);
     assert_eq!(state(&remote, "done-otter"), ChannelState::Closed);
+
+    // The counts the rail reads quiet from are on every channel the server
+    // describes, and say what the transcript says.
+    let lone = remote
+        .channel_detail("lone-otter")
+        .expect("look up")
+        .channel;
+    assert_eq!((lone.joins, lone.present), (1, 0));
+    let old = remote.channel_detail("old-otter").expect("look up").channel;
+    assert_eq!((old.joins, old.present), (2, 0));
 
     // The close is the one a `saneha close` writes, saying who and why.
     let said = closes(&remote, "old-otter");
@@ -210,11 +237,13 @@ fn seed(path: &Path) {
     let store = Store::open(path).expect("open the database to seed it");
     for name in ["old-otter", "young-otter"] {
         store.create_channel(Some(name), None).expect("create");
-        let joined = store.join(name, &request("alice")).expect("join");
-        store
-            .send(name, &joined.identity, "handoff", &[], &[], None)
-            .expect("send");
-        store.leave(name, &joined.identity).expect("leave");
+        for (who, said) in [("alice", "handoff"), ("bob", "taken")] {
+            let joined = store.join(name, &request(who)).expect("join");
+            store
+                .send(name, &joined.identity, said, &[], &[], None)
+                .expect("send");
+            store.leave(name, &joined.identity).expect("leave");
+        }
     }
     drop(store);
     let database = rusqlite::Connection::open(path).expect("open the database directly");

@@ -31,17 +31,21 @@ const script = page.slice(open + "<script>".length, page.indexOf("</script>", op
 /// from: `newest_id` less `read_cursor`, as `GET /channels?as=` carries them.
 //
 // `present` is the count of participants that have not left, which is what a
-// quiet channel has none of: `still-heron` is a handoff that has been taken
-// and left by both sides, and `madari-relay` is minted and joined by nobody,
-// which is the case the fold must not swallow.
+// quiet channel has none of, and `joins` is how many joins the transcript
+// holds, of which a quiet channel has at least two: `still-heron` is a handoff
+// that has been taken and left by both sides, `lone-heron` is one posted and
+// not yet taken — one join, nobody present, and the case ADR-0012 keeps in
+// view — and `madari-relay` is minted and joined by nobody, which is the case
+// the fold must not swallow either.
 const CHANNELS = [
-  { name: "xlaptop-1", state: "open", purpose: "cross-laptop wake test", newest_id: 6, read_cursor: 6, present: 2 },
-  { name: "ops", state: "open", purpose: "backup failures land here", newest_id: 13, read_cursor: 1, present: 1 },
-  { name: "brisk-otter", state: "open", purpose: "the auth refactor", newest_id: 4, read_cursor: 1, present: 2 },
-  { name: "madari-relay", state: "open", purpose: null, newest_id: 0, read_cursor: 0, present: 0 },
-  { name: "notes-method", state: "closed", purpose: "how the vault gets written", newest_id: 1, read_cursor: 0, present: 0 },
-  { name: "deploy-quadhost", state: "open", purpose: "rolling it out", newest_id: 0, read_cursor: 0, present: 1 },
-  { name: "still-heron", state: "open", purpose: "handoff: the importer", newest_id: 3, read_cursor: 3, present: 0 }
+  { name: "xlaptop-1", state: "open", purpose: "cross-laptop wake test", newest_id: 6, read_cursor: 6, present: 2, joins: 2 },
+  { name: "ops", state: "open", purpose: "backup failures land here", newest_id: 13, read_cursor: 1, present: 1, joins: 3 },
+  { name: "brisk-otter", state: "open", purpose: "the auth refactor", newest_id: 4, read_cursor: 1, present: 2, joins: 2 },
+  { name: "madari-relay", state: "open", purpose: null, newest_id: 0, read_cursor: 0, present: 0, joins: 0 },
+  { name: "notes-method", state: "closed", purpose: "how the vault gets written", newest_id: 1, read_cursor: 0, present: 0, joins: 1 },
+  { name: "deploy-quadhost", state: "open", purpose: "rolling it out", newest_id: 0, read_cursor: 0, present: 1, joins: 1 },
+  { name: "still-heron", state: "open", purpose: "handoff: the importer", newest_id: 6, read_cursor: 6, present: 0, joins: 2 },
+  { name: "lone-heron", state: "open", purpose: "handoff: the exporter", newest_id: 3, read_cursor: 3, present: 0, joins: 1 }
 ];
 
 function element(id) {
@@ -369,7 +373,7 @@ function groups(html) {
     const it = await run({ showClosed: true });
     assert.deepStrictEqual(
       rows(it.rail()).map((row) => row.name),
-      ["brisk-otter", "deploy-quadhost", "madari-relay", "ops", "xlaptop-1", "notes-method"],
+      ["brisk-otter", "deploy-quadhost", "lone-heron", "madari-relay", "ops", "xlaptop-1", "notes-method"],
       "open first and then by name, with the closed ones under their heading"
     );
     assert.deepStrictEqual(groups(it.rail()), ["Quiet", "Closed"], "and no headings above them");
@@ -381,7 +385,7 @@ function groups(html) {
     const html = it.rail();
     assert.deepStrictEqual(
       rows(html).map((row) => row.name),
-      ["brisk-otter", "deploy-quadhost", "madari-relay", "ops", "xlaptop-1"],
+      ["brisk-otter", "deploy-quadhost", "lone-heron", "madari-relay", "ops", "xlaptop-1"],
       "the closed one is not drawn until it is asked for"
     );
     assert.ok(html.includes('aria-expanded="false"'), "and the heading says so: " + html);
@@ -416,7 +420,8 @@ function groups(html) {
   // ---- a channel nobody is in folds away under Quiet --------------------
   //
   // This is what a taken handoff looks like the moment it is taken: both
-  // sides have left, nothing is closed, and the rail stops showing it. The
+  // sides have left, the taker's join is the second one, nothing is closed,
+  // and the rail stops showing it. The
   // row is otherwise an ordinary open one — no struck hash, no state — since
   // one join brings it straight back.
   {
@@ -449,6 +454,24 @@ function groups(html) {
     assert.ok(
       rows(it.rail()).some((row) => row.name === "madari-relay"),
       "a channel with no transcript stays where the person who minted it is looking"
+    );
+  }
+
+  // ---- a handoff nobody has taken is not quiet either --------------------
+  //
+  // The other guard, ADR-0012's. `lone-heron` has a transcript and nobody
+  // present, exactly as `still-heron` does — but only one join, so nobody
+  // has arrived since it was written. It is waiting, and the person waiting
+  // on it is looking under Open.
+  {
+    const it = await run({});
+    assert.ok(
+      rows(it.rail()).some((row) => row.name === "lone-heron"),
+      "a handoff posted and not yet taken stays in view: " + it.rail()
+    );
+    assert.ok(
+      it.rail().includes('<span class="ct">1</span>'),
+      "and the quiet count is the taken one alone: " + it.rail()
     );
   }
 
@@ -516,7 +539,7 @@ function groups(html) {
   // reading a channel here never puts the item in the menu.
   {
     const it = await run({
-      channels: [{ name: "xlaptop-1", state: "open", purpose: "the wake test", newest_id: 6, present: 1 }]
+      channels: [{ name: "xlaptop-1", state: "open", purpose: "the wake test", newest_id: 6, present: 1, joins: 2 }]
     });
     const menu = it.openMenu("xlaptop-1");
     assert.ok(
@@ -552,7 +575,7 @@ function groups(html) {
     const it = await run({ pins: ["ops", "xlaptop-1"], showClosed: true });
     assert.deepStrictEqual(
       rows(it.rail()).map((row) => row.name),
-      ["ops", "xlaptop-1", "brisk-otter", "deploy-quadhost", "madari-relay", "notes-method"],
+      ["ops", "xlaptop-1", "brisk-otter", "deploy-quadhost", "lone-heron", "madari-relay", "notes-method"],
       "the pinned two are first, in their kept order and not sorted"
     );
     assert.deepStrictEqual(groups(it.rail()), ["Pinned", "Open", "Quiet", "Closed"]);
@@ -727,7 +750,7 @@ function groups(html) {
     const it = await run({
       at: "xlaptop-1",
       joined: false,
-      channels: [{ name: "xlaptop-1", state: "open", purpose: "the wake test", newest_id: 6, present: 1 }]
+      channels: [{ name: "xlaptop-1", state: "open", purpose: "the wake test", newest_id: 6, present: 1, joins: 2 }]
     });
     const [row] = rows(it.rail());
     assert.strictEqual(row.name, "xlaptop-1");
