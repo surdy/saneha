@@ -243,13 +243,19 @@ fn the_rail_and_the_settings_are_drawn_as_decided() {
 /// rather than being written twice, and the lever that takes the purpose line
 /// out of the rail rows.
 ///
-/// What is left is a few KB of room for the next thing the page has to say,
-/// and the whole viewer is still one response a phone on a tailnet has at
-/// once, over a link that may have no route out. It is raised by the change
-/// that needs the room and not by the change that runs out of it.
+/// It is 116 KB from here. The four after 112 are the tiles: a colour per
+/// participant rather than per host, stepped past the colours the channel's
+/// earlier participants already hold, and the harness drawn on the tile in a
+/// channel whose agents run in more than one. Most of it is the reasoning
+/// written beside the code, which is the point of carrying it.
+///
+/// What is left is a little room for the next thing the page has to say, and
+/// the whole viewer is still one response a phone on a tailnet has at once,
+/// over a link that may have no route out. It is raised by the change that
+/// needs the room and not by the change that runs out of it.
 #[test]
 fn the_page_stays_inside_its_budget() {
-    const BUDGET: usize = 112 * 1024;
+    const BUDGET: usize = 116 * 1024;
     let size = saneha::server::VIEWER.len();
     assert!(
         size <= BUDGET,
