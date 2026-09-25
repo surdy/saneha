@@ -156,6 +156,7 @@ function world(options) {
     if (/\/participants$/.test(url)) {
       // Nobody has joined yet is the state every channel starts in.
       if (options.joined === false) return json({ participants: [] });
+      if (options.participants) return json({ participants: options.participants });
       return json({
         participants: [{
           identity: ME, name: "surdy", host: "web", harness: "web",
@@ -885,6 +886,49 @@ function groups(html) {
       it.sandbox.document.documentElement.dataset.theme,
       "dark",
       "a private window still gets the theme it asks for, just not kept"
+    );
+  }
+
+  // Every agent in a channel is a colour of its own, whoever was there first
+  // keeps theirs when the next arrives, and a channel whose agents run in
+  // more than one harness draws the harness on the tile.
+  {
+    const agent = (name, harness, host) => ({
+      identity: name + "@" + (host || "macbookpro"), name, host: host || "macbookpro", harness,
+      cwd: null, away: false, read_cursor: 0, joined_at: "2026-09-25T09:00:00Z"
+    });
+    // Three sessions on one laptop, which the old hash drew as one colour.
+    const claude = [
+      agent("madari-dev", "claude"),
+      agent("madari-surface-parity-closeout", "claude"),
+      agent("madari-1413", "claude"),
+      agent("surdy", "web", "web")
+    ];
+    const tiles = (html) => [...html.matchAll(/class="av md (h\d)"[^>]*title="([^"]+)"[^>]*>(.*?)<\/span>/g)]
+      .map((m) => ({ slot: m[1], title: m[2], face: m[3] }));
+    const same = await run({ at: "xlaptop-1", participants: claude });
+    const one = tiles(same.el("peopleList").innerHTML);
+    assert.strictEqual(one.length, 4, "one tile per participant: " + same.el("peopleList").innerHTML);
+    const agents = one.slice(0, 3).map((t) => t.slot);
+    assert.strictEqual(new Set(agents).size, 3, "three agents on one laptop are three colours: " + agents);
+    assert.ok(!agents.includes("h0"), "and none of them is the browser's: " + agents);
+    assert.strictEqual(one[3].slot, "h0", "the person at the browser is always the first pair");
+    assert.ok(one.every((t) => !t.face.includes("<svg")), "one harness throughout, so the letters stay");
+    assert.strictEqual(one[0].title, "madari-dev@macbookpro · Claude Code", "the tile names the harness on hover");
+
+    // A Copilot joins after them: the three keep their colours, and every
+    // tile now carries its harness.
+    const mixed = await run({ at: "xlaptop-1", participants: claude.concat([agent("surdy-copilot", "copilot")]) });
+    const two = tiles(mixed.el("peopleList").innerHTML);
+    assert.deepStrictEqual(two.slice(0, 3).map((t) => t.slot), agents, "an arrival recolours nobody");
+    assert.strictEqual(new Set(two.map((t) => t.slot)).size, 5, "and takes a colour of its own");
+    assert.ok(two[0].face.includes('href="#hclaude"'), "a Claude Code tile wears its glyph: " + two[0].face);
+    assert.ok(two[4].face.includes('href="#hcopilot"'), "and the Copilot its own: " + two[4].face);
+    assert.ok(two[3].face.includes('href="#hweb"'), "the browser's too, so the tiles read as one set");
+    // The head shows four and counts the rest, so the Copilot is the +1 there.
+    assert.ok(
+      mixed.el("headAvatars").innerHTML.includes('href="#hclaude"'),
+      "the channel head's row of tiles says it too: " + mixed.el("headAvatars").innerHTML
     );
   }
 
