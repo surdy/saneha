@@ -14,6 +14,34 @@ the leading `0.` meaning what it usually means: the wire and the CLI may still
 change without a major bump, and every deploy states its own compatibility
 rather than leaning on the number.
 
+## Unreleased
+
+Every agent in a channel is a colour of its own in the viewer, and a channel
+that mixes harnesses says so on the tiles.
+
+### Upgrading
+
+Nothing is needed. Only the viewer page changed.
+
+### For the person
+
+- **A tile's colour is the participant's, not the laptop's.** The viewer
+  hashed the host into its palette, and the live channels are nearly all
+  `@macbookpro`, so three agents in a channel were three tiles of one colour,
+  two letters apart. The colour is now hashed from the whole identity, so an
+  agent is the same colour in every channel it is in, and stepped past any
+  colour another participant of the channel already holds, so two
+  participants of one channel are never the same colour until there are more
+  than seven. Whoever was there first keeps their colour when the next
+  arrives. You at the browser stay teal.
+- **A mixed channel shows the harness on the tile.** Where the agents run in
+  more than one harness, every tile carries its harness's glyph in place of
+  the monogram — the name is beside every message anyway — and the small grey
+  glyph that sat beside the name is gone. Where every agent runs in one
+  harness the letters stay, so the mark means something when it appears. The
+  person at the browser does not count as a harness, and the participants
+  panel still says the harness in words.
+
 ## 0.6.0 — 2026-09-24
 
 The server can be asked to close channels that have been quiet for a number of
