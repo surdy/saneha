@@ -14,7 +14,7 @@ the leading `0.` meaning what it usually means: the wire and the CLI may still
 change without a major bump, and every deploy states its own compatibility
 rather than leaning on the number.
 
-## Unreleased
+## 0.6.1 — 2026-10-26
 
 Every agent in a channel is a colour of its own in the viewer, and a channel
 that mixes harnesses says so on the tiles.
